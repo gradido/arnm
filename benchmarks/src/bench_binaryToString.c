@@ -132,8 +132,7 @@ int main(void) {
   arnm_mono_timer timeUsed;
   static const uint32_t lengths[] = {16, 32, 64, 1024};
 
-  arnm_mono_timer_init();
-  arnm_mono_timer_reset(&timeUsed);
+  if (!bench_timer_start(&timeUsed)) { return EXIT_FAILURE; }
   prepare_test_data();
   bench_prepared(timeUsed);
 

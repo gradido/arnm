@@ -184,7 +184,9 @@ static void test_payload_emplace(int stepCount) {
   bvec_payload_init(&v, BVEC_PAYLOAD_LOG2, BVEC_GROW_DEFAULT, NULL);
   require_ok(bvec_payload_reserve(&v, (uint32_t)stepCount), "reserve payload");
   for (int i = 0; i < stepCount; ++i) {
-    if (bvec_payload_emplace(&v, &slot) != ARNM_SUCCESS) break;
+    // stops the run rather than the loop: leaving early would hand bench_step a step that did
+    // less work than the count it divides by, and the row would print as the fastest here
+    require_ok(bvec_payload_emplace(&v, &slot), "emplace payload");
     memset(slot, 0, sizeof(*slot));
     slot->id = (uint64_t)i;
   }
@@ -293,8 +295,7 @@ int main(void) {
   arnm_mono_timer timeUsed;
   const int stepCount = ELEMENT_COUNT;
 
-  arnm_mono_timer_init();
-  arnm_mono_timer_reset(&timeUsed);
+  if (!bench_timer_start(&timeUsed)) { return EXIT_FAILURE; }
   prepare_test_data();
   bench_prepared(timeUsed);
 

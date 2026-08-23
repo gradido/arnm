@@ -100,8 +100,7 @@ static void prepare_test_data(void) {
 int main(void) {
   arnm_mono_timer timeUsed;
 
-  arnm_mono_timer_init();
-  arnm_mono_timer_reset(&timeUsed);
+  if (!bench_timer_start(&timeUsed)) { return EXIT_FAILURE; }
   prepare_test_data();
   bench_prepared(timeUsed);
 

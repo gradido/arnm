@@ -15,6 +15,105 @@ than left to be discovered.
 Entries before 0.4.0 were reconstructed from the git history after the fact, so they summarise
 what the commits show rather than what was noted at the time.
 
+## Unreleased
+
+The arena and the multi arena became one allocator behind one handle. A consumer that only ever
+called `arnm_alloc()` and `arnm_free()` is unaffected; one that named the multi arena's own
+functions or read fields out of the descriptor has work to do, and every such change is below.
+
+### Changed
+
+- **`arnm` is opaque.** The descriptor is a sized 32 byte struct with no readable fields, so it
+  can still live on the stack or inside another allocation while nothing outside the library
+  depends on its layout. Code that read `last_index`, `capacity` or `data` asks
+  `arnm_multi_arena_measure()` or `arnm_arena_overflow_total()` instead; code that reached for
+  them to tell allocators apart asks `arnm_is_arena()` or `arnm_is_multi_arena()`.
+- **The multi arena is reached through the same calls as everything else.** It has no public
+  struct and no functions of its own for allocation: `arnm_multi_arena_init/_alloc/_free/
+  _realloc/_clone/_reset/_release/_destroy` are gone. A chain comes from
+  `arnm_create_multi_arena()` as an `arnm *` and is then handed to `arnm_alloc()`,
+  `arnm_free()`, `arnm_reset()`, `arnm_destroy()` -- the same names an arena takes. What remains
+  chain specific is what only a chain can answer: `_reserve()`, `_borrow()`, `_shrink()`,
+  `_arena_count()`, `_measure()`.
+- **`arnm_create_multi_arena()` takes an options struct and one allocator.** It was
+  `(capacity, full_remaining, bookkeeping_allocator, descriptor_allocator)`; it is now
+  `(arnm_multi_arena_options *, arnm *allocator)`, where `{0}` selects every default and the one
+  allocator carries both the handle and the descriptor vector. The arenas themselves still come
+  from the host, since a chain that drew them from a fixed allocator could not outgrow it.
+  `arnm_multi_arena_options_validate()` answers *why* a set was refused, which the old two-step
+  could not.
+- **Arena setup moved to `arnm/arena.h`,** and `arnm_overflow_total()` is now
+  `arnm_arena_overflow_total()` -- it only ever answered for a single arena, and the name now
+  says so.
+- **`arnm_align8_u32()` returns the rounded size** instead of a bool with an out parameter; 0 is
+  the refusal. Every caller already rejected a size of 0 first, so folding "nothing to round"
+  into "cannot be rounded" costs nothing and removes a parameter.
+- **A bucket vector names its element type at `_init`, not in its type.**
+  `ARNM_BVEC_STATIC(name, type, log2)` is gone; `ARNM_BVEC_DEFINE(name, type)` generates the
+  typed accessors and every vector is an `arnm_bvec`, with the bucket exponent and the growth
+  step passed to `arnm_bvec_init()`. `ARNM_BVEC_FOREACH` is gone with it -- walk by index, or
+  bucket by bucket through `arnm_bvec_bucket_data()`.
+- **A bucket vector has a new ceiling, and it is the tighter one.**
+  `ARNM_BVEC_MAX_INDEX_CAPACITY` is bounded by the counters the index array is measured in
+  rather than by what the allocator would hand out in one go, which puts a vector at that many
+  buckets times its bucket capacity -- 8191 x 2^log2 today. A bucket exponent is therefore a
+  capacity decision, not only a memory one: below 2^9 no vector holds four million elements at
+  all. The index array also grows by a named step now rather than by doubling, so a vector that
+  knows its size should call `arnm_bvec_reserve()` -- behind an arena especially, where every
+  regrowth strands the previous array.
+- **A zeroed `arnm_bvec` is no longer a usable empty vector.** The element size lives in the
+  descriptor now, so one that never saw `arnm_bvec_init()` reads as empty through every accessor
+  and refuses every write with `ARNM_ERROR_INVALID_STATE`. `arnm_bvec_init()` also refuses a
+  bucket exponent of 0; the smallest bucket holds two elements.
+- **`arnm_bvec_reserve(v, 0)` is refused** with `ARNM_ERROR_INVALID_PARAM`, where it used to
+  succeed as a no-op. A count that computed to nothing is the caller's arithmetic going wrong.
+- **The full threshold is asked before the fit.** An arena whose remainder has fallen to the
+  threshold leaves the chain's scan for good, even for a later request its remainder could still
+  have held -- giving up that tail is what the threshold buys. The boundary is `remaining <=
+  full_remaining`, which is the reading `arnm_multi_arena_options_validate()` already assumed
+  when it refuses a threshold that reaches the capacity.
+- **A chain tells a foreign address from a buried block.** `arnm_free()` and `arnm_realloc()`
+  now find the arena a block came from, so freeing the tail of *any* arena in the chain reclaims
+  it -- previously only the last arena was consulted, and everything else answered
+  `ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED`. An arena that has room again rejoins the scan. An
+  address no arena of the chain owns is now `ARNM_ERROR_INVALID_PARAM` rather than that same
+  warning.
+- **A tail block that outgrows its arena moves within the chain.** `arnm_realloc()` takes a
+  fresh block from another arena, copies the contents and hands the old one back, answering
+  `ARNM_SUCCESS`; it used to answer `ARNM_ERROR_OUT_OF_MEMORY`. A single arena still refuses --
+  it has nowhere else to go -- and a buried block still moves without reclaiming, as before.
+- **Every call in `arnm/bucket_vector.h` checks its pointers.** `arnm_bvec_clear()`,
+  `_emplace()`, `_push_ptr()` and `_pop()` used to read the descriptor before anything else.
+- The public headers carry full reference documentation, and the doxygen run is warning free.
+
+### Fixed
+
+- **A multi arena leaked everything it held.** `arnm_release()` tested `is_arena()` first, which
+  is true for a chain as well, so the branch that releases the arenas and the descriptor vector
+  was never reached. Every arena body and the vector stayed with the host until the process
+  ended.
+- **`arnm_fixed_arena_pool` wrote its free list over its own descriptors.** The link belongs in
+  the first bytes of a free arena's *buffer*; it was going into `arena->bytes`, which is the
+  descriptor, whose first eight bytes are the pointer to that buffer. The first allocation out of
+  a pooled arena landed on whatever address the link had held.
+- **`arnm_bvec_reserve()` divided by zero** on a descriptor that never saw `arnm_bvec_init()`:
+  the state check accepted an all-zero descriptor, and the bound is computed against the element
+  size. It is now rejected with `ARNM_ERROR_INVALID_STATE`.
+- **`arnm_free(buffer, 0, arena)` reported `ARNM_ERROR_ARITHMETIC_OVERFLOW`.** A size of 0 did
+  not overflow; it is nothing to give back, and it now takes the same warning a buried block
+  takes. `arnm_realloc()` had the same confusion, which made its documented "`new_size` 0
+  releases the block" path unreachable and refused a fresh allocation from `old_size` 0.
+- **`arnm_multi_arena_options_validate()` passed options that `arnm_create_multi_arena()` then
+  refused.** It resolved only the capacity, so a threshold of 0 was compared as 0 there and as
+  the default afterwards. It fills in every default now, which is what makes it answer about the
+  values a chain is really built on.
+- **`arnm_result_to_string(ARNM_ERROR_RESOURCE_SIZE_EXCEED)` answered
+  `"ARNM_ERROR_UNKNOWN"`** -- the value had no entry in the message table. `test_result` now
+  walks the whole range, so a value added without its string fails the suite.
+- `Doxyfile` carried absolute paths for `OUTPUT_DIRECTORY` and `INPUT`, so a checkout anywhere
+  else documented nothing -- or, on the machine those paths pointed at, silently documented the
+  other tree. Both are repository relative.
+
 ## 0.5.0 -- 2026-08-21
 
 ### Changed

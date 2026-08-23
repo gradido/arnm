@@ -166,6 +166,7 @@ arnm_result arnm_bvec_shrink(arnm_bvec *v) {
 }
 
 void arnm_bvec_clear(arnm_bvec *v) {
+  if (!v) return;
   v->tail = NULL;
   v->tail_index = 0;
   v->tail_used = bucket_capacity(v->bucket_capacity_max_log2); /* no bucket open, as after _init */
@@ -212,8 +213,7 @@ arnm_result arnm_bvec_grow(arnm_bvec *v, void **out_slot) {
     }
     uint8_t *bucket = NULL;
     arnm_result result = arnm_alloc(
-        &bucket, bucket_bytes(v->element_size, v->bucket_capacity_max_log2),
-        v->allocator
+        &bucket, bucket_bytes(v->element_size, v->bucket_capacity_max_log2), v->allocator
     );
     if (result != ARNM_SUCCESS) return result;
     v->buckets[bucket_count++] = bucket;
@@ -227,6 +227,7 @@ arnm_result arnm_bvec_grow(arnm_bvec *v, void **out_slot) {
 }
 
 arnm_result arnm_bvec_emplace(arnm_bvec *v, void **out_slot) {
+  if (!v || !out_slot) return ARNM_ERROR_NULL_POINTER;
   if (v->tail && v->tail_used < bucket_capacity(v->bucket_capacity_max_log2)) {
     *out_slot = (uint8_t *)v->tail + (size_t)v->tail_used * v->element_size;
     v->tail_used++;
@@ -237,6 +238,7 @@ arnm_result arnm_bvec_emplace(arnm_bvec *v, void **out_slot) {
 }
 
 arnm_result arnm_bvec_push_ptr(arnm_bvec *v, const void *value) {
+  if (!v || !value) return ARNM_ERROR_NULL_POINTER;
   void *slot;
   arnm_result result = arnm_bvec_emplace(v, &slot);
   if (result != ARNM_SUCCESS) return result;
@@ -245,6 +247,7 @@ arnm_result arnm_bvec_push_ptr(arnm_bvec *v, const void *value) {
 }
 
 arnm_result arnm_bvec_pop(arnm_bvec *v) {
+  if (!v) return ARNM_ERROR_NULL_POINTER;
   if (!v->size) return ARNM_ERROR_ARRAY_INDEX_OUT_OF_BOUNDS;
   v->size--;
   if (--v->tail_used == 0) {

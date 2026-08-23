@@ -1,6 +1,6 @@
+#include "arnm/memory.h"
 #include "arnm/arena.h"
 #include "arnm/bucket_vector.h"
-#include "arnm/memory.h"
 #include "arnm/multi_arena.h"
 #include "arnm/result.h"
 #include "memory_intern.h"
@@ -24,27 +24,28 @@ arnm *arnm_create(arnm *allocator) {
 
 void arnm_reset(arnm *m) {
   if (!m) return;
-  arnm_intern* memory = (arnm_intern*)m;
+  arnm_intern *memory = (arnm_intern *)m;
   switch (memory->allocation_type) {
-    case ARNM_ALLOC_TYPE_DEFAULT: break;
-    case ARNM_ALLOC_TYPE_ARENA_OWNED:
-    case ARNM_ALLOC_TYPE_ARENA_EXTERNAL:
-      memory->last_index = 0;
-      memory->out_of_memory_capacity = 0;
-      break;
-    case ARNM_ALLOC_TYPE_MULTI_ARENA_DYNAMIC:
-    case ARNM_ALLOC_TYPE_MULTI_ARENA_FIXED:
-      for (uint32_t i = 0; i < arnm_bvec_size(&memory->multi_arena->arenas); i++) {
-        arnm_reset((arnm *)arnm_bvec_at(&memory->multi_arena->arenas, i));
-      }
-      memory->multi_arena->first_open = 0;
-      break;
+  case ARNM_ALLOC_TYPE_DEFAULT:
+    break;
+  case ARNM_ALLOC_TYPE_ARENA_OWNED:
+  case ARNM_ALLOC_TYPE_ARENA_EXTERNAL:
+    memory->last_index = 0;
+    memory->out_of_memory_capacity = 0;
+    break;
+  case ARNM_ALLOC_TYPE_MULTI_ARENA_DYNAMIC:
+  case ARNM_ALLOC_TYPE_MULTI_ARENA_FIXED:
+    for (uint32_t i = 0; i < arnm_bvec_size(&memory->multi_arena->arenas); i++) {
+      arnm_reset((arnm *)arnm_bvec_at(&memory->multi_arena->arenas, i));
+    }
+    memory->multi_arena->first_open = 0;
+    break;
   }
 }
 
 void arnm_release(arnm *m) {
   if (!m) return;
-  arnm_intern* memory = (arnm_intern*)m;
+  arnm_intern *memory = (arnm_intern *)m;
   // is_arena() would answer true for a chain as well and swallow the branch below, leaving
   // every arena body and the descriptor vector behind
   if (is_single_arena(memory)) {
@@ -56,7 +57,7 @@ void arnm_release(arnm *m) {
     memory->capacity = 0;
     arnm_reset(m);
   } else if (is_multi_arena(memory)) {
-    arnm_bvec* arenas = &memory->multi_arena->arenas;
+    arnm_bvec *arenas = &memory->multi_arena->arenas;
     // owned arenas give their buffer back, borrowed ones are simply let go
     for (uint32_t i = 0; i < arnm_bvec_size(arenas); i++) {
       arnm_release((arnm *)arnm_bvec_at(arenas, i));
@@ -65,7 +66,6 @@ void arnm_release(arnm *m) {
     arnm_bvec_free(arenas);
     memory->multi_arena->first_open = 0;
   }
-
 }
 
 arnm_result arnm_destroy(arnm *m, arnm *allocator) {
@@ -73,7 +73,7 @@ arnm_result arnm_destroy(arnm *m, arnm *allocator) {
   // "something stayed behind" when nothing was ever handed out
   if (!m) { return ARNM_SUCCESS; }
   arnm_release(m);
-  arnm_intern* memory = (arnm_intern*)m;
+  arnm_intern *memory = (arnm_intern *)m;
   if (is_multi_arena(memory)) {
     uint32_t allocation_size = sizeof(arnm) + sizeof(arnm_multi_arena);
     return arnm_free((uint8_t *)memory, allocation_size, allocator);
@@ -85,7 +85,9 @@ arnm_result arnm_destroy(arnm *m, arnm *allocator) {
 }
 // **************** arena functions *******************************************************
 
-static bool is_single_arena_reclaimable(const uint8_t *buffer, uint32_t aligned_size, const arnm_intern *memory) {
+static bool is_single_arena_reclaimable(
+    const uint8_t *buffer, uint32_t aligned_size, const arnm_intern *memory
+) {
   if (is_single_arena(memory) && buffer && aligned_size) {
     return memory->data + memory->last_index - aligned_size == buffer;
   }
@@ -94,15 +96,13 @@ static bool is_single_arena_reclaimable(const uint8_t *buffer, uint32_t aligned_
 
 // bytes still to be had from this arena. last_index never passes capacity, so this cannot wrap
 static inline uint32_t remaining_bytes(const arnm_intern *memory) {
-  if (is_single_arena(memory)) {
-    return memory->capacity - memory->last_index;
-  }
+  if (is_single_arena(memory)) { return memory->capacity - memory->last_index; }
   return 0;
 }
 
 // true implies memory != NULL, so callers can skip their own null check
 bool arnm_is_arena(const arnm *m) {
-  return (is_arena((const arnm_intern*)m));
+  return (is_arena((const arnm_intern *)m));
 }
 // true implies memory != NULL, so callers can skip their own null check
 static inline bool has_out_of_memory_capacity_check(const arnm_intern *memory) {
@@ -110,13 +110,13 @@ static inline bool has_out_of_memory_capacity_check(const arnm_intern *memory) {
 }
 
 size_t arnm_arena_overflow_total(const arnm *m) {
-  const arnm_intern* memory = (const arnm_intern*)m;
+  const arnm_intern *memory = (const arnm_intern *)m;
   if (!has_out_of_memory_capacity_check(memory)) { return 0; }
   return memory->out_of_memory_capacity;
 }
 
 // True if the request runs past the end. Records the shortfall for
-// arnm_overflow_total(), saturating -- a counter that rolls over to a small number
+// arnm_arena_overflow_total(), saturating -- a counter that rolls over to a small number
 // is worse than one that is capped.
 static bool account_capacity_exceeded(uint32_t aligned_size, arnm_intern *memory) {
   if (has_out_of_memory_capacity_check(memory)) {
@@ -145,7 +145,7 @@ arnm_result arnm_init_arena(arnm *m, uint32_t capacity) {
   if (ARNM_SUCCESS != result) { return result; }
 
   // every field is written, none is read: uninitialized storage is a valid input
-  arnm_intern* memory = (arnm_intern*)m;
+  arnm_intern *memory = (arnm_intern *)m;
   memory->data = data;
   memory->last_index = 0;
   memory->capacity = aligned_capacity;
@@ -156,19 +156,18 @@ arnm_result arnm_init_arena(arnm *m, uint32_t capacity) {
 
 arnm_result arnm_init_arena_borrow(arnm *m, uint8_t *data, uint32_t capacity) {
   if (!m || !data) return ARNM_ERROR_NULL_POINTER;
-  if(!capacity) return ARNM_ERROR_INVALID_PARAM;
+  if (!capacity) return ARNM_ERROR_INVALID_PARAM;
   uint32_t aligned_capacity = arnm_align8_u32(capacity);
   if (!aligned_capacity) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
   // Rejected, not rounded: an unaligned base would break the "every pointer is 8 byte
   // aligned" invariant, and a rounded up capacity would let the arena bump past the end of
   // a buffer the caller sized exactly.
-  if (aligned_capacity != capacity ||
-      ARNM_ALIGN8((uintptr_t)data) != (uintptr_t)data) {
+  if (aligned_capacity != capacity || ARNM_ALIGN8((uintptr_t)data) != (uintptr_t)data) {
     return ARNM_ERROR_INVALID_PARAM;
   }
 
   // like arnm_init_arena: writes every field, reads none
-  arnm_intern* memory = (arnm_intern*)m;
+  arnm_intern *memory = (arnm_intern *)m;
   memory->data = data;
   memory->capacity = aligned_capacity;
   memory->allocation_type = ARNM_ALLOC_TYPE_ARENA_EXTERNAL;
@@ -189,7 +188,7 @@ static inline arnm_result multi_arena_push(arnm_multi_arena *m, arnm *arena) {
   return ARNM_SUCCESS;
 }
 
-static inline bool multi_arena_is_borrowed(arnm_intern* arena) {
+static inline bool multi_arena_is_borrowed(arnm_intern *arena) {
   return ARNM_ALLOC_TYPE_ARENA_EXTERNAL == arena->allocation_type;
 }
 
@@ -206,8 +205,9 @@ static inline bool multi_arena_is_borrowed(arnm_intern* arena) {
 // opened after that sits further back still. Freeing what was just handed out -- the one case
 // an arena can reclaim at all -- therefore hits on the first step or close to it. The arenas
 // before the marker are reached last, and only for a block that is buried anyway.
-static arnm_intern *
-multi_arena_find_owner(const arnm_multi_arena *m, const uint8_t *buffer, uint32_t *out_index) {
+static arnm_intern *multi_arena_find_owner(
+    const arnm_multi_arena *m, const uint8_t *buffer, uint32_t *out_index
+) {
   if (!m || !buffer) { return NULL; }
   const uint32_t count = arnm_bvec_size(&m->arenas);
   if (!count) { return NULL; }
@@ -235,8 +235,9 @@ multi_arena_find_owner(const arnm_multi_arena *m, const uint8_t *buffer, uint32_
 // on its own it only ever walks forward -- so an arena that filled up, was passed by, and then
 // gave a block back would stay out of the scan for good. Pull the marker back onto it, unless
 // what it holds is under the threshold the chain writes off anyway.
-static inline void
-multi_arena_reopen(arnm_multi_arena *m, const arnm_intern *arena, uint32_t index) {
+static inline void multi_arena_reopen(
+    arnm_multi_arena *m, const arnm_intern *arena, uint32_t index
+) {
   if (index < m->first_open && !arnm_arena_is_used_up(remaining_bytes(arena), m->full_remaining)) {
     m->first_open = index;
   }
@@ -244,18 +245,23 @@ multi_arena_reopen(arnm_multi_arena *m, const arnm_intern *arena, uint32_t index
 
 // true implies memory != NULL, so callers can skip their own null check
 bool arnm_is_multi_arena(const arnm *m) {
-  return is_multi_arena((const arnm_intern*)m);
+  return is_multi_arena((const arnm_intern *)m);
 }
 
 static inline void multi_arena_options_fill_in_defaults(arnm_multi_arena_options *options) {
   if (!options) return;
-  options->arena_capacity = !options->arena_capacity ? ARNM_MULTI_ARENA_DEFAULT_CAPACITY :  options->arena_capacity;
-  options->full_remaining = !options->full_remaining ? ARNM_MULTI_ARENA_DEFAULT_FULL_REMAINING : options->full_remaining;
-  options->bucket_size_log2 = !options->bucket_size_log2 ? ARNM_MULTI_ARENA_DEFAULT_BUCKET_LOG2 : options->bucket_size_log2;
-  options->index_grow_step_size = !options->index_grow_step_size ? ARNM_BVEC_DEFAULT_INDEX_GROW_STEP_SIZE : options->index_grow_step_size;
+  options->arena_capacity =
+      !options->arena_capacity ? ARNM_MULTI_ARENA_DEFAULT_CAPACITY : options->arena_capacity;
+  options->full_remaining =
+      !options->full_remaining ? ARNM_MULTI_ARENA_DEFAULT_FULL_REMAINING : options->full_remaining;
+  options->bucket_size_log2 =
+      !options->bucket_size_log2 ? ARNM_MULTI_ARENA_DEFAULT_BUCKET_LOG2 : options->bucket_size_log2;
+  options->index_grow_step_size = !options->index_grow_step_size
+                                      ? ARNM_BVEC_DEFAULT_INDEX_GROW_STEP_SIZE
+                                      : options->index_grow_step_size;
 }
 
-arnm_result arnm_multi_arena_options_validate(arnm_multi_arena_options* options) {
+arnm_result arnm_multi_arena_options_validate(arnm_multi_arena_options *options) {
   if (!options) return ARNM_ERROR_NULL_POINTER;
   // The defaults are filled in here and not by the caller, so that this function answers about
   // the values a chain would really be built on. It used to resolve only the capacity, which
@@ -287,8 +293,8 @@ arnm *arnm_create_multi_arena(arnm_multi_arena_options *options, arnm *allocator
     arnm_free(buffer, allocation_size, allocator);
     return NULL;
   }
-  memory->allocation_type =
-      options->arena_max_count ? ARNM_ALLOC_TYPE_MULTI_ARENA_FIXED : ARNM_ALLOC_TYPE_MULTI_ARENA_DYNAMIC;
+  memory->allocation_type = options->arena_max_count ? ARNM_ALLOC_TYPE_MULTI_ARENA_FIXED
+                                                     : ARNM_ALLOC_TYPE_MULTI_ARENA_DYNAMIC;
   memory->multi_arena = (arnm_multi_arena *)(buffer + sizeof(arnm));
 
   arnm_multi_arena *m = memory->multi_arena;
@@ -297,7 +303,10 @@ arnm *arnm_create_multi_arena(arnm_multi_arena_options *options, arnm *allocator
   m->arena_max_count = options->arena_max_count;
   m->full_remaining = options->full_remaining;
   m->first_open = 0;
-  if(ARNM_SUCCESS != arnm_bvec_init(&m->arenas, options->bucket_size_log2, options->index_grow_step_size, sizeof(arnm), allocator)) {
+  if (ARNM_SUCCESS != arnm_bvec_init(
+                          &m->arenas, options->bucket_size_log2, options->index_grow_step_size,
+                          sizeof(arnm), allocator
+                      )) {
     arnm_free(buffer, allocation_size, allocator);
     return NULL;
   }
@@ -307,7 +316,7 @@ arnm *arnm_create_multi_arena(arnm_multi_arena_options *options, arnm *allocator
 
 arnm_result arnm_multi_arena_reserve(arnm *m, uint32_t arena_count) {
   if (!m) { return ARNM_ERROR_NULL_POINTER; }
-  arnm_intern* memory = (arnm_intern*)m;
+  arnm_intern *memory = (arnm_intern *)m;
   if (!is_multi_arena(memory)) return ARNM_ERROR_INVALID_STATE;
   if (memory->multi_arena->arena_max_count && arena_count > memory->multi_arena->arena_max_count) {
     return ARNM_ERROR_RESOURCE_EXHAUSTED;
@@ -317,9 +326,10 @@ arnm_result arnm_multi_arena_reserve(arnm *m, uint32_t arena_count) {
 
 arnm_result arnm_multi_arena_borrow(arnm *m, uint8_t *data, uint32_t capacity) {
   if (!m || !data) { return ARNM_ERROR_NULL_POINTER; }
-  arnm_intern* memory = (arnm_intern*)m;
+  arnm_intern *memory = (arnm_intern *)m;
   if (!is_multi_arena(memory)) return ARNM_ERROR_INVALID_STATE;
-  if (memory->multi_arena->arena_max_count && memory->multi_arena->arena_max_count < arnm_bvec_size(&memory->multi_arena->arenas) + 1) {
+  if (memory->multi_arena->arena_max_count &&
+      memory->multi_arena->arena_max_count < arnm_bvec_size(&memory->multi_arena->arenas) + 1) {
     return ARNM_ERROR_RESOURCE_EXHAUSTED;
   }
   // the borrowed block is checked by the arena itself; nothing is appended if it is unfit
@@ -332,56 +342,51 @@ arnm_result arnm_multi_arena_borrow(arnm *m, uint8_t *data, uint32_t capacity) {
 
 arnm_result arnm_multi_arena_shrink(arnm *m) {
   if (!m) { return ARNM_ERROR_NULL_POINTER; }
-  arnm_intern* memory = (arnm_intern*)m;
+  arnm_intern *memory = (arnm_intern *)m;
   if (!is_multi_arena(memory)) return ARNM_ERROR_INVALID_STATE;
-  arnm_bvec* arenas = &memory->multi_arena->arenas;
+  arnm_bvec *arenas = &memory->multi_arena->arenas;
 
   // youngest first, and stop at the first arena that is still holding something or that we do
   // not own. Removing from the middle would renumber the chain for nothing gained.
   arnm_intern *last_arena;
   while ((last_arena = arnm_bvec_back(arenas)) != NULL) {
     if (last_arena->last_index || multi_arena_is_borrowed(last_arena)) { break; }
-    arnm_release((arnm*)last_arena);
+    arnm_release((arnm *)last_arena);
     (void)arnm_bvec_pop(arenas);
   }
 
   uint32_t count = arnm_bvec_size(arenas);
-  if (memory->multi_arena->first_open > count) {
-    memory->multi_arena->first_open = count;
-  }
+  if (memory->multi_arena->first_open > count) { memory->multi_arena->first_open = count; }
   return arnm_bvec_shrink(arenas);
 }
 
 uint32_t arnm_multi_arena_arena_count(const arnm *m) {
-  const arnm_intern* memory = (const arnm_intern*)m;
-  return is_multi_arena(memory) ?
-    arnm_bvec_size(&memory->multi_arena->arenas)
-    : 0
-  ;
+  const arnm_intern *memory = (const arnm_intern *)m;
+  return is_multi_arena(memory) ? arnm_bvec_size(&memory->multi_arena->arenas) : 0;
 }
 
 arnm_result arnm_multi_arena_measure(const arnm *m, arnm_multi_arena_stats *out) {
   if (!m || !out) { return ARNM_ERROR_NULL_POINTER; }
-  arnm_intern* memory = (arnm_intern*)m;
+  arnm_intern *memory = (arnm_intern *)m;
   if (!is_multi_arena(memory)) return ARNM_ERROR_INVALID_STATE;
-  arnm_multi_arena* multi_arena = memory->multi_arena;
-  arnm_bvec* arenas = &multi_arena->arenas;
+  arnm_multi_arena *multi_arena = memory->multi_arena;
+  arnm_bvec *arenas = &multi_arena->arenas;
 
   // uint64 for the sums: a single arena is measured in uint32_t, a chain of them is not
   arnm_multi_arena_stats stats = {0};
   stats.arena_count = arnm_bvec_size(arenas);
 
   for (uint32_t i = 0; i < stats.arena_count; ++i) {
-      arnm_intern* arena = (arnm_intern *)arnm_bvec_at(arenas, i);
-      if (is_single_arena(arena)) {
-        stats.reserved += arena->capacity;
-        stats.used += arena->last_index;
-        if (!arnm_arena_is_used_up(remaining_bytes(arena), multi_arena->full_remaining)) {
-          stats.open_count++;
-        }
-      } else {
-        return ARNM_ERROR_INVALID_STATE;
+    arnm_intern *arena = (arnm_intern *)arnm_bvec_at(arenas, i);
+    if (is_single_arena(arena)) {
+      stats.reserved += arena->capacity;
+      stats.used += arena->last_index;
+      if (!arnm_arena_is_used_up(remaining_bytes(arena), multi_arena->full_remaining)) {
+        stats.open_count++;
       }
+    } else {
+      return ARNM_ERROR_INVALID_STATE;
+    }
   }
   memcpy(out, &stats, sizeof(arnm_multi_arena_stats));
   return ARNM_SUCCESS;
@@ -393,7 +398,7 @@ arnm_result arnm_multi_arena_measure(const arnm *m, arnm_multi_arena_stats *out)
 static arnm_result multi_arena_alloc(uint8_t **buffer, uint32_t aligned_size, arnm_multi_arena *m);
 
 static arnm_result arena_alloc_aligned(uint8_t **buffer, uint32_t aligned_size, arnm *m) {
-  arnm_intern* memory = (arnm_intern*)m;
+  arnm_intern *memory = (arnm_intern *)m;
   assert(is_arena(memory) && "expect arena allocator");
 
   // can only be happen, if caller access memory directly and mess with the state
@@ -401,18 +406,16 @@ static arnm_result arena_alloc_aligned(uint8_t **buffer, uint32_t aligned_size, 
 
   // align with 8 Bytes
   if (is_single_arena(memory)) {
-    if (account_capacity_exceeded(aligned_size, memory))
-      return ARNM_ERROR_OUT_OF_MEMORY;
+    if (account_capacity_exceeded(aligned_size, memory)) return ARNM_ERROR_OUT_OF_MEMORY;
 
     // last_index is already a multiple of 8, so no padding is needed here
     *buffer = memory->data + memory->last_index;
     memory->last_index += aligned_size;
-  } else if(is_multi_arena(memory)) {
+  } else if (is_multi_arena(memory)) {
     return multi_arena_alloc(buffer, aligned_size, memory->multi_arena);
   }
   return ARNM_SUCCESS;
 }
-
 
 static arnm_result multi_arena_alloc(uint8_t **buffer, uint32_t aligned_size, arnm_multi_arena *m) {
   if (!buffer || !m) { return ARNM_ERROR_NULL_POINTER; }
@@ -426,7 +429,7 @@ static arnm_result multi_arena_alloc(uint8_t **buffer, uint32_t aligned_size, ar
   // would keep visiting arenas that only ever serve the smallest requests.
   // arnm_arena_is_used_up() carries where the line sits; see memory_intern.h.
   for (uint32_t i = m->first_open; i < count; ++i) {
-    arnm_intern* arena = (arnm_intern*)arnm_bvec_get(&m->arenas, i);
+    arnm_intern *arena = (arnm_intern *)arnm_bvec_get(&m->arenas, i);
     if (!arena) break;
     const uint32_t remaining = remaining_bytes(arena);
     if (arnm_arena_is_used_up(remaining, m->full_remaining)) {
@@ -436,7 +439,9 @@ static arnm_result multi_arena_alloc(uint8_t **buffer, uint32_t aligned_size, ar
       continue;
     }
     // above the threshold but too small for this request: walked over, not written off
-    if (remaining >= aligned_size) { return arena_alloc_aligned(buffer, aligned_size, (arnm*)arena); }
+    if (remaining >= aligned_size) {
+      return arena_alloc_aligned(buffer, aligned_size, (arnm *)arena);
+    }
   }
 
   if (m->arena_max_count && count >= m->arena_max_count) { return ARNM_ERROR_RESOURCE_EXHAUSTED; }
@@ -459,7 +464,7 @@ static arnm_result multi_arena_alloc(uint8_t **buffer, uint32_t aligned_size, ar
 arnm_result arnm_alloc(uint8_t **buffer, uint32_t size, arnm *m) {
   if (!buffer) { return ARNM_ERROR_NULL_POINTER; }
   if (!size) { return ARNM_ERROR_INVALID_PARAM; }
-  arnm_intern* memory = (arnm_intern*)m;
+  arnm_intern *memory = (arnm_intern *)m;
   if (!is_arena(memory)) {
     uint8_t *allocated = (uint8_t *)malloc(size);
     if (!allocated) { return ARNM_ERROR_OUT_OF_MEMORY; }
@@ -492,7 +497,7 @@ arnm_result arnm_realloc(uint8_t **buffer, uint32_t old_size, uint32_t new_size,
   // deliberately below the release check: (0, 0) means free, not "same size, nothing to do"
   if (*buffer && old_size == new_size) { return ARNM_SUCCESS; }
 
-  arnm_intern* memory = (arnm_intern*)m;
+  arnm_intern *memory = (arnm_intern *)m;
   // realloc in non arena mode
   if (!is_arena(memory)) {
     // realloc(NULL, n) is malloc(n), so a fresh buffer works here too
@@ -503,7 +508,7 @@ arnm_result arnm_realloc(uint8_t **buffer, uint32_t old_size, uint32_t new_size,
     return ARNM_SUCCESS;
   }
 
-  arnm_intern* single_arena = memory;
+  arnm_intern *single_arena = memory;
   uint32_t owner_index = 0;
   if (is_multi_arena(memory)) {
     single_arena = multi_arena_find_owner(memory->multi_arena, *buffer, &owner_index);
@@ -584,7 +589,7 @@ arnm_result arnm_clone(uint8_t **dst_buffer, const uint8_t *src, uint32_t size, 
 }
 
 arnm_result arnm_free(uint8_t *buffer, uint32_t size, arnm *m) {
-  arnm_intern* memory = (arnm_intern*)m;
+  arnm_intern *memory = (arnm_intern *)m;
   if (!is_arena(memory)) {
     free(buffer);
     return ARNM_SUCCESS;
@@ -596,7 +601,7 @@ arnm_result arnm_free(uint8_t *buffer, uint32_t size, arnm *m) {
   if (size && !aligned_size) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
 
   // see arnm_realloc: the last arena is not the one the block came from
-  arnm_intern* single_arena = memory;
+  arnm_intern *single_arena = memory;
   uint32_t owner_index = 0;
   if (is_multi_arena(memory)) {
     single_arena = multi_arena_find_owner(memory->multi_arena, buffer, &owner_index);

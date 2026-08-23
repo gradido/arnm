@@ -24,6 +24,13 @@ extern "C" {
  * @{
  */
 
+/**
+ * @brief A point on the monotonic clock, as taken by arnm_mono_timer_reset().
+ *
+ * Opaque in meaning although plain in type: what the number counts is the platform's business
+ * (ticks on Windows, nanoseconds elsewhere). Only pass it back to the functions here -- read
+ * as a duration it says nothing, and two of them are comparable only through them.
+ */
 typedef int64_t arnm_mono_timer;
 
 /**

@@ -1,7 +1,7 @@
 const std = @import("std");
 const zcc = @import("compile_commands");
 
-/// Warning flags every first-party C source is compiled with.
+/// Flags every first-party C source is compiled with.
 ///
 /// -Wconversion earns its place here because this library narrows on purpose and often:
 /// element_size into a uint16_t field, element counts into bucket counts, bucket counts into
@@ -21,7 +21,17 @@ const zcc = @import("compile_commands");
 ///
 /// -c and not -fsyntax-only: zig 0.15.1 answers the latter with "error: FileNotFound" no matter
 /// what it is handed, so the diagnostics arrive but the exit code is useless.
-const c_warning_flags = [_][]const u8{"-Wconversion"};
+/// The language standard is named rather than inherited, so this build and the CMake one
+/// compile the same language. CMake pins C11 and leaves CMAKE_C_EXTENSIONS at its default, so
+/// it hands gcc `-std=gnu11`; without a flag here zig cc would pick its own default, which is
+/// gnu17 today and is free to move.
+///
+/// gnu11 and not c11: `clock_gettime` and `CLOCK_MONOTONIC` are POSIX, not ISO C, and strict
+/// `-std=c11` leaves the feature test macros undefined that make them visible --
+/// src/mono_timer.c then fails on an undeclared `clock_gettime`. The alternative is
+/// `-std=c11 -D_POSIX_C_SOURCE=199309L`, which compiles just as well but would put this build
+/// on a different dialect from the CMake one for no gain.
+const c_flags = [_][]const u8{ "-std=gnu11", "-Wconversion" };
 
 /// Recursively add .c files from a directory
 fn addDirSources(
@@ -44,7 +54,7 @@ fn addDirSources(
             const full_path = b.fmt("{s}/{s}", .{ dir_path, entry.path });
             lib.addCSourceFiles(.{
                 .files = &[_][]const u8{full_path},
-                .flags = &c_warning_flags,
+                .flags = &c_flags,
             });
         }
     }
@@ -121,7 +131,7 @@ fn processBuildTarget(context: *const BuildContext, build_target: BuildTarget, p
         exe.addCSourceFiles(.{
             .files = &.{b.fmt("{s}/{s}", .{ path, src_file })},
             // benchmarks are ours and get the flags; the googletest translation units do not
-            .flags = if (build_target.link_googletest) &[_][]const u8{} else &c_warning_flags,
+            .flags = if (build_target.link_googletest) &[_][]const u8{} else &c_flags,
         });
     }
 
@@ -204,6 +214,7 @@ pub fn build(b: *std.Build) void {
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_memory", .srcs = &.{"test_memory.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_fixed_arena_pool", .srcs = &.{"test_fixed_arena_pool.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_multi_arena", .srcs = &.{"test_multi_arena.cpp"} }, path);
+        processBuildTarget(&context, .{ .link_googletest = true, .name = "test_result", .srcs = &.{"test_result.cpp"} }, path);
     }
 
     const cdbTargetsSlice = cdbTargets.toOwnedSlice(b.allocator) catch @panic("OOM");

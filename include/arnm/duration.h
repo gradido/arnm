@@ -17,7 +17,13 @@ extern "C" {
  * @{
  */
 
-// store duration in nanoseconds, can represent up to ~292 years
+/**
+ * @brief A span of time in nanoseconds.
+ *
+ * Signed, so a difference can run either way, and wide enough for about 292 years in each
+ * direction. Nanoseconds throughout: no unit is carried alongside, and none is implied by the
+ * magnitude.
+ */
 typedef int64_t arnm_duration;
 
 /**

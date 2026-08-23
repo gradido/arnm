@@ -146,8 +146,7 @@ TEST(MultiArena, CreateTakesTheDescriptorFromWhereverTheHostSays) {
   ASSERT_NE(m, nullptr);
   EXPECT_GE(reinterpret_cast<uintptr_t>(m), reinterpret_cast<uintptr_t>(store_blob));
   EXPECT_LT(
-      reinterpret_cast<uintptr_t>(m),
-      reinterpret_cast<uintptr_t>(store_blob) + sizeof(store_blob)
+      reinterpret_cast<uintptr_t>(m), reinterpret_cast<uintptr_t>(store_blob) + sizeof(store_blob)
   );
   // handle and chain body come out of one block, so one allocation covers both
   const uint32_t after_create = ARNM_INTERN(&store)->last_index;
@@ -178,9 +177,7 @@ TEST(MultiArena, CreateGivesTheDescriptorBackWhenInitRefuses) {
   );
 
   // a threshold that reaches the capacity is refused by init, after create allocated
-  EXPECT_EQ(
-      MakeChain(kArenaCapacity, kArenaCapacity, &descriptor_store), nullptr
-  );
+  EXPECT_EQ(MakeChain(kArenaCapacity, kArenaCapacity, &descriptor_store), nullptr);
   EXPECT_EQ(ARNM_INTERN(&descriptor_store)->last_index, 0u); // nothing stranded
 
   // and the arena is still usable for the next attempt, at the very same address
@@ -604,9 +601,7 @@ TEST(MultiArena, FreeReopensAnArenaThePathHadPassed) {
 
   // fill arena 0 to the brim, then force arena 1 open
   uint8_t *last_in_first = nullptr;
-  for (int i = 0; i < 4; ++i) {
-    ASSERT_EQ(arnm_alloc(&last_in_first, 256, m), ARNM_SUCCESS);
-  }
+  for (int i = 0; i < 4; ++i) { ASSERT_EQ(arnm_alloc(&last_in_first, 256, m), ARNM_SUCCESS); }
   uint8_t *in_second = nullptr;
   ASSERT_EQ(arnm_alloc(&in_second, 256, m), ARNM_SUCCESS);
   ASSERT_EQ(arnm_multi_arena_arena_count(m), 2u);

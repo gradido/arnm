@@ -35,14 +35,11 @@ extern "C" {
  *
  *  A zeroed block (@c arnm_memory_block b = {0};) is the empty state, and what the free
  *  functions leave behind when they reclaimed.
- *
- *  @var arnm_memory_block::data
- *  Start of the buffer, or NULL when empty. 8 byte aligned in arena mode.
- *  @var arnm_memory_block::size
- *  Bytes requested from the allocator; an arena reserved ARNM_ALIGN8(size) for them.
  */
 typedef struct arnm_memory_block {
+  /** Start of the buffer, or NULL when empty. 8 byte aligned in arena mode. */
   uint8_t *data;
+  /** Bytes requested from the allocator; an arena reserved ARNM_ALIGN8(size) for them. */
   uint32_t size;
 } arnm_memory_block;
 
