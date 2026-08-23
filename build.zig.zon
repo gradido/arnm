@@ -1,6 +1,6 @@
 .{
-    .name = .hostmem,
-    .version = "0.4.1",
+    .name = .arnm,
+    .version = "0.5.0",
     .dependencies = .{
         .googletest = .{
             .url = "git+https://github.com/allyourcodebase/googletest#e2affdd13730f800aa63772039f2adfa971461b6",
@@ -13,5 +13,5 @@
         },
     },
     .paths = .{""},
-    .fingerprint = 0xed3e17d3c29fbb7e,
+    .fingerprint = 0x3dd6a888b046d865,
 }

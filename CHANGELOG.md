@@ -1,7 +1,11 @@
 # Changelog
 
-Every release of hostmem, newest first. A date is the day the version was set in
-`build.zig.zon`, which is not always the day a tag followed: 0.3.1 and 0.4.0 carry no tag yet.
+Every release of arnm, newest first. A date is the day the version was set in `build.zig.zon`,
+which is not always the day a tag followed: 0.3.1 and 0.4.0 carry no tag yet.
+
+The library was called hostmem until 0.5.0, which renamed every symbol. Entries below that
+version name the symbols as they were spelled at the time, so the record still matches the
+tags -- read a `hostmem_` there as today's `arnm_`.
 
 The version lives in `build.zig.zon`; `Doxyfile` carries it a second time for the generated
 documentation. Until 1.0 the minor number moves for new API, the patch number for fixes -- a
@@ -10,6 +14,33 @@ than left to be discovered.
 
 Entries before 0.4.0 were reconstructed from the git history after the fact, so they summarise
 what the commits show rather than what was noted at the time.
+
+## 0.5.0 -- 2026-08-21
+
+### Changed
+
+- **The library is now `arnm`, and every public symbol was renamed with it.** `hostmem_` became
+  `arnm_`, `HOSTMEM_` became `ARNM_`, and the allocator type `hostmem` is now `arnm` -- so the
+  operations read as `arnm_init_arena`, `arnm_alloc`, `arnm_reset`. The rename is mechanical and
+  complete: no function changed behaviour, no signature moved, no result code changed its value.
+  A consumer updates by substituting the prefix in both cases.
+- **Headers moved from `include/hostmem/` to `include/arnm/`.** An include reads
+  `#include "arnm/memory.h"`. The directory stays flat, as before.
+- **The build artefacts carry the new name.** The zig package is `.arnm` and the library it
+  installs is `arnm`, so a dependent project writes
+  `b.dependency("arnm", ...).artifact("arnm")`; the CMake target is `arnm`. The package
+  fingerprint in `build.zig.zon` changed with the name, as zig derives it from one.
+- **The test memory cap is read from `ARNM_TEST_MEMORY_LIMIT_MB`.** The old spelling is not
+  consulted, so a shell that still exports it silently falls back to the 2048 MB default.
+- The motto that heads the documentation is now **data lives in memory arenas**, which says the
+  same thing from the arena's side rather than the host's: every byte the library hands out
+  comes from an arena, and every arena comes from the caller. The memory contract behind it is
+  unchanged.
+
+### Fixed
+
+- `arnm/memory.h` pointed at `utils/memory_block.h` in a group comment, a path left over from
+  gradido-blockchain-core. It is `arnm/memory_block.h`.
 
 ## 0.4.1 -- 2026-08-19
 

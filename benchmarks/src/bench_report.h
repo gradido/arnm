@@ -1,7 +1,7 @@
-#ifndef HOSTMEM_BENCH_REPORT_H
-#define HOSTMEM_BENCH_REPORT_H
+#ifndef ARNM_BENCH_REPORT_H
+#define ARNM_BENCH_REPORT_H
 
-#include "hostmem/mono_timer.h"
+#include "arnm/mono_timer.h"
 
 #include <stdio.h>
 
@@ -27,7 +27,7 @@
 
 /*
  * Picks a unit for the per step figure and keeps one decimal at every scale. Not
- * hostmem_duration_string: that takes whole nanoseconds, and a step costing 4.2 ns would arrive
+ * arnm_duration_string: that takes whole nanoseconds, and a step costing 4.2 ns would arrive
  * there as 4 -- the fraction is the interesting part at this end of the range.
  */
 static inline void bench_per_step_string(char *buffer, size_t buffer_size, double nanos) {
@@ -43,9 +43,9 @@ static inline void bench_per_step_string(char *buffer, size_t buffer_size, doubl
 }
 
 /** Header line, printed once before the first section. */
-static inline void bench_prepared(hostmem_mono_timer time_used) {
+static inline void bench_prepared(arnm_mono_timer time_used) {
   char buffer[BENCH_STRING_BUFFER_SIZE];
-  hostmem_mono_timer_string(buffer, BENCH_STRING_BUFFER_SIZE, time_used);
+  arnm_mono_timer_string(buffer, BENCH_STRING_BUFFER_SIZE, time_used);
   printf("time for prepare test data: %s\n", buffer);
 }
 
@@ -65,23 +65,23 @@ static inline void bench_step(
 ) {
   char total[BENCH_STRING_BUFFER_SIZE];
   char per_step[BENCH_STRING_BUFFER_SIZE];
-  hostmem_mono_timer time_used;
+  arnm_mono_timer time_used;
 
-  hostmem_mono_timer_reset(&time_used);
+  arnm_mono_timer_reset(&time_used);
   func_ptr(step_count);
-  hostmem_mono_timer_string(total, BENCH_STRING_BUFFER_SIZE, time_used);
+  arnm_mono_timer_string(total, BENCH_STRING_BUFFER_SIZE, time_used);
 
   double nanos =
-      step_count > 0 ? (double)hostmem_mono_timer_nanos(time_used) / (double)step_count : 0.0;
+      step_count > 0 ? (double)arnm_mono_timer_nanos(time_used) / (double)step_count : 0.0;
   bench_per_step_string(per_step, BENCH_STRING_BUFFER_SIZE, nanos);
 
   printf("%-*s %12s  %10s/%s\n", BENCH_NAME_WIDTH, name, total, per_step, unit);
 }
 
 /** Closing line: wall clock for the whole run and what one step was. */
-static inline void bench_total(hostmem_mono_timer time_used, int step_count, const char *unit) {
+static inline void bench_total(arnm_mono_timer time_used, int step_count, const char *unit) {
   char buffer[BENCH_STRING_BUFFER_SIZE];
-  hostmem_mono_timer_string(buffer, BENCH_STRING_BUFFER_SIZE, time_used);
+  arnm_mono_timer_string(buffer, BENCH_STRING_BUFFER_SIZE, time_used);
   printf("\nall benchmarks: %s, %ss per step: %d\n", buffer, unit, step_count);
 }
 
@@ -94,10 +94,10 @@ static inline void bench_total(hostmem_mono_timer time_used, int step_count, con
  * there, and naming one anyway would misreport whichever section disagrees. Such a file states
  * the count in each section heading and closes with the wall clock alone.
  */
-static inline void bench_total_time(hostmem_mono_timer time_used) {
+static inline void bench_total_time(arnm_mono_timer time_used) {
   char buffer[BENCH_STRING_BUFFER_SIZE];
-  hostmem_mono_timer_string(buffer, BENCH_STRING_BUFFER_SIZE, time_used);
+  arnm_mono_timer_string(buffer, BENCH_STRING_BUFFER_SIZE, time_used);
   printf("\nall benchmarks: %s\n", buffer);
 }
 
-#endif // HOSTMEM_BENCH_REPORT_H
+#endif // ARNM_BENCH_REPORT_H

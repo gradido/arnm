@@ -1,6 +1,28 @@
 const std = @import("std");
 const zcc = @import("compile_commands");
 
+/// Warning flags every first-party C source is compiled with.
+///
+/// -Wconversion earns its place here because this library narrows on purpose and often:
+/// element_size into a uint16_t field, element counts into bucket counts, bucket counts into
+/// index slots. A silent narrowing is exactly how those turn into wrong results instead of
+/// ARNM_ERROR_ARITHMETIC_OVERFLOW, so every remaining one is meant to carry an explicit cast
+/// next to the check that bounds it -- and anything without that check is a bug worth hearing
+/// about. The googletest sources are exempt: their macros warn under this flag and they are
+/// not ours to fix. CMakeLists.txt mirrors this, MSVC spelling included.
+///
+/// Where these actually become visible is not obvious: `zig build` drops C compiler warnings
+/// entirely when a step succeeds, and relabels them as errors inside its diagnostic bundle when
+/// one fails -- so a green `zig build` says nothing about them either way. They surface in the
+/// editor, because the cdb step copies these flags into compile_commands.json, and in the CMake
+/// build, which prints them as the warnings they are. To check a single file by hand:
+///
+///   zig cc -std=c11 -Wconversion -Iinclude -c src/<file>.c -o /dev/null
+///
+/// -c and not -fsyntax-only: zig 0.15.1 answers the latter with "error: FileNotFound" no matter
+/// what it is handed, so the diagnostics arrive but the exit code is useless.
+const c_warning_flags = [_][]const u8{"-Wconversion"};
+
 /// Recursively add .c files from a directory
 fn addDirSources(
     lib: *std.Build.Step.Compile,
@@ -22,7 +44,7 @@ fn addDirSources(
             const full_path = b.fmt("{s}/{s}", .{ dir_path, entry.path });
             lib.addCSourceFiles(.{
                 .files = &[_][]const u8{full_path},
-                .flags = &.{},
+                .flags = &c_warning_flags,
             });
         }
     }
@@ -89,10 +111,17 @@ fn processBuildTarget(context: *const BuildContext, build_target: BuildTarget, p
     }
 
     exe.addIncludePath(b.path("include"));
+    // the white box tests read the layout behind the opaque arnm from src/memory_intern.h,
+    // which is not installed and is on no consumer's path -- mirrors tests/CMakeLists.txt
+    if (build_target.link_googletest) {
+        exe.addIncludePath(b.path("src"));
+    }
 
     for (build_target.srcs) |src_file| {
         exe.addCSourceFiles(.{
             .files = &.{b.fmt("{s}/{s}", .{ path, src_file })},
+            // benchmarks are ours and get the flags; the googletest translation units do not
+            .flags = if (build_target.link_googletest) &[_][]const u8{} else &c_warning_flags,
         });
     }
 
@@ -119,7 +148,7 @@ pub fn build(b: *std.Build) void {
     const singleOutputDir = b.option(bool, "singleOutputDir", "Put direct into output folder, without lib or bin folder") orelse false;
     const sanitize = b.option(SanitizeMode, "sanitize", "Instrument C sources: undefined_behavior (UBSan) or thread (TSan). AddressSanitizer is not available through zig") orelse .off;
 
-    const core_lib = b.addLibrary(.{ .name = "hostmem", .linkage = if (lib_shared) .dynamic else .static, .root_module = b.createModule(.{
+    const core_lib = b.addLibrary(.{ .name = "arnm", .linkage = if (lib_shared) .dynamic else .static, .root_module = b.createModule(.{
         .target = target,
         .optimize = optimize,
     }) });
@@ -141,7 +170,7 @@ pub fn build(b: *std.Build) void {
 
     core_lib.linkLibC();
     core_lib.addIncludePath(b.path("include"));
-    core_lib.installHeadersDirectory(b.path("include/hostmem"), "hostmem", .{});
+    core_lib.installHeadersDirectory(b.path("include/arnm"), "arnm", .{});
 
     addDirSources(core_lib, b, "src");
 

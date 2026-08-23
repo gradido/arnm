@@ -1,8 +1,8 @@
+#include "arnm/memory.h"
+#include "arnm/mono_timer.h"
+#include "arnm/multi_arena.h"
+#include "arnm/result.h"
 #include "bench_report.h"
-#include "hostmem/memory.h"
-#include "hostmem/mono_timer.h"
-#include "hostmem/multi_arena.h"
-#include "hostmem/result.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -12,8 +12,9 @@
  * What this benchmark measures
  *
  * A multi arena serves a request first fit, scanning from `first_open` -- the earliest arena
- * that may still have room. That marker only walks forward, and only over arenas whose
- * remainder has fallen to the chain's full threshold or below. An arena left with more than the
+ * that may still have room. Under allocation alone that marker only walks forward, and only
+ * over arenas whose remainder has fallen to the chain's full threshold or below. (A free or a
+ * realloc that hands bytes back can pull it onto an earlier arena again; nothing here does.) An arena left with more than the
  * threshold but less than the current request is therefore neither served from nor skipped: it
  * is walked over, on this allocation and on every one that follows.
  *
@@ -81,7 +82,7 @@ static_assert(PROBE_SIZE % 8u == 0u, "probe must survive the arena's rounding");
  * large enough for the whole run keeps every host call outside the measured loop.
  */
 typedef struct scan_case {
-  hostmem_multi_arena chain;
+  arnm *chain; /**< Owned by this file; released with arnm_destroy(). */
   uint8_t *tail;      /**< Borrowed buffer every probe lands in; owned by this file. */
   uint32_t tail_size; /**< Bytes of @c tail, exactly PROBE_COUNT probes worth. */
 } scan_case;
@@ -103,10 +104,28 @@ static volatile uint64_t g_sink = 0;
  * request -- a step finishing suspiciously fast and reported as a result. Checked during
  * preparation only, never inside a measured loop.
  */
-static void require_ok(hostmem_result result, const char *what) {
-  if (HOSTMEM_SUCCESS == result) { return; }
-  fprintf(stderr, "benchmark setup failed: %s: %s\n", what, hostmem_result_to_string(result));
+static void require_ok(arnm_result result, const char *what) {
+  if (ARNM_SUCCESS == result) { return; }
+  fprintf(stderr, "benchmark setup failed: %s: %s\n", what, arnm_result_to_string(result));
   exit(EXIT_FAILURE);
+}
+
+/**
+ * A chain with this file's capacity and threshold, rather than the library's defaults.
+ *
+ * The figures below are about the walk, so the two numbers that decide its shape are named
+ * here and cannot move when a default does.
+ */
+static arnm *make_chain(void) {
+  arnm_multi_arena_options options = {0};
+  options.arena_capacity = ARENA_CAPACITY;
+  options.full_remaining = FULL_REMAINING;
+  arnm *chain = arnm_create_multi_arena(&options, NULL);
+  if (!chain) {
+    fprintf(stderr, "benchmark setup failed: create chain\n");
+    exit(EXIT_FAILURE);
+  }
+  return chain;
 }
 
 /* --- preparation ------------------------------------------------------------------------- */
@@ -128,26 +147,25 @@ static void build_case(scan_case *c, uint32_t arena_count, int stranded) {
   const uint32_t fill = stranded ? (uint32_t)FILL_SIZE : ARENA_CAPACITY;
   uint8_t *block = NULL;
 
-  require_ok(
-      hostmem_multi_arena_init(&c->chain, ARENA_CAPACITY, FULL_REMAINING, NULL), "init chain"
-  );
+  c->chain = make_chain();
   /* the descriptors are bookkeeping, not part of what is measured -- have them ready */
-  require_ok(hostmem_multi_arena_reserve(&c->chain, arena_count + 1), "reserve descriptors");
+  require_ok(arnm_multi_arena_reserve(c->chain, arena_count + 1), "reserve descriptors");
 
   for (uint32_t i = 0; i < arena_count; ++i) {
-    require_ok(hostmem_multi_arena_alloc(&block, fill, &c->chain), "fill arena");
+    require_ok(arnm_alloc(&block, fill, c->chain), "fill arena");
   }
 
   /* sized for the run exactly: the last probe leaves it empty and none opens fresh ground */
   c->tail_size = (uint32_t)PROBE_COUNT * (uint32_t)PROBE_SIZE;
-  require_ok(hostmem_alloc(&c->tail, c->tail_size, NULL), "tail buffer");
-  require_ok(hostmem_multi_arena_borrow(&c->chain, c->tail, c->tail_size), "borrow tail");
+  require_ok(arnm_alloc(&c->tail, c->tail_size, NULL), "tail buffer");
+  require_ok(arnm_multi_arena_borrow(c->chain, c->tail, c->tail_size), "borrow tail");
 }
 
 static void release_case(scan_case *c) {
   /* the borrowed block is let go untouched, so it is ours to hand back afterwards */
-  hostmem_multi_arena_release(&c->chain);
-  hostmem_free(c->tail, c->tail_size, NULL);
+  require_ok(arnm_destroy(c->chain, NULL), "destroy chain");
+  c->chain = NULL;
+  arnm_free(c->tail, c->tail_size, NULL);
   c->tail = NULL;
 }
 
@@ -178,7 +196,7 @@ static void probe(scan_case *c, int steps) {
   uint64_t sink = 0;
   for (int i = 0; i < steps; ++i) {
     uint8_t *block = NULL;
-    if (HOSTMEM_SUCCESS != hostmem_multi_arena_alloc(&block, PROBE_SIZE, &c->chain)) { break; }
+    if (ARNM_SUCCESS != arnm_alloc(&block, PROBE_SIZE, c->chain)) { break; }
     sink += (uint64_t)(uintptr_t)block;
   }
   g_sink += sink;
@@ -227,43 +245,37 @@ static void test_full_1024(int steps) {
  * @whisper Each step lays ground the next step must cross
  */
 static void test_growth_stranded(int steps) {
-  hostmem_multi_arena m;
+  arnm *m = make_chain();
   uint64_t sink = 0;
-  if (HOSTMEM_SUCCESS != hostmem_multi_arena_init(&m, ARENA_CAPACITY, FULL_REMAINING, NULL)) {
-    return;
-  }
   for (int i = 0; i < steps; ++i) {
     uint8_t *block = NULL;
-    if (HOSTMEM_SUCCESS != hostmem_multi_arena_alloc(&block, FILL_SIZE, &m)) { break; }
+    if (ARNM_SUCCESS != arnm_alloc(&block, FILL_SIZE, m)) { break; }
     sink += (uint64_t)(uintptr_t)block;
   }
   g_sink += sink;
-  hostmem_multi_arena_release(&m);
+  arnm_destroy(m, NULL);
 }
 
 /** The same growth with requests that leave nothing behind, so the marker keeps up. */
 static void test_growth_full(int steps) {
-  hostmem_multi_arena m;
+  arnm *m = make_chain();
   uint64_t sink = 0;
-  if (HOSTMEM_SUCCESS != hostmem_multi_arena_init(&m, ARENA_CAPACITY, FULL_REMAINING, NULL)) {
-    return;
-  }
   for (int i = 0; i < steps; ++i) {
     uint8_t *block = NULL;
-    if (HOSTMEM_SUCCESS != hostmem_multi_arena_alloc(&block, ARENA_CAPACITY, &m)) { break; }
+    if (ARNM_SUCCESS != arnm_alloc(&block, ARENA_CAPACITY, m)) { break; }
     sink += (uint64_t)(uintptr_t)block;
   }
   g_sink += sink;
-  hostmem_multi_arena_release(&m);
+  arnm_destroy(m, NULL);
 }
 
 /* --- driver -------------------------------------------------------------------------------- */
 
 int main(void) {
-  hostmem_mono_timer timeUsed;
+  arnm_mono_timer timeUsed;
 
-  hostmem_mono_timer_init();
-  hostmem_mono_timer_reset(&timeUsed);
+  arnm_mono_timer_init();
+  arnm_mono_timer_reset(&timeUsed);
   prepare_test_data();
   bench_prepared(timeUsed);
 
