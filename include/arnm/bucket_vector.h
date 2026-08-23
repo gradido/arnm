@@ -70,9 +70,9 @@ static inline uint32_t arnm_bvec_size(const arnm_bvec *v) {
 
 static inline void *arnm_bvec_get(const arnm_bvec *v, uint32_t index) {
   const uint8_t log2_bucket_capacity = v->bucket_capacity_max_log2;
-  const uint8_t buckt_index = index >> (uint32_t)(log2_bucket_capacity);
+  const uint16_t bucket_index = (uint16_t)(index >> log2_bucket_capacity);
   const uint32_t index_in_bucket = index & (((uint32_t)1 << log2_bucket_capacity) - 1);
-  return v->buckets[buckt_index] + index_in_bucket;
+  return (uint8_t *)v->buckets[bucket_index] + (size_t)index_in_bucket * v->element_size;
 }
 
 static inline void *arnm_bvec_at(const arnm_bvec *v, uint32_t index) {
@@ -87,7 +87,7 @@ static inline void *arnm_bvec_front(const arnm_bvec *v) {
 
 /** Last element, or NULL while empty. */
 static inline void *arnm_bvec_back(const arnm_bvec *v) {
-  return v->tail ? v->tail + v->tail_used - 1 : NULL;
+  return v->tail ? (uint8_t *)v->tail + (size_t)(v->tail_used - 1) * v->element_size : NULL;
 }
 
 /** Number of buckets holding elements -- the outer bound for bucket-wise iteration. */
@@ -118,13 +118,11 @@ arnm_result arnm_bvec_copy_to(const arnm_bvec *v, void *dst, uint32_t dst_capaci
   /** Allocate buckets and index slots for @p element_count elements ahead of time. */             \
   static inline arnm_result name##_reserve(arnm_bvec *v, uint32_t element_count) {                 \
     return arnm_bvec_reserve(v, element_count);                                                    \
-    \                                                                                              \
   }                                                                                                \
                                                                                                    \
   /** Release every bucket that holds no element and tighten the index array onto the rest. */     \
   static inline arnm_result name##_shrink(arnm_bvec *v) {                                          \
     return arnm_bvec_shrink(v);                                                                    \
-    \                                                                                              \
   }                                                                                                \
                                                                                                    \
   /** Drop all elements, keep every allocated bucket for immediate reuse. O(1). */                 \
@@ -139,12 +137,12 @@ arnm_result arnm_bvec_copy_to(const arnm_bvec *v, void *dst, uint32_t dst_capaci
                                                                                                    \
   /** Cold path of @c _emplace: open the next bucket, reusing an already allocated one. */         \
   static inline arnm_result name##_grow(arnm_bvec *v, type **out_slot) {                           \
-    return arnm_bvec_grow(v, out_slot);                                                            \
+    return arnm_bvec_grow(v, (void **)out_slot);                                                   \
   }                                                                                                \
                                                                                                    \
   /** Claim the next slot without writing it -- construct large payloads in place. */              \
   static inline arnm_result name##_emplace(arnm_bvec *v, type **out_slot) {                        \
-    return arnm_bvec_emplace(v, out_slot);                                                         \
+    return arnm_bvec_emplace(v, (void **)out_slot);                                                \
   }                                                                                                \
                                                                                                    \
   /** Append a value. */                                                                           \
@@ -173,22 +171,22 @@ arnm_result arnm_bvec_copy_to(const arnm_bvec *v, void *dst, uint32_t dst_capaci
                                                                                                    \
   /** Unchecked access -- @p index must be < size. */                                              \
   static inline type *name##_get(const arnm_bvec *v, uint32_t index) {                             \
-    return arnm_bvec_get(v, index);                                                                \
+    return (type *)arnm_bvec_get(v, index);                                                        \
   }                                                                                                \
                                                                                                    \
   /** Bounds-checked access; NULL when @p index has no element. */                                 \
   static inline type *name##_at(const arnm_bvec *v, uint32_t index) {                              \
-    return arnm_bvec_at(v, index);                                                                 \
+    return (type *)arnm_bvec_at(v, index);                                                         \
   }                                                                                                \
                                                                                                    \
   /** First element, or NULL while empty. */                                                       \
   static inline type *name##_front(const arnm_bvec *v) {                                           \
-    return arnm_bvec_front(v);                                                                     \
+    return (type *)arnm_bvec_front(v);                                                             \
   }                                                                                                \
                                                                                                    \
   /** Last element, or NULL while empty. */                                                        \
   static inline type *name##_back(const arnm_bvec *v) {                                            \
-    return arnm_bvec_back(v);                                                                      \
+    return (type *)arnm_bvec_back(v);                                                              \
   }                                                                                                \
                                                                                                    \
   /** Number of buckets holding elements -- the outer bound for bucket-wise iteration. */          \
@@ -198,7 +196,7 @@ arnm_result arnm_bvec_copy_to(const arnm_bvec *v, void *dst, uint32_t dst_capaci
                                                                                                    \
   /** Contiguous start of bucket @p bucket; @p bucket must be < _bucket_count(). */                \
   static inline type *name##_bucket_data(const arnm_bvec *v, uint16_t bucket) {                    \
-    return arnm_bvec_bucket_data(v, bucket);                                                       \
+    return (type *)arnm_bvec_bucket_data(v, bucket);                                               \
   }                                                                                                \
                                                                                                    \
   /** Elements held in bucket @p bucket; full except possibly the last one. */                     \

@@ -8,12 +8,13 @@ static inline uint32_t bucket_bytes(size_t type_size, uint8_t bucket_capacity_lo
   return ((uint32_t)(type_size << bucket_capacity_log2));
 }
 
-static inline uint32_t bucket_capacity(uint8_t bucket_capacity_log2) {
-  return (uint32_t)1 << bucket_capacity_log2;
+/* _init caps the exponent at 15, so a full bucket always fits the uint16_t it is counted in */
+static inline uint16_t bucket_capacity(uint8_t bucket_capacity_log2) {
+  return (uint16_t)(1u << bucket_capacity_log2);
 }
 
 static inline uint32_t bucket_mask(uint8_t bucket_capacity_log2) {
-  return bucket_capacity(bucket_capacity_log2) - 1;
+  return (uint32_t)bucket_capacity(bucket_capacity_log2) - 1u;
 }
 
 static inline uint16_t bucket_count_allocated(const arnm_bvec *v) {
@@ -38,8 +39,9 @@ static inline bool is_state_valid(const arnm_bvec *v) {
     if (!v->bucket_capacity) return false;
   }
   if (bucket_count > v->bucket_capacity) return false;
-  if (v->tail_index >= bucket_count) return false;
-  if (!v->tail && v->tail_index) return false;
+  /* tail_index only means something while a bucket is open; with none open it must read 0.  */
+  /* _grow leaves exactly that behind when the index array grew but the bucket alloc failed. */
+  if (v->tail ? v->tail_index >= bucket_count : v->tail_index != 0) return false;
   if (v->size > bucket_count * bucket_capacity(v->bucket_capacity_max_log2)) return false;
 
   return true;
@@ -53,13 +55,15 @@ arnm_result arnm_bvec_init(
     arnm *allocator
 ) {
   if (!v) return ARNM_ERROR_NULL_POINTER;
-  if (!element_size || !bucket_capacity_log2 || bucket_capacity_log2 > 16 ||
+  /* 15 and not 16: tail_used carries the full bucket capacity as its "no room here" value, */
+  /* and 1 << 16 does not fit in the uint16_t it is stored in                                 */
+  if (!element_size || !bucket_capacity_log2 || bucket_capacity_log2 > 15 ||
       element_size > (size_t)(UINT32_MAX >> (bucket_capacity_log2)) || element_size > UINT16_MAX)
     return ARNM_ERROR_INVALID_PARAM;
 
   v->allocator = allocator;
   v->buckets = NULL;
-  v->element_size = element_size;
+  v->element_size = (uint16_t)element_size; /* bounded by the UINT16_MAX check above */
   v->bucket_capacity = 0;
   v->tail_index = 0;
   /* no bucket is open, so tail_used counts nothing: CAP is the one value that means "no */
@@ -84,21 +88,24 @@ arnm_result arnm_bvec_reserve(arnm_bvec *v, uint32_t element_count) {
   if (element_count > (UINT32_MAX - bucket_mask(v->bucket_capacity_max_log2)) / v->element_size) {
     return ARNM_ERROR_ARITHMETIC_OVERFLOW;
   }
-  uint16_t needed =
+  /* the count of whole buckets can outrun uint16_t, so it is bounded before it is narrowed */
+  const uint32_t needed_buckets =
       (element_count + bucket_mask(v->bucket_capacity_max_log2)) >> v->bucket_capacity_max_log2;
+  if (needed_buckets > ARNM_BVEC_MAX_INDEX_CAPACITY) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
+  const uint16_t needed = (uint16_t)needed_buckets;
   const uint16_t previous_bucket_count = bucket_count_allocated(v);
   if (needed <= previous_bucket_count) return ARNM_SUCCESS;
   if (needed > v->bucket_capacity) {
     const uint32_t old_capacity = index_bytes(v->bucket_capacity);
     const uint32_t new_capacity = index_bytes(needed);
-    if (new_capacity > ARNM_BVEC_MAX_INDEX_CAPACITY) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
+
     arnm_result result =
-        arnm_realloc((uint8_t **)v->buckets, old_capacity, new_capacity, v->allocator);
+        arnm_realloc((uint8_t **)&v->buckets, old_capacity, new_capacity, v->allocator);
     if (ARNM_SUCCESS != result && ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED != result) {
       return result;
     }
     // set new index slots to NULL
-    memset(v->buckets + old_capacity, 0, new_capacity);
+    memset((uint8_t *)v->buckets + old_capacity, 0, new_capacity - old_capacity);
     v->bucket_capacity = needed;
   }
   uint16_t bucket_count = previous_bucket_count;
@@ -118,10 +125,10 @@ arnm_result arnm_bvec_shrink(arnm_bvec *v) {
   if (!is_state_valid(v)) return ARNM_ERROR_INVALID_STATE;
 
   const uint32_t bucket_size = bucket_bytes(v->element_size, v->bucket_capacity_max_log2);
-  const uint32_t used_before = arnm_bvec_bucket_count(v);
+  const uint16_t used_before = arnm_bvec_bucket_count(v);
   /* top down, so an arena unwinds in allocation order; it stops at the first bucket it   */
   /* refuses to reclaim, and nothing is lost when it does -- that block is simply kept.    */
-  uint32_t i = bucket_count_allocated(v);
+  uint16_t i = bucket_count_allocated(v);
   for (; i > used_before; --i) {
     if (!v->buckets[i - 1]) continue;
     if (ARNM_SUCCESS != arnm_free((uint8_t *)v->buckets[i - 1], bucket_size, v->allocator)) break;
@@ -164,7 +171,7 @@ void arnm_bvec_free(arnm_bvec *v) {
   if (!v || !v->buckets || !v->element_size) return;
   const uint32_t bucket_size = bucket_bytes(v->element_size, v->bucket_capacity_max_log2);
   /* buckets backwards then the index array, the reverse of how they were taken */
-  uint32_t i = bucket_count_allocated(v);
+  uint16_t i = bucket_count_allocated(v);
   for (; i > 0; --i) {
     if (!v->buckets[i - 1]) continue;
     arnm_free((uint8_t *)v->buckets[i - 1], bucket_size, v->allocator);
@@ -181,25 +188,26 @@ arnm_result arnm_bvec_grow(arnm_bvec *v, void **out_slot) {
   if (!is_state_valid(v)) return ARNM_ERROR_INVALID_STATE;
 
   /* the buckets in use are exactly the ones behind us; the next one starts where they end */
-  uint32_t next = arnm_bvec_bucket_count(v);
+  uint16_t next = arnm_bvec_bucket_count(v);
   const uint16_t previous_bucket_count = bucket_count_allocated(v);
   uint16_t bucket_count = previous_bucket_count;
   if (next >= previous_bucket_count) {
     if (previous_bucket_count == v->bucket_capacity) {
       uint32_t new_capacity = v->bucket_capacity + v->index_grow_step_size;
       if (new_capacity > ARNM_BVEC_MAX_INDEX_CAPACITY) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
-      arnm_result result = arnm_realloc(
-          (uint8_t **)index, index_bytes(v->bucket_capacity), index_bytes(new_capacity),
-          v->allocator
-      );
+      const uint32_t old_index_bytes = index_bytes(v->bucket_capacity);
+      const uint32_t new_index_bytes = index_bytes((uint16_t)new_capacity);
+      arnm_result result =
+          arnm_realloc((uint8_t **)&v->buckets, old_index_bytes, new_index_bytes, v->allocator);
       if (result != ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED && result != ARNM_SUCCESS)
         return result;
-      v->bucket_capacity = new_capacity;
+      /* bucket_count_allocated() reads these slots, so they have to say "no bucket here" */
+      memset((uint8_t *)v->buckets + old_index_bytes, 0, new_index_bytes - old_index_bytes);
+      v->bucket_capacity = (uint16_t)new_capacity;
     }
-    // if (ARNM_SUCCESS != arnm_alloc(&buffer, size, allocator)) return NULL;
-    void *bucket = NULL;
+    uint8_t *bucket = NULL;
     arnm_result result = arnm_alloc(
-        (uint8_t **)&bucket, bucket_bytes(v->element_size, v->bucket_capacity_max_log2),
+        &bucket, bucket_bytes(v->element_size, v->bucket_capacity_max_log2),
         v->allocator
     );
     if (result != ARNM_SUCCESS) return result;
@@ -215,7 +223,8 @@ arnm_result arnm_bvec_grow(arnm_bvec *v, void **out_slot) {
 
 arnm_result arnm_bvec_emplace(arnm_bvec *v, void **out_slot) {
   if (v->tail && v->tail_used < bucket_capacity(v->bucket_capacity_max_log2)) {
-    *out_slot = v->tail + v->tail_used++;
+    *out_slot = (uint8_t *)v->tail + (size_t)v->tail_used * v->element_size;
+    v->tail_used++;
     v->size++;
     return ARNM_SUCCESS;
   }
@@ -249,13 +258,17 @@ arnm_result arnm_bvec_pop(arnm_bvec *v) {
 }
 
 arnm_result arnm_bvec_copy_to(const arnm_bvec *v, void *dst, uint32_t dst_capacity) {
-  uint32_t bucket, buckets, written = 0;
+  uint16_t bucket, buckets;
+  uint32_t written = 0;
   if (!v || !dst) return ARNM_ERROR_NULL_POINTER;
   if (dst_capacity < v->size) return ARNM_ERROR_DESTINATION_BUFFER_TO_SMALL;
   buckets = arnm_bvec_bucket_count(v);
   for (bucket = 0; bucket < buckets; ++bucket) {
     uint32_t count = arnm_bvec_bucket_size(v, bucket);
-    memcpy(dst + written, v->buckets[bucket], count * v->element_size);
+    memcpy(
+        (uint8_t *)dst + (size_t)written * v->element_size, v->buckets[bucket],
+        (size_t)count * v->element_size
+    );
     written += count;
   }
   return ARNM_SUCCESS;
