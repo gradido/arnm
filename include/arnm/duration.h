@@ -1,5 +1,5 @@
-#ifndef HOSTMEM_DURATION_H
-#define HOSTMEM_DURATION_H
+#ifndef ARNM_DURATION_H
+#define ARNM_DURATION_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -9,7 +9,7 @@ extern "C" {
 #endif
 
 /**
- * @defgroup hostmem_duration hostmem_duration
+ * @defgroup arnm_duration arnm_duration
  * @brief Duration representation in nanoseconds.
  *
  * A duration is represented in nanoseconds, allowing for precise time measurements.
@@ -18,7 +18,7 @@ extern "C" {
  */
 
 // store duration in nanoseconds, can represent up to ~292 years
-typedef int64_t hostmem_duration;
+typedef int64_t arnm_duration;
 
 /**
  * @brief Format a duration into a human-readable string, letting the most fitting unit emerge.
@@ -44,8 +44,8 @@ typedef int64_t hostmem_duration;
  *
  * @whisper Time settles into the scale it needs
  */
-int hostmem_duration_string(
-    char *buffer, size_t buffer_size, hostmem_duration duration, uint8_t precision
+int arnm_duration_string(
+    char *buffer, size_t buffer_size, arnm_duration duration, uint8_t precision
 );
 
 /**
@@ -56,4 +56,4 @@ int hostmem_duration_string(
 }
 #endif
 
-#endif // HOSTMEM_DURATION_H
+#endif // ARNM_DURATION_H

@@ -24,9 +24,13 @@ FILE(GLOB TEST_SOURCES "unit/src/test_*.cpp")
 foreach(test_source ${TEST_SOURCES})
   get_filename_component(test_name ${test_source} NAME_WE)
   add_executable(${test_name} ${test_source})
-  target_link_libraries(${test_name} PRIVATE hostmem GTest::gtest GTest::gtest_main)
-  # memory_limit.h sits beside the sources and every test binary includes it
-  target_include_directories(${test_name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/unit/src)
+  target_link_libraries(${test_name} PRIVATE arnm GTest::gtest GTest::gtest_main)
+  # memory_limit.h sits beside the sources and every test binary includes it; src/ is on the
+  # path as well, for the private memory_intern.h the white box tests read the layout from
+  target_include_directories(${test_name} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/unit/src
+    ${CMAKE_SOURCE_DIR}/src
+  )
   set_target_properties(${test_name} PROPERTIES FOLDER tests)
   add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()

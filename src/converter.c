@@ -1,6 +1,6 @@
-#include "hostmem/converter.h"
-#include "hostmem/memory.h"
-#include "hostmem/result.h"
+#include "arnm/converter.h"
+#include "arnm/memory.h"
+#include "arnm/result.h"
 #include <stdint.h>
 
 #include <assert.h>
@@ -32,7 +32,7 @@
  * - Any modification should preserve the exact boundary conditions (powers of 10),
  *   otherwise subtle off-by-one errors may occur.
  */
-uint8_t hostmem_uint64_to_string_size(uint64_t v) {
+uint8_t arnm_uint64_to_string_size(uint64_t v) {
   if (v < 100000000ULL) {
     if (v < 10000ULL) {
       if (v < 100ULL) return v < 10 ? 1 : 2;
@@ -65,17 +65,15 @@ static inline uint64_t int64_to_abs_u64(int64_t v) {
   return v < 0 ? (uint64_t)0 - (uint64_t)v : (uint64_t)v;
 }
 
-uint8_t hostmem_int64_to_string_size(int64_t v) {
-  uint8_t str_size = hostmem_uint64_to_string_size(int64_to_abs_u64(v));
+uint8_t arnm_int64_to_string_size(int64_t v) {
+  uint8_t str_size = arnm_uint64_to_string_size(int64_to_abs_u64(v));
   if (v < 0) {
     str_size++; // add one place for minus in front of number string
   }
   return str_size;
 }
 
-uint8_t hostmem_uint64_to_string_known_string_size(
-    char *buffer, uint64_t value, uint8_t stringSize
-) {
+uint8_t arnm_uint64_to_string_known_string_size(char *buffer, uint64_t value, uint8_t stringSize) {
   if (value == 0) {
     if (stringSize < 1) {
       return 1; // return required size without null terminator
@@ -103,7 +101,7 @@ uint8_t hostmem_uint64_to_string_known_string_size(
   // process 2 digits at a time
   while (temp >= 100) {
     if (cursor < 2) {
-      return hostmem_uint64_to_string_size(value); // return required size without null terminator
+      return arnm_uint64_to_string_size(value); // return required size without null terminator
     }
     uint64_t q = temp / 100;
     uint64_t r = temp - q * 100;
@@ -115,12 +113,12 @@ uint8_t hostmem_uint64_to_string_known_string_size(
   // last 1 or 2 digits
   if (temp < 10) {
     if (cursor < 1) {
-      return hostmem_uint64_to_string_size(value); // return required size without null terminator
+      return arnm_uint64_to_string_size(value); // return required size without null terminator
     }
     buffer[--cursor] = '0' + (char)temp;
   } else {
     if (cursor < 2) {
-      return hostmem_uint64_to_string_size(value); // return required size without null terminator
+      return arnm_uint64_to_string_size(value); // return required size without null terminator
     }
     buffer[--cursor] = DIGIT_TABLE[temp * 2 + 1];
     buffer[--cursor] = DIGIT_TABLE[temp * 2];
@@ -128,12 +126,12 @@ uint8_t hostmem_uint64_to_string_known_string_size(
   return len; // return number of characters written, not counting null terminator
 }
 
-uint8_t hostmem_int64_to_string_known_string_size(char *buffer, int64_t value, uint8_t stringSize) {
+uint8_t arnm_int64_to_string_known_string_size(char *buffer, int64_t value, uint8_t stringSize) {
   if (value >= 0) {
-    return hostmem_uint64_to_string_known_string_size(buffer, (uint64_t)value, stringSize);
+    return arnm_uint64_to_string_known_string_size(buffer, (uint64_t)value, stringSize);
   } else {
     buffer[0] = '-';
-    return hostmem_uint64_to_string_known_string_size(
+    return arnm_uint64_to_string_known_string_size(
                &buffer[1], int64_to_abs_u64(value), stringSize - 1
            ) +
            1;
@@ -141,24 +139,24 @@ uint8_t hostmem_int64_to_string_known_string_size(char *buffer, int64_t value, u
 }
 // for easy use, one call
 
-uint8_t hostmem_uint64_to_string(char *buffer, uint8_t bufferSize, uint64_t value) {
-  uint8_t requiredSize = hostmem_uint64_to_string_size(value);
+uint8_t arnm_uint64_to_string(char *buffer, uint8_t bufferSize, uint64_t value) {
+  uint8_t requiredSize = arnm_uint64_to_string_size(value);
   if (bufferSize < requiredSize + 1) {
     // better safe then sorry
     if (bufferSize) { buffer[0] = '\0'; }
     return requiredSize; // return required size without null terminator
   }
-  return hostmem_uint64_to_string_known_string_size(buffer, value, requiredSize);
+  return arnm_uint64_to_string_known_string_size(buffer, value, requiredSize);
 }
 
-uint8_t hostmem_int64_to_string(char *buffer, uint8_t bufferSize, int64_t value) {
-  size_t requiredSize = hostmem_int64_to_string_size(value);
+uint8_t arnm_int64_to_string(char *buffer, uint8_t bufferSize, int64_t value) {
+  size_t requiredSize = arnm_int64_to_string_size(value);
   if (bufferSize < requiredSize + 1) {
     // better safe then sorry
     if (bufferSize) { buffer[0] = '\0'; }
     return requiredSize; // return required size without null terminator
   }
-  return hostmem_int64_to_string_known_string_size(buffer, value, requiredSize);
+  return arnm_int64_to_string_known_string_size(buffer, value, requiredSize);
 }
 
 /*
@@ -172,10 +170,10 @@ uint8_t hostmem_int64_to_string(char *buffer, uint8_t bufferSize, int64_t value)
  * warning on the group in converter.h.
  */
 
-hostmem_result hostmem_binary_to_hex(char *result_buffer, const hostmem_memory_block *data) {
-  if (!result_buffer || !data || !data->data) { return HOSTMEM_ERROR_NULL_POINTER; }
+arnm_result arnm_binary_to_hex(char *result_buffer, const arnm_memory_block *data) {
+  if (!result_buffer || !data || !data->data) { return ARNM_ERROR_NULL_POINTER; }
   // an empty block is a parameter the caller can fix, not a pointer they forgot
-  if (!data->size) { return HOSTMEM_ERROR_INVALID_PARAM; }
+  if (!data->size) { return ARNM_ERROR_INVALID_PARAM; }
 
   // Staying in uint8_t is what lets the vectoriser in: the same expression written over int
   // costs a sign extension per element and loses it.
@@ -192,16 +190,16 @@ hostmem_result hostmem_binary_to_hex(char *result_buffer, const hostmem_memory_b
     result_buffer[i * 2 + 1] = (char)(uint8_t)(low + (low < 10 ? 48 : 87));
   }
   result_buffer[count * 2] = '\0';
-  return HOSTMEM_SUCCESS;
+  return ARNM_SUCCESS;
 }
 
-hostmem_result hostmem_binary_from_hex(uint8_t *result_buffer, const char *hex) {
-  if (!result_buffer || !hex) { return HOSTMEM_ERROR_NULL_POINTER; }
+arnm_result arnm_binary_from_hex(uint8_t *result_buffer, const char *hex) {
+  if (!result_buffer || !hex) { return ARNM_ERROR_NULL_POINTER; }
   size_t hex_size = strlen(hex);
   size_t bin_size = hex_size / 2;
   // two characters make one byte, so an odd length cannot be hex -- the division above dropped
   // the stray character and multiplying back reveals it
-  if (bin_size * 2 != hex_size) { return HOSTMEM_ERROR_INVALID_PARAM; }
+  if (bin_size * 2 != hex_size) { return ARNM_ERROR_INVALID_PARAM; }
 
   // Same reasoning as the encoding direction, with the validity test folded in. Clearing bit 5
   // maps a lower case letter onto its upper case twin, so one range check covers both; a digit
@@ -230,9 +228,9 @@ hostmem_result hostmem_binary_from_hex(uint8_t *result_buffer, const char *hex) 
   // string was already rejected.
   if (invalid) {
     memset(result_buffer, 0, bin_size);
-    return HOSTMEM_ERROR_DECODE_FAILED;
+    return ARNM_ERROR_DECODE_FAILED;
   }
-  return HOSTMEM_SUCCESS;
+  return ARNM_SUCCESS;
 }
 
 /*
@@ -243,9 +241,9 @@ hostmem_result hostmem_binary_from_hex(uint8_t *result_buffer, const char *hex) 
  * is constant time either -- the same warning on the group in converter.h covers them.
  */
 
-static_assert(HOSTMEM_UUID_BINARY_SIZE == 16, "uuid binary size does not match 16 bytes");
+static_assert(ARNM_UUID_BINARY_SIZE == 16, "uuid binary size does not match 16 bytes");
 static_assert(
-    HOSTMEM_UUID_STRING_LENGTH == 36, "the 8-4-4-4-12 form is 36 characters, terminator aside"
+    ARNM_UUID_STRING_LENGTH == 36, "the 8-4-4-4-12 form is 36 characters, terminator aside"
 );
 
 static const uint8_t UUID_HEX_VALUE[256] = {
@@ -308,12 +306,12 @@ static const char UUID_HEX_PAIR[256][2] = {
    directly after it. The four separators sit at 8, 13, 18 and 23. Driving the loops from this
    table is what removes the per-character branching a discovering parser needs: the format is
    fixed, so the positions never have to be looked for while reading. */
-static const uint8_t UUID_HEX_POS[HOSTMEM_UUID_BINARY_SIZE] = {0,  2,  4,  6,  9,  11, 14, 16,
-                                                               19, 21, 24, 26, 28, 30, 32, 34};
+static const uint8_t UUID_HEX_POS[ARNM_UUID_BINARY_SIZE] = {0,  2,  4,  6,  9,  11, 14, 16,
+                                                            19, 21, 24, 26, 28, 30, 32, 34};
 
-hostmem_result hostmem_uuid_from_string(uint8_t *uuid, const char *uuid_string) {
-  if (!uuid || !uuid_string) { return HOSTMEM_ERROR_NULL_POINTER; }
-  if (strlen(uuid_string) != HOSTMEM_UUID_STRING_LENGTH) { return HOSTMEM_ERROR_INVALID_PARAM; }
+arnm_result arnm_uuid_from_string(uint8_t *uuid, const char *uuid_string) {
+  if (!uuid || !uuid_string) { return ARNM_ERROR_NULL_POINTER; }
+  if (strlen(uuid_string) != ARNM_UUID_STRING_LENGTH) { return ARNM_ERROR_INVALID_PARAM; }
 
   // The separators are checked by position, not merely counted. Skipping any dash wherever it
   // appeared lets a 36 character string carry fewer than four of them, and every missing dash
@@ -321,15 +319,15 @@ hostmem_result hostmem_uuid_from_string(uint8_t *uuid, const char *uuid_string) 
   // then writes 18 bytes into these 16.
   if (uuid_string[8] != '-' || uuid_string[13] != '-' || uuid_string[18] != '-' ||
       uuid_string[23] != '-') {
-    memset(uuid, 0, HOSTMEM_UUID_BINARY_SIZE);
-    return HOSTMEM_ERROR_DECODE_FAILED;
+    memset(uuid, 0, ARNM_UUID_BINARY_SIZE);
+    return ARNM_ERROR_DECODE_FAILED;
   }
 
   // Decoding writes straight into the caller's buffer and the verdict is settled once at the
   // end: a bad digit shows up as 0xFF, whose high nibble survives the OR no matter what else
   // the string held. Nothing branches on the data in between.
   unsigned invalid = 0;
-  for (size_t k = 0; k < HOSTMEM_UUID_BINARY_SIZE; ++k) {
+  for (size_t k = 0; k < ARNM_UUID_BINARY_SIZE; ++k) {
     unsigned high = UUID_HEX_VALUE[(unsigned char)uuid_string[UUID_HEX_POS[k]]];
     unsigned low = UUID_HEX_VALUE[(unsigned char)uuid_string[UUID_HEX_POS[k] + 1]];
     invalid |= high | low;
@@ -340,22 +338,22 @@ hostmem_result hostmem_uuid_from_string(uint8_t *uuid, const char *uuid_string) 
   // the failure path clears them. It costs nothing where it matters: this runs only when the
   // string was already rejected.
   if (invalid & 0xF0u) {
-    memset(uuid, 0, HOSTMEM_UUID_BINARY_SIZE);
-    return HOSTMEM_ERROR_DECODE_FAILED;
+    memset(uuid, 0, ARNM_UUID_BINARY_SIZE);
+    return ARNM_ERROR_DECODE_FAILED;
   }
-  return HOSTMEM_SUCCESS;
+  return ARNM_SUCCESS;
 }
 
-void hostmem_uuid_to_string(char *result_buffer, const uint8_t uuid[HOSTMEM_UUID_BINARY_SIZE]) {
+void arnm_uuid_to_string(char *result_buffer, const uint8_t uuid[ARNM_UUID_BINARY_SIZE]) {
   // Writes each byte where it belongs immediately. Formatting all 32 characters into a scratch
   // buffer and reassembling them around the separators afterwards walks the result twice for
   // the same output.
-  for (size_t k = 0; k < HOSTMEM_UUID_BINARY_SIZE; ++k) {
+  for (size_t k = 0; k < ARNM_UUID_BINARY_SIZE; ++k) {
     memcpy(result_buffer + UUID_HEX_POS[k], UUID_HEX_PAIR[uuid[k]], 2);
   }
   result_buffer[8] = '-';
   result_buffer[13] = '-';
   result_buffer[18] = '-';
   result_buffer[23] = '-';
-  result_buffer[HOSTMEM_UUID_STRING_LENGTH] = '\0';
+  result_buffer[ARNM_UUID_STRING_LENGTH] = '\0';
 }

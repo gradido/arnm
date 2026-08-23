@@ -1,10 +1,10 @@
-#include "hostmem/mono_timer.h"
+#include "arnm/mono_timer.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 
-#include "hostmem/duration.h"
+#include "arnm/duration.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -15,7 +15,7 @@ static LARGE_INTEGER freq = {.QuadPart = 0};
 // for support more platforms, look into this as example:
 // https://github.com/siu/minunit/blob/master/minunit.h
 static int64_t get_time_ns() {
-  if (freq.QuadPart == 0) { hostmem_mono_timer_init(); }
+  if (freq.QuadPart == 0) { arnm_mono_timer_init(); }
 
   LARGE_INTEGER counter;
   if (!QueryPerformanceCounter(&counter)) {
@@ -51,7 +51,7 @@ static int64_t get_time_ns() {
 
 #endif
 
-bool hostmem_mono_timer_init() {
+bool arnm_mono_timer_init() {
 #ifdef _WIN32
   if (!QueryPerformanceFrequency(&freq)) {
     fprintf(stderr, "Error: QueryPerformanceFrequency failed\n");
@@ -61,25 +61,25 @@ bool hostmem_mono_timer_init() {
   return true;
 }
 
-void hostmem_mono_timer_reset(hostmem_mono_timer *start) {
+void arnm_mono_timer_reset(arnm_mono_timer *start) {
   *start = get_time_ns();
 }
 
-int64_t hostmem_mono_timer_nanos(hostmem_mono_timer start) {
+int64_t arnm_mono_timer_nanos(arnm_mono_timer start) {
   return get_time_ns() - start;
 }
 
-double hostmem_mono_timer_micros(hostmem_mono_timer start) {
-  return (double)hostmem_mono_timer_nanos(start) / 1e3;
+double arnm_mono_timer_micros(arnm_mono_timer start) {
+  return (double)arnm_mono_timer_nanos(start) / 1e3;
 }
 
-double hostmem_mono_timer_millis(hostmem_mono_timer start) {
-  return (double)hostmem_mono_timer_nanos(start) / 1e6;
+double arnm_mono_timer_millis(arnm_mono_timer start) {
+  return (double)arnm_mono_timer_nanos(start) / 1e6;
 }
 
-double hostmem_mono_timer_seconds(hostmem_mono_timer start) {
-  return (double)hostmem_mono_timer_nanos(start) / 1e9;
+double arnm_mono_timer_seconds(arnm_mono_timer start) {
+  return (double)arnm_mono_timer_nanos(start) / 1e9;
 }
-int hostmem_mono_timer_string(char *buffer, size_t buffer_size, hostmem_mono_timer start) {
-  return hostmem_duration_string(buffer, buffer_size, hostmem_mono_timer_nanos(start), 4);
+int arnm_mono_timer_string(char *buffer, size_t buffer_size, arnm_mono_timer start) {
+  return arnm_duration_string(buffer, buffer_size, arnm_mono_timer_nanos(start), 4);
 }

@@ -19,7 +19,7 @@ endif()
 #   cmake --build build --config Release
 #   ctest --test-dir build -C Release
 
-set(PROJECT_NAME hostmem)
+set(PROJECT_NAME arnm)
 project(${PROJECT_NAME} C)
 
 # CMake only learned to pass /std:c11 to MSVC in 3.20; older versions accept these lines and
@@ -72,25 +72,46 @@ if(MSVC)
   add_compile_options(/utf-8)
 endif()
 
-FILE(GLOB HOSTMEM_SRC "src/*.c")
-FILE(GLOB HOSTMEM_HEADERS "include/hostmem/*.h")
+# Mirrors c_warning_flags in build.zig. -Wconversion earns its place because this library
+# narrows on purpose and often: element_size into a uint16_t field, element counts into bucket
+# counts, bucket counts into index slots. A silent narrowing is exactly how those turn into
+# wrong results instead of ARNM_ERROR_ARITHMETIC_OVERFLOW, so every remaining one is meant to
+# carry an explicit cast next to the check that bounds it.
+#
+# MSVC has no -Wconversion; C4242, C4244 and C4267 are the three warnings that together cover
+# the same ground, and they are off by default, so each is raised to level 1 explicitly.
+#
+# Nothing here is -Werror, and this build is the one that actually prints the findings: zig
+# hides C warnings on a successful build and turns them into errors on a failing one, so the
+# CMake build is where a narrowing gets noticed without the tree being broken already.
+if(MSVC)
+  set(ARNM_WARNING_FLAGS /w14242 /w14244 /w14267)
+else()
+  set(ARNM_WARNING_FLAGS -Wconversion)
+endif()
 
-add_library(${PROJECT_NAME} STATIC ${HOSTMEM_SRC} ${HOSTMEM_HEADERS})
+FILE(GLOB ARNM_SRC "src/*.c")
+FILE(GLOB ARNM_HEADERS "include/arnm/*.h")
+
+add_library(${PROJECT_NAME} STATIC ${ARNM_SRC} ${ARNM_HEADERS})
 
 target_include_directories(${PROJECT_NAME} PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
 
+# PRIVATE: a consumer of the installed library picks its own warning level.
+target_compile_options(${PROJECT_NAME} PRIVATE ${ARNM_WARNING_FLAGS})
+
 if(MSVC)
-  source_group("src" FILES ${HOSTMEM_SRC})
-  source_group("include" FILES ${HOSTMEM_HEADERS})
+  source_group("src" FILES ${ARNM_SRC})
+  source_group("include" FILES ${ARNM_HEADERS})
   # debug symbols for a parent project stepping into this one
   target_compile_options(${PROJECT_NAME} PRIVATE $<$<CONFIG:Debug>:/JMC>)
 endif()
 
 install(TARGETS ${PROJECT_NAME} ARCHIVE DESTINATION lib)
-install(FILES ${HOSTMEM_HEADERS} DESTINATION include/hostmem)
+install(FILES ${ARNM_HEADERS} DESTINATION include/arnm)
 
 if(ENABLE_BENCHMARKS)
   add_subdirectory(benchmarks)

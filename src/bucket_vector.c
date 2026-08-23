@@ -30,6 +30,10 @@ static inline uint32_t index_bytes(uint16_t capacity) {
 }
 
 static inline bool is_state_valid(const arnm_bvec *v) {
+  /* What _init writes and nothing else can produce. A descriptor that never saw _init reads */
+  /* as all zeroes, and _reserve divides by the element size -- so this has to be the first   */
+  /* question asked, before any of the shape below is looked at.                              */
+  if (!v->element_size || !v->bucket_capacity_max_log2) { return false; }
   uint16_t bucket_count = bucket_count_allocated(v);
   // empty buckets
   if (!v->buckets) {
@@ -84,7 +88,8 @@ arnm_result arnm_bvec_reserve(arnm_bvec *v, uint32_t element_count) {
   if (!is_state_valid(v)) return ARNM_ERROR_INVALID_STATE;
 
   /* one bound for two demands: the whole payload stays addressable in the allocator's */
-  /* uint32_t, and rounding up to whole buckets cannot wrap */
+  /* uint32_t, and rounding up to whole buckets cannot wrap. is_state_valid above is what */
+  /* makes the division safe -- it refuses a descriptor whose element size is still 0 */
   if (element_count > (UINT32_MAX - bucket_mask(v->bucket_capacity_max_log2)) / v->element_size) {
     return ARNM_ERROR_ARITHMETIC_OVERFLOW;
   }

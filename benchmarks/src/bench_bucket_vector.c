@@ -1,9 +1,11 @@
+#include "arnm/arena.h"
+#include "arnm/bucket_vector.h"
+#include "arnm/memory.h"
+#include "arnm/mono_timer.h"
+#include "arnm/result.h"
 #include "bench_report.h"
-#include "hostmem/bucket_vector.h"
-#include "hostmem/memory.h"
-#include "hostmem/mono_timer.h"
-#include "hostmem/result.h"
 
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,18 +28,44 @@ typedef struct bench_payload {
   uint8_t blob[48];
 } bench_payload;
 
-HOSTMEM_BVEC_STATIC(bvec_u64, uint64_t, 9)          /* 512 * 8 B = 4 KiB buckets */
-HOSTMEM_BVEC_STATIC(bvec_u64_small, uint64_t, 5)    /* 32 * 8 B = 256 B buckets */
-HOSTMEM_BVEC_STATIC(bvec_u64_large, uint64_t, 13)   /* 8192 * 8 B = 64 KiB buckets */
-HOSTMEM_BVEC_STATIC(bvec_payload, bench_payload, 6) /* 64 * 64 B = 4 KiB buckets */
+/* The bucket size is an _init argument now rather than part of the type, so each accessor set
+   is paired with the exponent its vectors are opened with. Every vector is an arnm_bvec; only
+   the generated accessors differ, and they are what keeps the element type straight. */
+ARNM_BVEC_DEFINE(bvec_u64, uint64_t)
+ARNM_BVEC_DEFINE(bvec_payload, bench_payload)
+
+/*
+ * The index array holds at most ARNM_BVEC_MAX_INDEX_CAPACITY bucket pointers, so a vector
+ * tops out at that many buckets times its bucket capacity. At ELEMENT_COUNT elements that
+ * puts a floor under the exponent -- 4 M uint64 need 4 M / 8191 = 489 per bucket, so nothing
+ * below 2^9 can hold the run at all. The bucket size section therefore compares 4 KiB, 16 KiB
+ * and 64 KiB rather than starting at 256 B: the smaller buckets are not a slower way to store
+ * 4 M elements, they cannot store them.
+ */
+#define BVEC_U64_LOG2 9        /* 512 * 8 B = 4 KiB buckets */
+#define BVEC_U64_MID_LOG2 11   /* 2048 * 8 B = 16 KiB buckets */
+#define BVEC_U64_LARGE_LOG2 13 /* 8192 * 8 B = 64 KiB buckets */
+#define BVEC_PAYLOAD_LOG2 10   /* 1024 * 64 B = 64 KiB buckets */
+
+static_assert(
+    (uint64_t)ARNM_BVEC_MAX_INDEX_CAPACITY << BVEC_U64_LOG2 >= ELEMENT_COUNT,
+    "the smallest bucket size in this file must still hold a whole run"
+);
+static_assert(
+    (uint64_t)ARNM_BVEC_MAX_INDEX_CAPACITY << BVEC_PAYLOAD_LOG2 >= ELEMENT_COUNT,
+    "same for the payload vector"
+);
+
+/* index_grow_step_size 0 takes the library's default, which is what these steps want to time */
+#define BVEC_GROW_DEFAULT 0
 
 /** Prefilled sources for the read-side steps; filled once before the benchmarks run. */
-static bvec_u64 g_filled;
+static arnm_bvec g_filled;
 static uint64_t *g_flat = NULL;
 /** Kept across clear/refill so the step measures reuse of already allocated buckets. */
-static bvec_u64 g_reused;
+static arnm_bvec g_reused;
 /** Arena large enough for ELEMENT_COUNT uint64 plus bucket index; reset per step. */
-static hostmem g_arena;
+static arnm g_arena;
 /** Consumes every value read so the compiler cannot drop the traversal steps. */
 static volatile uint64_t g_sink = 0;
 
@@ -48,35 +76,51 @@ static volatile uint64_t g_sink = 0;
  * the step would finish suspiciously fast and be reported as a result. Checked once per step,
  * never inside a measured loop, so the timing stays untouched.
  */
-static void require_ok(hostmem_result result, const char *what) {
-  if (HOSTMEM_SUCCESS == result) { return; }
-  fprintf(stderr, "benchmark setup failed: %s: %s\n", what, hostmem_result_to_string(result));
+static void require_ok(arnm_result result, const char *what) {
+  if (ARNM_SUCCESS == result) { return; }
+  fprintf(stderr, "benchmark setup failed: %s: %s\n", what, arnm_result_to_string(result));
   exit(EXIT_FAILURE);
+}
+
+/**
+ * Append @p count values and report the first refusal.
+ *
+ * The loop carries the check rather than ignoring the result: a vector that runs into its
+ * bucket cap stops storing and keeps returning, which would show up as a very fast step and be
+ * printed as a measurement. One predictable compare per element is the price of that not
+ * happening quietly.
+ */
+static arnm_result push_all(arnm_bvec *v, int count) {
+  arnm_result result = ARNM_SUCCESS;
+  for (int i = 0; i < count && ARNM_SUCCESS == result; ++i) {
+    result = bvec_u64_push(v, (uint64_t)i);
+  }
+  return result;
 }
 
 /* --- append ----------------------------------------------------------------------------- */
 
 static void test_bvec_push(int stepCount) {
-  bvec_u64 v;
-  bvec_u64_init(&v, NULL);
-  for (int i = 0; i < stepCount; ++i) bvec_u64_push(&v, (uint64_t)i);
+  arnm_bvec v;
+  bvec_u64_init(&v, BVEC_U64_LOG2, BVEC_GROW_DEFAULT, NULL);
+  require_ok(push_all(&v, stepCount), "push");
   bvec_u64_free(&v);
 }
 
 static void test_bvec_push_reserved(int stepCount) {
-  bvec_u64 v;
-  bvec_u64_init(&v, NULL);
+  arnm_bvec v;
+  bvec_u64_init(&v, BVEC_U64_LOG2, BVEC_GROW_DEFAULT, NULL);
   require_ok(bvec_u64_reserve(&v, (uint32_t)stepCount), "reserve");
-  for (int i = 0; i < stepCount; ++i) bvec_u64_push(&v, (uint64_t)i);
+  require_ok(push_all(&v, stepCount), "push");
   bvec_u64_free(&v);
 }
 
 static void test_bvec_push_arena(int stepCount) {
-  bvec_u64 v;
-  hostmem_reset(&g_arena);
-  bvec_u64_init(&v, &g_arena);
+  arnm_bvec v;
+  arnm_reset(&g_arena);
+  bvec_u64_init(&v, BVEC_U64_LOG2, BVEC_GROW_DEFAULT, &g_arena);
   require_ok(bvec_u64_reserve(&v, (uint32_t)stepCount), "reserve");
-  for (int i = 0; i < stepCount; ++i) bvec_u64_push(&v, (uint64_t)i);
+  require_ok(push_all(&v, stepCount), "push");
   bvec_u64_free(&v);
 }
 
@@ -97,50 +141,50 @@ static void test_flat_push(int stepCount) {
 
 /** Same appends, but into a vector whose buckets already exist -- clear keeps them. */
 static void test_bvec_refill_after_clear(int stepCount) {
-  for (int i = 0; i < stepCount; ++i) bvec_u64_push(&g_reused, (uint64_t)i);
+  require_ok(push_all(&g_reused, stepCount), "push into reused");
   bvec_u64_clear(&g_reused);
 }
 
 /* --- bucket size ------------------------------------------------------------------------ */
 
-static void test_bvec_push_256b_buckets(int stepCount) {
-  bvec_u64_small v;
-  bvec_u64_small_init(&v, NULL);
-  for (int i = 0; i < stepCount; ++i) bvec_u64_small_push(&v, (uint64_t)i);
-  bvec_u64_small_free(&v);
+static void test_bvec_push_16kb_buckets(int stepCount) {
+  arnm_bvec v;
+  bvec_u64_init(&v, BVEC_U64_MID_LOG2, BVEC_GROW_DEFAULT, NULL);
+  require_ok(push_all(&v, stepCount), "push");
+  bvec_u64_free(&v);
 }
 
 static void test_bvec_push_64kb_buckets(int stepCount) {
-  bvec_u64_large v;
-  bvec_u64_large_init(&v, NULL);
-  for (int i = 0; i < stepCount; ++i) bvec_u64_large_push(&v, (uint64_t)i);
-  bvec_u64_large_free(&v);
+  arnm_bvec v;
+  bvec_u64_init(&v, BVEC_U64_LARGE_LOG2, BVEC_GROW_DEFAULT, NULL);
+  require_ok(push_all(&v, stepCount), "push");
+  bvec_u64_free(&v);
 }
 
 /* --- payload ---------------------------------------------------------------------------- */
 
 /** 64 byte payload passed by value: written twice, once to the stack, once into the bucket. */
 static void test_payload_push_by_value(int stepCount) {
-  bvec_payload v;
+  arnm_bvec v;
   bench_payload p;
-  bvec_payload_init(&v, NULL);
+  bvec_payload_init(&v, BVEC_PAYLOAD_LOG2, BVEC_GROW_DEFAULT, NULL);
   require_ok(bvec_payload_reserve(&v, (uint32_t)stepCount), "reserve payload");
   memset(&p, 0, sizeof(p));
   for (int i = 0; i < stepCount; ++i) {
     p.id = (uint64_t)i;
-    bvec_payload_push(&v, p);
+    require_ok(bvec_payload_push(&v, p), "push payload");
   }
   bvec_payload_free(&v);
 }
 
 /** The same payload built directly in its final slot -- one write instead of two. */
 static void test_payload_emplace(int stepCount) {
-  bvec_payload v;
+  arnm_bvec v;
   bench_payload *slot;
-  bvec_payload_init(&v, NULL);
+  bvec_payload_init(&v, BVEC_PAYLOAD_LOG2, BVEC_GROW_DEFAULT, NULL);
   require_ok(bvec_payload_reserve(&v, (uint32_t)stepCount), "reserve payload");
   for (int i = 0; i < stepCount; ++i) {
-    if (bvec_payload_emplace(&v, &slot) != HOSTMEM_SUCCESS) break;
+    if (bvec_payload_emplace(&v, &slot) != ARNM_SUCCESS) break;
     memset(slot, 0, sizeof(*slot));
     slot->id = (uint64_t)i;
   }
@@ -153,7 +197,7 @@ static void test_payload_emplace(int stepCount) {
 static void test_bvec_iterate_buckets(int stepCount) {
   uint64_t sum = 0;
   (void)stepCount;
-  for (uint32_t b = 0, buckets = bvec_u64_bucket_count(&g_filled); b < buckets; ++b) {
+  for (uint16_t b = 0, buckets = bvec_u64_bucket_count(&g_filled); b < buckets; ++b) {
     const uint64_t *data = bvec_u64_bucket_data(&g_filled, b);
     const uint32_t count = bvec_u64_bucket_size(&g_filled, b);
     for (uint32_t k = 0; k < count; ++k) sum += data[k];
@@ -161,13 +205,12 @@ static void test_bvec_iterate_buckets(int stepCount) {
   g_sink += sum;
 }
 
-/** Flat traversal through the FOREACH macro: one index lookup per element. */
-static void test_bvec_iterate_foreach(int stepCount) {
+/** Flat traversal by index: bucket and offset are recomputed for every element. */
+static void test_bvec_iterate_indexed(int stepCount) {
   uint64_t sum = 0;
-  uint64_t *item = NULL;
   (void)stepCount;
-  HOSTMEM_BVEC_FOREACH(bvec_u64, &g_filled, item, index) {
-    sum += *item;
+  for (uint32_t i = 0, count = bvec_u64_size(&g_filled); i < count; ++i) {
+    sum += *bvec_u64_get(&g_filled, i);
   }
   g_sink += sum;
 }
@@ -207,10 +250,10 @@ static void test_flat_random_access(int stepCount) {
 
 /** Pointers taken before growth stay valid -- this is what the indirection buys. */
 static void test_bvec_push_pop_cycle(int stepCount) {
-  bvec_u64 v;
-  bvec_u64_init(&v, NULL);
+  arnm_bvec v;
+  bvec_u64_init(&v, BVEC_U64_LOG2, BVEC_GROW_DEFAULT, NULL);
   require_ok(bvec_u64_reserve(&v, (uint32_t)stepCount), "reserve");
-  for (int i = 0; i < stepCount; ++i) bvec_u64_push(&v, (uint64_t)i);
+  require_ok(push_all(&v, stepCount), "push");
   for (int i = 0; i < stepCount; ++i) bvec_u64_pop(&v);
   bvec_u64_free(&v);
 }
@@ -219,22 +262,22 @@ static void test_bvec_push_pop_cycle(int stepCount) {
 
 static void prepare_test_data(void) {
   g_flat = (uint64_t *)malloc((size_t)ELEMENT_COUNT * sizeof(uint64_t));
-  if (!g_flat) { require_ok(HOSTMEM_ERROR_OUT_OF_MEMORY, "flat reference array"); }
-  bvec_u64_init(&g_filled, NULL);
+  if (!g_flat) { require_ok(ARNM_ERROR_OUT_OF_MEMORY, "flat reference array"); }
+  bvec_u64_init(&g_filled, BVEC_U64_LOG2, BVEC_GROW_DEFAULT, NULL);
   require_ok(bvec_u64_reserve(&g_filled, (uint32_t)ELEMENT_COUNT), "reserve filled");
   for (int i = 0; i < ELEMENT_COUNT; ++i) {
-    bvec_u64_push(&g_filled, (uint64_t)i);
+    require_ok(bvec_u64_push(&g_filled, (uint64_t)i), "fill source");
     g_flat[i] = (uint64_t)i;
   }
   /* filled once, then cleared: the refill step finds every bucket already in place */
-  bvec_u64_init(&g_reused, NULL);
+  bvec_u64_init(&g_reused, BVEC_U64_LOG2, BVEC_GROW_DEFAULT, NULL);
   require_ok(bvec_u64_reserve(&g_reused, (uint32_t)ELEMENT_COUNT), "reserve reused");
   bvec_u64_clear(&g_reused);
   /* payload for the index array included, so no step runs the arena dry */
   /* Without this a failed init would leave g_arena zeroed, which is default mode: the
      arena steps would quietly measure malloc and still be labelled "arena". */
   require_ok(
-      hostmem_init_arena(&g_arena, (uint32_t)ELEMENT_COUNT * sizeof(uint64_t) + 1024 * 1024),
+      arnm_init_arena(&g_arena, (uint32_t)ELEMENT_COUNT * sizeof(uint64_t) + 1024 * 1024),
       "init arena"
   );
 }
@@ -242,16 +285,16 @@ static void prepare_test_data(void) {
 static void release_test_data(void) {
   bvec_u64_free(&g_filled);
   bvec_u64_free(&g_reused);
-  hostmem_release(&g_arena);
+  arnm_release(&g_arena);
   free(g_flat);
 }
 
 int main(void) {
-  hostmem_mono_timer timeUsed;
+  arnm_mono_timer timeUsed;
   const int stepCount = ELEMENT_COUNT;
 
-  hostmem_mono_timer_init();
-  hostmem_mono_timer_reset(&timeUsed);
+  arnm_mono_timer_init();
+  arnm_mono_timer_reset(&timeUsed);
   prepare_test_data();
   bench_prepared(timeUsed);
 
@@ -266,8 +309,8 @@ int main(void) {
   bench_step(test_bvec_push_pop_cycle, stepCount, "  bucket vector push + pop cycle", "element");
 
   bench_section("bucket size (same 4 M appends)");
-  bench_step(test_bvec_push_256b_buckets, stepCount, "  256 B buckets", "element");
   bench_step(test_bvec_push, stepCount, "  4 KiB buckets", "element");
+  bench_step(test_bvec_push_16kb_buckets, stepCount, "  16 KiB buckets", "element");
   bench_step(test_bvec_push_64kb_buckets, stepCount, "  64 KiB buckets", "element");
 
   bench_section("64 byte payload");
@@ -276,7 +319,7 @@ int main(void) {
 
   bench_section("traversal");
   bench_step(test_bvec_iterate_buckets, stepCount, "  bucket vector, bucket wise", "element");
-  bench_step(test_bvec_iterate_foreach, stepCount, "  bucket vector, foreach", "element");
+  bench_step(test_bvec_iterate_indexed, stepCount, "  bucket vector, by index", "element");
   bench_step(test_flat_iterate, stepCount, "  flat array", "element");
 
   bench_section("random access");
