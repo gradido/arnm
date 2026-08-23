@@ -1,8 +1,8 @@
+#include "arnm/converter.h"
+#include "arnm/memory_block.h"
+#include "arnm/mono_timer.h"
+#include "arnm/result.h"
 #include "bench_report.h"
-#include "hostmem/converter.h"
-#include "hostmem/memory_block.h"
-#include "hostmem/mono_timer.h"
-#include "hostmem/result.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -12,7 +12,7 @@
  * What this benchmark measures
  *
  * Both directions of the byte-to-text conversions -- hex over a whole block, and a uuid in its
- * canonical 8-4-4-4-12 form -- on their own, no baseline beside them. hostmem links no crypto
+ * canonical 8-4-4-4-12 form -- on their own, no baseline beside them. arnm links no crypto
  * library, so the constant time conversions such a library ships are not here to compare
  * against, and a printf loop would answer a question nobody asks in a hot path.
  *
@@ -34,7 +34,18 @@
 #define PAYLOAD_VARIANTS 64
 
 /*
- * Several payloads rather than one, cycled through: a single buffer converted a million times
+ * Conversions per step, the same in every section.
+ *
+ * One count throughout, so the rows can be read straight against each other and the closing
+ * line has a single figure to name. It is set by the slowest section rather than by the
+ * fastest: 1024 bytes costs orders of magnitude more per conversion than 16, so a count that
+ * suits the short inputs would drag the whole run out for nothing. The per conversion figures
+ * are what the sections are about, and those do not depend on how often the step was repeated.
+ */
+#define BENCH_CONVERSIONS 400000
+
+/*
+ * Several payloads rather than one, cycled through: a single buffer converted over and over
  * sits in L1 and reports a cache the real caller will not have. The hex strings are prepared
  * once from the same payloads, so the decoding steps read valid input and never take the
  * failure path.
@@ -43,12 +54,12 @@ static uint8_t payloads[PAYLOAD_VARIANTS][MAX_PAYLOAD_SIZE];
 static char hexStrings[PAYLOAD_VARIANTS][MAX_PAYLOAD_SIZE * 2 + 1];
 
 /** The same payloads rendered as uuids, prepared once so the decoding step reads valid input. */
-static char uuidStrings[PAYLOAD_VARIANTS][HOSTMEM_UUID_STRING_LENGTH + 1];
+static char uuidStrings[PAYLOAD_VARIANTS][ARNM_UUID_STRING_LENGTH + 1];
 
 /** Receives every conversion, so the compiler cannot drop the call. */
 static char benchHexBuffer[MAX_PAYLOAD_SIZE * 2 + 1];
 static uint8_t benchBinaryBuffer[MAX_PAYLOAD_SIZE];
-static char benchUuidBuffer[HOSTMEM_UUID_STRING_LENGTH + 1];
+static char benchUuidBuffer[ARNM_UUID_STRING_LENGTH + 1];
 
 static int cursor = 0;
 /** Set by the driver before each step; the step functions take their length from here. */
@@ -66,28 +77,28 @@ static int nextVariant(void) {
 
 static void test_binary_to_hex(int stepCount) {
   for (int i = 0; i < stepCount; ++i) {
-    hostmem_memory_block block = {payloads[nextVariant()], currentLength};
-    resultSink |= (unsigned)hostmem_binary_to_hex(benchHexBuffer, &block);
+    arnm_memory_block block = {payloads[nextVariant()], currentLength};
+    resultSink |= (unsigned)arnm_binary_to_hex(benchHexBuffer, &block);
   }
 }
 
 static void test_binary_from_hex(int stepCount) {
   for (int i = 0; i < stepCount; ++i) {
     // the string is terminated at twice the current length, so only that much is read
-    resultSink |= (unsigned)hostmem_binary_from_hex(benchBinaryBuffer, hexStrings[nextVariant()]);
+    resultSink |= (unsigned)arnm_binary_from_hex(benchBinaryBuffer, hexStrings[nextVariant()]);
   }
 }
 
 static void test_uuid_to_string(int stepCount) {
   for (int i = 0; i < stepCount; ++i) {
-    hostmem_uuid_to_string(benchUuidBuffer, payloads[nextVariant()]);
+    arnm_uuid_to_string(benchUuidBuffer, payloads[nextVariant()]);
   }
   writtenSink |= (unsigned char)benchUuidBuffer[0];
 }
 
 static void test_uuid_from_string(int stepCount) {
   for (int i = 0; i < stepCount; ++i) {
-    resultSink |= (unsigned)hostmem_uuid_from_string(benchBinaryBuffer, uuidStrings[nextVariant()]);
+    resultSink |= (unsigned)arnm_uuid_from_string(benchBinaryBuffer, uuidStrings[nextVariant()]);
   }
 }
 
@@ -97,7 +108,7 @@ static void prepare_test_data(void) {
   srand(4711);
   for (int v = 0; v < PAYLOAD_VARIANTS; ++v) {
     for (int i = 0; i < MAX_PAYLOAD_SIZE; ++i) { payloads[v][i] = (uint8_t)(rand() & 0xFF); }
-    hostmem_uuid_to_string(uuidStrings[v], payloads[v]);
+    arnm_uuid_to_string(uuidStrings[v], payloads[v]);
   }
 }
 
@@ -108,8 +119,8 @@ static void prepare_test_data(void) {
 static void set_length(uint32_t length) {
   currentLength = length;
   for (int v = 0; v < PAYLOAD_VARIANTS; ++v) {
-    hostmem_memory_block block = {payloads[v], length};
-    if (HOSTMEM_SUCCESS != hostmem_binary_to_hex(hexStrings[v], &block)) {
+    arnm_memory_block block = {payloads[v], length};
+    if (ARNM_SUCCESS != arnm_binary_to_hex(hexStrings[v], &block)) {
       printf("could not prepare the hex strings\n");
       exit(1);
     }
@@ -118,41 +129,37 @@ static void set_length(uint32_t length) {
 }
 
 int main(void) {
-  hostmem_mono_timer timeUsed;
+  arnm_mono_timer timeUsed;
   static const uint32_t lengths[] = {16, 32, 64, 1024};
 
-  hostmem_mono_timer_init();
-  hostmem_mono_timer_reset(&timeUsed);
+  if (!bench_timer_start(&timeUsed)) { return EXIT_FAILURE; }
   prepare_test_data();
   bench_prepared(timeUsed);
 
   for (size_t l = 0; l < sizeof(lengths) / sizeof(lengths[0]); ++l) {
     char heading[64];
-    // a long input costs orders of magnitude more per conversion than a short one, so each
-    // section buys its own step count rather than dragging the whole run to the slowest
-    const int stepCount = lengths[l] >= 1024 ? 200000 : 4000000;
 
     set_length(lengths[l]);
-    snprintf(heading, sizeof(heading), "%u bytes, %d conversions", lengths[l], stepCount);
+    // the count is the same everywhere and named once at the end, so the heading carries only
+    // what actually varies between sections
+    snprintf(heading, sizeof(heading), "%u bytes", lengths[l]);
     bench_section(heading);
-    bench_step(test_binary_to_hex, stepCount, "  binary to hex", "conversion");
-    bench_step(test_binary_from_hex, stepCount, "  binary from hex", "conversion");
+    bench_step(test_binary_to_hex, BENCH_CONVERSIONS, "  binary to hex", "conversion");
+    bench_step(test_binary_from_hex, BENCH_CONVERSIONS, "  binary from hex", "conversion");
   }
 
   {
-    const int stepCount = 4000000;
-    char heading[64];
     cursor = 0;
-    snprintf(heading, sizeof(heading), "uuid, %d conversions", stepCount);
-    bench_section(heading);
-    bench_step(test_uuid_to_string, stepCount, "  uuid to string", "conversion");
-    bench_step(test_uuid_from_string, stepCount, "  uuid from string", "conversion");
+    bench_section("uuid (16 bytes, canonical form)");
+    bench_step(test_uuid_to_string, BENCH_CONVERSIONS, "  uuid to string", "conversion");
+    bench_step(test_uuid_from_string, BENCH_CONVERSIONS, "  uuid from string", "conversion");
   }
 
-  bench_total_time(timeUsed);
+  // every step ran the same count, so the closing line can name it -- see bench_total_time()
+  bench_total(timeUsed, BENCH_CONVERSIONS, "conversion");
   // read once at the end: without this the compiler may drop every call whose result nobody
   // wanted, and the benchmark would time an empty loop
-  if (resultSink != (unsigned)HOSTMEM_SUCCESS) { printf("a conversion failed: %u\n", resultSink); }
+  if (resultSink != (unsigned)ARNM_SUCCESS) { printf("a conversion failed: %u\n", resultSink); }
   if (!writtenSink) { printf("the uuid encoding wrote nothing\n"); }
   return 0;
 }

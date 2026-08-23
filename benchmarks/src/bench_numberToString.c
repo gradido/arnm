@@ -1,7 +1,7 @@
+#include "arnm/converter.h"
+#include "arnm/duration.h"
+#include "arnm/mono_timer.h"
 #include "bench_report.h"
-#include "hostmem/converter.h"
-#include "hostmem/duration.h"
-#include "hostmem/mono_timer.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -42,7 +42,7 @@ static void test_snprintf_uint64(int stepCount) {
 
 static void test_uint64_to_string(int stepCount) {
   for (int i = 0; i < stepCount; ++i) {
-    hostmem_uint64_to_string(benchBuffer, STRING_BUFFER_SIZE, getNextTestValue());
+    arnm_uint64_to_string(benchBuffer, STRING_BUFFER_SIZE, getNextTestValue());
   }
 }
 
@@ -50,14 +50,14 @@ static void test_uint64_to_string(int stepCount) {
 static void test_uint64_to_string_known_size(int stepCount) {
   for (int i = 0; i < stepCount; ++i) {
     const int slot = cursor;
-    hostmem_uint64_to_string_known_string_size(benchBuffer, getNextTestValue(), testSizes[slot]);
+    arnm_uint64_to_string_known_string_size(benchBuffer, getNextTestValue(), testSizes[slot]);
   }
 }
 
 /** Only the length, without writing a digit -- what sizing a buffer costs on its own. */
 static void test_uint64_to_string_size(int stepCount) {
   uint8_t sink = 0;
-  for (int i = 0; i < stepCount; ++i) { sink ^= hostmem_uint64_to_string_size(getNextTestValue()); }
+  for (int i = 0; i < stepCount; ++i) { sink ^= arnm_uint64_to_string_size(getNextTestValue()); }
   benchBuffer[0] = (char)sink;
 }
 
@@ -71,7 +71,7 @@ static void test_snprintf_int64(int stepCount) {
 
 static void test_int64_to_string(int stepCount) {
   for (int i = 0; i < stepCount; ++i) {
-    hostmem_int64_to_string(benchBuffer, STRING_BUFFER_SIZE, -(int64_t)(getNextTestValue() >> 1));
+    arnm_int64_to_string(benchBuffer, STRING_BUFFER_SIZE, -(int64_t)(getNextTestValue() >> 1));
   }
 }
 
@@ -80,8 +80,8 @@ static void test_int64_to_string(int stepCount) {
 /** Nanoseconds to a readable span: the same digit loop, plus picking a unit for it. */
 static void test_duration_to_string(int stepCount) {
   for (int i = 0; i < stepCount; ++i) {
-    hostmem_duration_string(
-        benchBuffer, STRING_BUFFER_SIZE, (hostmem_duration)(getNextTestValue() >> 24), 4
+    arnm_duration_string(
+        benchBuffer, STRING_BUFFER_SIZE, (arnm_duration)(getNextTestValue() >> 24), 4
     );
   }
 }
@@ -93,15 +93,14 @@ static void prepare_test_data(void) {
   for (int i = 0; i < TEST_VALUES_COUNT; ++i) {
     testValues[i] = ((uint64_t)rand() << 48) ^ ((uint64_t)rand() << 32) ^ ((uint64_t)rand() << 16) ^
                     (uint64_t)rand();
-    testSizes[i] = hostmem_uint64_to_string_size(testValues[i]);
+    testSizes[i] = arnm_uint64_to_string_size(testValues[i]);
   }
 }
 
 int main(void) {
-  hostmem_mono_timer timeUsed;
+  arnm_mono_timer timeUsed;
 
-  hostmem_mono_timer_init();
-  hostmem_mono_timer_reset(&timeUsed);
+  if (!bench_timer_start(&timeUsed)) { return EXIT_FAILURE; }
   prepare_test_data();
   bench_prepared(timeUsed);
 
@@ -109,16 +108,16 @@ int main(void) {
 
   bench_section("unsigned to string");
   bench_step(test_snprintf_uint64, stepCount, "  snprintf", "conversion");
-  bench_step(test_uint64_to_string, stepCount, "  hostmem", "conversion");
-  bench_step(test_uint64_to_string_known_size, stepCount, "  hostmem, size known", "conversion");
+  bench_step(test_uint64_to_string, stepCount, "  arnm", "conversion");
+  bench_step(test_uint64_to_string_known_size, stepCount, "  arnm, size known", "conversion");
   bench_step(test_uint64_to_string_size, stepCount, "  size only", "conversion");
 
   bench_section("signed to string");
   bench_step(test_snprintf_int64, stepCount, "  snprintf", "conversion");
-  bench_step(test_int64_to_string, stepCount, "  hostmem", "conversion");
+  bench_step(test_int64_to_string, stepCount, "  arnm", "conversion");
 
   bench_section("duration to string");
-  bench_step(test_duration_to_string, stepCount, "  hostmem", "conversion");
+  bench_step(test_duration_to_string, stepCount, "  arnm", "conversion");
 
   bench_total(timeUsed, stepCount, "value");
 

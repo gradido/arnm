@@ -1,8 +1,9 @@
-# AGENTS.md – hostmem
+# AGENTS.md – arnm
 
 A **C11** library meant to be linked into a program written in something else. One sentence
-carries the whole design: **the host owns the memory.** The caller hands over a blob, hostmem
-works inside it, the blob goes back unchanged in size and ownership.
+carries the whole design: **data lives in memory arenas.** The caller hands over a blob, arnm
+opens its arenas inside it, and the blob goes back unchanged in size and ownership -- the
+library never owns memory it was not given.
 
 Everything below follows from that. The **memory contract** and the **commenting standard**
 are not negotiable; the rest is what saves you a wasted afternoon.
@@ -67,9 +68,9 @@ A benchmark number from a debug build is not wrong, it is answering a different 
 label it or do not report it.
 
 **Tests cap their own memory.** `tests/unit/src/memory_limit.h` sets `RLIMIT_AS` to 2048 MB on
-Linux, skipped under sanitizers. Raise it with `HOSTMEM_TEST_MEMORY_LIMIT_MB=8192`, disable
-with `0`. Include it in every new test binary. It exists because a boundary test once
-allocated 64 GB before anyone could reach Ctrl-C.
+Linux, skipped under sanitizers. Raise it with `ARNM_TEST_MEMORY_LIMIT_MB=8192`, disable with
+`0`. Include it in every new test binary. It exists because a boundary test once allocated
+64 GB before anyone could reach Ctrl-C.
 
 ----------
 
@@ -79,15 +80,15 @@ allocated 64 GB before anyone could reach Ctrl-C.
   Nowhere else, ever. `lint.sh` fails if a second one appears, and that check is the point of
   the library, not a formality.
 - **Sizes are `uint32_t`** — counts, indices, byte sizes alike. Anything that would not fit
-  returns `HOSTMEM_ERROR_ARITHMETIC_OVERFLOW` rather than wrapping. Where a bound is known at
+  returns `ARNM_ERROR_ARITHMETIC_OVERFLOW` rather than wrapping. Where a bound is known at
   compile time, use `static_assert` instead of a runtime check.
 - **Sizes are passed in, never stored.** Freeing and resizing need the size the caller
   allocated with; a wrong size moves the arena index by the wrong amount and hands the same
-  bytes out twice. `hostmem_memory_block` keeps pointer and size together when that
-  bookkeeping should not be the caller's job.
+  bytes out twice. `arnm_memory_block` keeps pointer and size together when that bookkeeping
+  should not be the caller's job.
 - **Every size rounds up to a multiple of 8**, which keeps every returned pointer 8 byte
   aligned.
-- **`HOSTMEM_WARNING_ARENA_MEMORY_NOT_RECLAIMED` is neither success nor failure**: the
+- **`ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED` is neither success nor failure**: the
   operation happened, the memory did not come back. Handle it explicitly at each call site and
   compare against the exact value. No `if (ok(result))` helper — a reader has to see that this
   warning can arrive here, and be able to decide anew what it should mean.
@@ -96,8 +97,8 @@ allocated 64 GB before anyone could reach Ctrl-C.
 - **No hidden state.** No globals holding allocators, no thread-local caches, no atexit
   handlers. A host may load this library twice into one process.
 
-`HOSTMEM_ERROR_USER_BASE` reserves the code range above 1000 for the embedding project. Codes
-below it belong to hostmem and may gain members between releases.
+`ARNM_ERROR_USER_BASE` reserves the code range above 1000 for the embedding project. Codes below
+it belong to arnm and may gain members between releases.
 
 ----------
 
@@ -136,10 +137,9 @@ on both architectures. Never claim a target you did not build.
 
 ## Naming
 
-Every public symbol starts with `hostmem_`, every macro with `HOSTMEM_`. The allocator type is
-`hostmem` itself, so its operations read as `hostmem_init_arena`, `hostmem_alloc`,
-`hostmem_reset`. `hostmem_release` returns the arena buffer; `hostmem_destroy` releases a
-descriptor that came from `hostmem_create`.
+Every public symbol starts with `arnm_`, every macro with `ARNM_`. The allocator type is `arnm`
+itself, so its operations read as `arnm_init_arena`, `arnm_alloc`, `arnm_reset`. `arnm_release`
+returns the arena buffer; `arnm_destroy` releases a descriptor that came from `arnm_create`.
 
 ----------
 
@@ -167,7 +167,7 @@ descriptor that came from `hostmem_create`.
 - The module MUST wrap the API using `@{` … `@}`.
 
 ```c
-/** @defgroup hostmem_memory hostmem_memory
+/** @defgroup arnm_memory arnm_memory
   *  @brief Allocator that is either a bump arena or plain malloc/free
   *  @{
   */
@@ -185,8 +185,8 @@ descriptor that came from `hostmem_create`.
 
 - One module per header
 - All public API must be inside the module block
-- Use flat, stable identifiers (`hostmem_memory`)
-- `include/hostmem/` stays flat — a header is `hostmem/bucket_vector.h`, never a subfolder deep
+- Use flat, stable identifiers (`arnm_memory`)
+- `include/arnm/` stays flat — a header is `arnm/bucket_vector.h`, never a subfolder deep
 
 ----------
 

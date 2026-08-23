@@ -1,11 +1,11 @@
-#include "hostmem/duration.h"
+#include "arnm/duration.h"
 
 #include <string.h>
 
-#include "hostmem/converter.h"
+#include "arnm/converter.h"
 
-int hostmem_duration_string(
-    char *buffer, size_t buffer_size, hostmem_duration duration, uint8_t precision
+int arnm_duration_string(
+    char *buffer, size_t buffer_size, arnm_duration duration, uint8_t precision
 ) {
   uint64_t ns = (uint64_t)duration;
 
@@ -47,7 +47,7 @@ int hostmem_duration_string(
   int64_t integerPart = (int64_t)decimalValue;
   int64_t fractionalPart = (int64_t)((decimalValue - integerPart) * 1000000000000000ULL);
 
-  size_t int_size = hostmem_uint64_to_string_size(integerPart);
+  size_t int_size = arnm_uint64_to_string_size(integerPart);
   size_t suffix_len = strlen(suffix);
   if (buffer_size <
       int_size + 2 + precision +
@@ -55,12 +55,12 @@ int hostmem_duration_string(
     return int_size + 1 + precision + suffix_len; // return required size without null terminator
   }
 
-  size_t written = hostmem_uint64_to_string_known_string_size(buffer, integerPart, int_size);
+  size_t written = arnm_uint64_to_string_known_string_size(buffer, integerPart, int_size);
   // --- fractional part ---
   if (precision > 0 && divisor > 1) {
     buffer[written++] = '.';
     size_t fractionalPartSize = 0;
-    if (fractionalPart) { fractionalPartSize = hostmem_uint64_to_string_size(fractionalPart); }
+    if (fractionalPart) { fractionalPartSize = arnm_uint64_to_string_size(fractionalPart); }
     // 15 = max fractional part size (15 zeros near the double boundary)
     size_t zerosBeforeCount = 15 - fractionalPartSize;
     if (zerosBeforeCount > precision) { zerosBeforeCount = precision; }
@@ -71,9 +71,8 @@ int hostmem_duration_string(
     size_t restNumbers = precision - zerosBeforeCount;
     if (restNumbers) {
       char tempBuffer[20]; // enough to hold fractional part
-      size_t frac_size = hostmem_uint64_to_string_known_string_size(
-          tempBuffer, fractionalPart, fractionalPartSize
-      );
+      size_t frac_size =
+          arnm_uint64_to_string_known_string_size(tempBuffer, fractionalPart, fractionalPartSize);
       memcpy(buffer + written, tempBuffer, restNumbers);
       written += restNumbers;
     }
