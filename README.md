@@ -72,6 +72,33 @@ allocator is on no path this library takes.
   release; handle it where it appears.
 - **Failures leave every output untouched.**
 
+## Asking an arena where it stands
+
+Two figures, read from opposite sides of the same line, and both a field read rather than a
+walk:
+
+```c
+uint32_t left = arnm_arena_remaining(&mem);   // what is still there
+size_t   over = arnm_arena_overflow_total(&mem);  // what was already turned away
+```
+
+`arnm_arena_remaining()` is the largest request that would still be served -- an arena never
+reaches past the block it was given. It is asked *before* a request, which is what makes it
+useful: code with somewhere else to put a large block can look first instead of being refused
+to find out. The figure is always a multiple of 8, and it holds until the next call that moves
+the index.
+
+`arnm_arena_overflow_total()` is the other half, and it is only ever read afterwards. Every
+request the arena had to refuse adds its rounded up size, saturating at `UINT32_MAX` rather
+than rolling over. Run the real workload once and the figure says how much larger the arena
+would have had to be — the sizing question a guess only postpones. `arnm_reset()` and
+`arnm_release()` clear it.
+
+Both answer 0 for `NULL`, for host mode and for a chain, so a 0 from either is "full" only when
+the handle really is a single arena. `arnm_is_arena()` and `arnm_is_multi_arena()` tell those
+cases apart, and a chain is asked through `arnm_multi_arena_measure()` instead — it opens more
+ground rather than running dry, so one remainder could not say what it appears to.
+
 ## When one arena is not enough
 
 An arena has the capacity it was born with. A chain keeps a set of them and opens the next one

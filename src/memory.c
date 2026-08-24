@@ -104,6 +104,11 @@ static inline uint32_t remaining_bytes(const arnm_intern *memory) {
 bool arnm_is_arena(const arnm *m) {
   return (is_arena((const arnm_intern *)m));
 }
+
+uint32_t arnm_arena_remaining(const arnm *m) {
+  return remaining_bytes((const arnm_intern *)m);
+}
+
 // true implies memory != NULL, so callers can skip their own null check
 static inline bool has_out_of_memory_capacity_check(const arnm_intern *memory) {
   return is_single_arena(memory);
