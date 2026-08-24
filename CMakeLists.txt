@@ -99,17 +99,11 @@ endif()
 FILE(GLOB ARNM_SRC "src/*.c")
 FILE(GLOB ARNM_HEADERS "include/arnm/*.h")
 
-# yyjson is the parser behind arnm/json_reader.h. It is a submodule under third_party/ and is
-# compiled into libarnm itself, so a consumer links one library and adds one include path --
-# mirrors build.zig, which does the same and leads here. The submodule is checked rather than
-# assumed: a `git clone` without --recursive leaves the directory empty, and the error that
-# follows would otherwise be a missing header three layers down, saying nothing about the fix.
+# yyjson is the parser behind arnm/json_reader.h. Its two files are copied into
+# third_party/yyjson/ rather than pulled in as a submodule -- see third_party/yyjson/README.md
+# for the version and the reason. It is compiled into libarnm itself, so a consumer links one
+# library and adds one include path -- mirrors build.zig, which does the same and leads here.
 set(YYJSON_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/yyjson/src/yyjson.c)
-if(NOT EXISTS ${YYJSON_SOURCE})
-  message(FATAL_ERROR
-    "${YYJSON_SOURCE} is missing -- the yyjson submodule is not checked out.\n"
-    "  git submodule update --init --recursive")
-endif()
 
 add_library(${PROJECT_NAME} STATIC ${ARNM_SRC} ${ARNM_HEADERS} ${YYJSON_SOURCE})
 

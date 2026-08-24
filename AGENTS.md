@@ -16,7 +16,6 @@ are not negotiable; the rest is what saves you a wasted afternoon.
 gets verified; a change to the build belongs there first.
 
 ```bash
-git submodule update --init --recursive       # once per clone; third_party/yyjson
 zig build -Dtests=true -Dbenchmarks=true      # host target, resolved by zig
 ./run_all.sh                 # every binary in zig-out/bin, one line each
 ./run_all.sh --tests         # skip the benchmarks
@@ -132,9 +131,10 @@ on both architectures. Never claim a target you did not build.
   needs `<stdlib.h>`; that `windows.h` drags it in is luck, not a contract.
 - **Every `.c` includes its own header first**, so the compiler checks declaration against
   definition.
-- **One vendored dependency, and it stays hidden.** `third_party/yyjson` is a git submodule
-  and the only one. A dependency here becomes a dependency for every host that embeds this,
-  in every language, so the bar stays high — and what got over it lives under three rules:
+- **One vendored dependency, and it stays hidden.** `third_party/yyjson` is the only one, and
+  it is a copy of two files rather than a submodule. A dependency here becomes a dependency for
+  every host that embeds this, in every language, so the bar stays high — and what got over it
+  lives under three rules:
   - **No public header names it.** `arnm/json_reader.h` and `arnm/json_writer.h` are plain
     C11 and install on their own; the yyjson include path is private to the library target in
     both builds, and `yyjson.h` is included by exactly one place, `src/json_memory.h` -- which
@@ -145,17 +145,29 @@ on both architectures. Never claim a target you did not build.
     allocator that forwards to `arnm_alloc`/`arnm_realloc`/`arnm_free`, so nothing in it
     ever reaches libc — yyjson's own default allocator is on no path this library takes.
     That is what keeps the memory contract true with a parser in the tree, and it is worth
-    re-checking whenever the submodule moves.
+    re-checking whenever the copy is updated.
   - **It is not held to our warning flags.** `-Wconversion` is a rule arnm holds itself to,
     and `yyjson.c` is exempted from it in both builds. `lint.sh` does not walk
     `third_party/` either, which is deliberate: the `malloc` rule is about arnm's own
     sources, and the promise it backs is the one above.
 
-  It is pinned to a release tag (`0.12.0`) and not to a branch head, for the same reason
-  `tests/CMakeLists.txt` pins googletest: a submodule following `master` makes two clones
-  build different libraries without either saying so. A fresh clone needs
-  `git submodule update --init --recursive`; both builds check for the source and name it when
-  it is missing, rather than failing on a header three layers down.
+  **`src/yyjson.c`, `src/yyjson.h` and `LICENSE` are copied in unmodified**, at release
+  `0.12.0`; `third_party/yyjson/README.md` records the upstream commit and the three commands
+  that move it. Upstream's build files, tests and fuzzers are not here -- the one source is
+  compiled straight into `libarnm` and yyjson is never built as a project of its own.
+
+  It was a submodule until 0.7.2 and stopped being one for a reason that has nothing to do with
+  taste: **`zig fetch` takes the repository tree and nothing under it.** A submodule reaches a
+  consumer as an empty directory, so a project depending on arnm through `build.zig.zon` got a
+  library whose JSON half would not compile, failing on a missing header three layers down --
+  and `--recursive` is not something a dependency can ask of the projects that use it. A copy is
+  what makes fetching arnm fetch all of arnm. Two consequences worth keeping in view: the tree
+  carries ~700 KB it did not before, and a version bump is a copy that nothing checks for you,
+  which is what the pinned commit in that README is for.
+
+  Do not modify the two files. Keeping them byte-identical to the tag is what makes an update a
+  copy instead of a merge, and what everything arnm needs on top of them lives in
+  `src/json_memory.h` for.
 
 ----------
 
