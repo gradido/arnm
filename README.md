@@ -10,8 +10,7 @@ it works inside that blob, and it gives the blob back.
 
 ```c
 #include <stdalign.h>
-#include "arnm/memory.h"
-#include "arnm/bucket_vector.h"
+#include "arnm/arena.h"
 
 alignas(8) uint8_t blob[64 * 1024];   // wherever this comes from: the host decides
 arnm mem;
@@ -47,7 +46,8 @@ allocator is on no path this library takes.
 
 | Header | What it gives you |
 |---|---|
-| `arnm/memory.h` | bump arena or malloc/free, chosen per call by what you pass |
+| `arnm/memory.h` | the `arnm` handle and the calls every allocator answers: alloc, free, realloc, clone, reset |
+| `arnm/arena.h` | make a handle an arena -- over memory it takes from the host, or memory you lend it |
 | `arnm/memory_block.h` | pointer and size kept together, so freeing needs no bookkeeping from you |
 | `arnm/multi_arena.h` | a chain of arenas that opens another one instead of running dry |
 | `arnm/fixed_arena_pool.h` | a fixed set of equal sized arenas, lent out and returned; the peak is known at init |
@@ -74,32 +74,52 @@ allocator is on no path this library takes.
 
 ## When one arena is not enough
 
-An arena has the capacity it was born with. `arnm_multi_arena` keeps a chain of them and opens
-the next one when the current stretch fills, so the size never has to be guessed right up front
-— and a request larger than the arena capacity gets ground of its own instead of a refusal.
+An arena has the capacity it was born with. A chain keeps a set of them and opens the next one
+when the current stretch fills, so the size never has to be guessed right up front — and a
+request larger than the arena capacity gets ground of its own instead of a refusal.
+
+A chain is an `arnm *` like any other allocator: it is *built* through this header and then
+*used* through the calls above.
 
 ```c
 #include "arnm/multi_arena.h"
 
-arnm_multi_arena chain;
 // 1 MiB per arena, and an arena drops out of the search once under 4 KiB is left.
-// 0 for either takes the default: 1 MiB and 128 bytes.
-arnm_multi_arena_init(&chain, 1024 * 1024, 4096, NULL);
-arnm_multi_arena_borrow(&chain, blob, sizeof(blob)); // optional: lend it the host's blob,
+// {0} would take every default: 1 KiB arenas, a 64 byte threshold, no ceiling on the count.
+arnm_multi_arena_options options = {0};
+options.arena_capacity = 1024 * 1024;
+options.full_remaining = 4096;
+
+arnm *chain = arnm_create_multi_arena(&options, NULL);
+arnm_multi_arena_borrow(chain, blob, sizeof(blob));  // optional: lend it the host's blob,
                                                      // same alignas(8) and multiple-of-8 rule
 
 uint8_t *buffer = NULL;
-arnm_multi_arena_alloc(&buffer, 4096, &chain);
+arnm_alloc(&buffer, 4096, chain);   // the same calls a single arena takes
+arnm_free(buffer, 4096, chain);
 
-arnm_multi_arena_reset(&chain);    // every allocation, in one move; the arenas stay
-arnm_multi_arena_shrink(&chain);   // and give the empty ones back to the host
-arnm_multi_arena_release(&chain);
+arnm_reset(chain);                  // every allocation, in one move; the arenas stay
+arnm_multi_arena_shrink(chain);     // and give the empty ones back to the host
+arnm_destroy(chain, NULL);          // naming the allocator it was created with
 ```
 
-Pointers stay put: an arena, once opened, is never moved or resized. A borrowed block stays
-the host's: the chain fills it and never frees it. `NULL` is not a malloc fallback here — a chain has to exist.
+`arnm_alloc`, `arnm_free`, `arnm_realloc`, `arnm_clone` and `arnm_reset` do not care which of
+the two they were handed. What stays chain specific is what only a chain can answer:
+`_reserve()`, `_borrow()`, `_shrink()`, `_arena_count()` and `_measure()` — the last of which
+reports bytes reserved against bytes used, and how much of the chain the search still walks.
 
-The third argument is the one worth thinking about. A request is served first fit, and an arena
+`NULL` returned from `arnm_create_multi_arena()` means the options were refused or the allocator
+had no room; `arnm_multi_arena_options_validate()` tells the two apart, and fills a set of
+options in with the defaults it would really run on. The allocator passed there carries the
+chain's own bookkeeping only — the arenas always come from the host, because a chain drawing
+them from a fixed allocator could not outgrow it, which is the one thing it exists to do.
+
+Pointers stay put: an arena, once opened, is never moved or resized. A borrowed block stays the
+host's: the chain fills it and never frees it. Set `arena_max_count` to cap the chain, and it
+answers `ARNM_ERROR_RESOURCE_EXHAUSTED` instead of opening another arena — a bounded budget
+with a known peak.
+
+`full_remaining` is the field worth thinking about. A request is served first fit, and an arena
 leaves that search for good once its remainder falls to the threshold. So the question it
 answers is: what is the smallest request that should still land in a leftover? An arena holds a
 request of `n` bytes while at least `n` are left, and is written off at or below the threshold,
@@ -275,8 +295,8 @@ zig build -Dtests=true -Dbenchmarks=true
 ```
 
 Options: `-Dtarget=` to cross compile, `-Dshared=true` for a dynamic library (what a language
-binding usually wants), `-Dsanitize=undefined_behavior`, `-DsingleOutputDir=true` to drop the
-artifacts without the `bin/` and `lib/` split.
+binding usually wants), `-Dsanitize=undefined_behavior` or `-Dsanitize=thread`, and
+`-DsingleOutputDir=true` to drop the artifacts without the `bin/` and `lib/` split.
 
 Targets verified to build: `x86_64-linux-gnu`, `x86_64-linux-musl`, `x86_64-windows-gnu`,
 `x86_64-macos`, `aarch64-macos`. The `-msvc` ABI targets need the MSVC SDK headers present on

@@ -72,22 +72,28 @@ if(MSVC)
   add_compile_options(/utf-8)
 endif()
 
-# Mirrors c_warning_flags in build.zig. -Wconversion earns its place because this library
-# narrows on purpose and often: element_size into a uint16_t field, element counts into bucket
-# counts, bucket counts into index slots. A silent narrowing is exactly how those turn into
-# wrong results instead of ARNM_ERROR_ARITHMETIC_OVERFLOW, so every remaining one is meant to
-# carry an explicit cast next to the check that bounds it.
+# Mirrors c_flags in build.zig. -Wall and -Wextra are the baseline; -Wconversion earns its place
+# beside them because this library narrows on purpose and often: element_size into a uint16_t
+# field, element counts into bucket counts, bucket counts into index slots. A silent narrowing is
+# exactly how those turn into wrong results instead of ARNM_ERROR_ARITHMETIC_OVERFLOW, so every
+# remaining one is meant to carry an explicit cast next to the check that bounds it.
 #
-# MSVC has no -Wconversion; C4242, C4244 and C4267 are the three warnings that together cover
-# the same ground, and they are off by default, so each is raised to level 1 explicitly.
+# MSVC spells the first two /W4. It has no -Wconversion; C4242, C4244 and C4267 are the three
+# warnings that together cover the same ground, and they are off even at /W4, so each is raised
+# to level 1 explicitly.
+#
+# /W4 goes in without a /W3 to fight: cmake_policy(VERSION 3.18.2) at the top of this file puts
+# CMP0092 (added in 3.15) at NEW, which is what keeps CMake from seeding CMAKE_C_FLAGS with /W3.
+# Were it OLD, both would arrive and MSVC would answer D9025 -- so if that warning ever shows
+# up, the policy is what to look at, not this list.
 #
 # Nothing here is -Werror, and this build is the one that actually prints the findings: zig
 # hides C warnings on a successful build and turns them into errors on a failing one, so the
 # CMake build is where a narrowing gets noticed without the tree being broken already.
 if(MSVC)
-  set(ARNM_WARNING_FLAGS /w14242 /w14244 /w14267)
+  set(ARNM_WARNING_FLAGS /W4 /w14242 /w14244 /w14267)
 else()
-  set(ARNM_WARNING_FLAGS -Wconversion)
+  set(ARNM_WARNING_FLAGS -Wall -Wextra -Wconversion)
 endif()
 
 FILE(GLOB ARNM_SRC "src/*.c")
