@@ -12,6 +12,11 @@
 extern "C" {
 #endif
 
+/* C11 static assert fallback; in C++ the keyword is already there */
+#if !defined(__cplusplus) && !defined(static_assert)
+#define static_assert _Static_assert
+#endif
+
 /**
  * @defgroup arnm_json_reader arnm_json_reader
  * @brief A JSON document parsed into an arena and read field by field, errors collected as it
@@ -114,11 +119,6 @@ extern "C" {
  * @note Nothing here is thread safe. One reader belongs to one thread at a time.
  * @{
  */
-
-/* C11 static assert fallback; in C++ the keyword is already there */
-#if !defined(__cplusplus) && !defined(static_assert)
-#define static_assert _Static_assert
-#endif
 
 /**
  * @brief Bytes the opaque reader state occupies.
@@ -232,7 +232,7 @@ typedef struct arnm_json_reader {
     uint8_t bytes[ARNM_JSON_READER_SIZE]; /**< Opaque; never read these directly. */
     void *alignment_pointer;              /**< Never read. Present for its alignment alone. */
     uint64_t alignment_integer;           /**< Never read. Present for its alignment alone. */
-  } opaque;
+  } opaque;                               /**< The storage itself. Never named by a caller. */
 } arnm_json_reader;
 
 /**
@@ -255,7 +255,7 @@ typedef struct arnm_json_array_iter {
     uint8_t bytes[32];          /**< Opaque; never read these directly. */
     void *alignment_pointer;    /**< Never read. Present for its alignment alone. */
     uint64_t alignment_integer; /**< Never read. Present for its alignment alone. */
-  } opaque;
+  } opaque;                     /**< The storage itself. Never named by a caller. */
 } arnm_json_array_iter;
 
 /**
@@ -269,7 +269,7 @@ typedef struct arnm_json_object_iter {
     uint8_t bytes[40];          /**< Opaque; never read these directly. */
     void *alignment_pointer;    /**< Never read. Present for its alignment alone. */
     uint64_t alignment_integer; /**< Never read. Present for its alignment alone. */
-  } opaque;
+  } opaque;                     /**< The storage itself. Never named by a caller. */
 } arnm_json_object_iter;
 
 // ********** manage the reader itself *******************

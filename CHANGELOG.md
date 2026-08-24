@@ -15,11 +15,15 @@ than left to be discovered.
 Entries before 0.4.0 were reconstructed from the git history after the fact, so they summarise
 what the commits show rather than what was noted at the time.
 
-## 0.6.0 -- 2026-08-24
+## 0.7.0 -- 2026-08-24
 
-The arena and the multi arena became one allocator behind one handle. A consumer that only ever
-called `arnm_alloc()` and `arnm_free()` is unaffected; one that named the multi arena's own
-functions or read fields out of the descriptor has work to do, and every such change is below.
+JSON in both directions, over the allocator that is already there. A reader that fills a struct
+one line per field and a writer that empties one the same way, both parsing and rendering into
+memory arnm hands out -- and both keeping the whole of yyjson behind them, where a consumer
+never has to know it is there.
+
+Everything here landed after v0.6.0 was tagged. The section below it describes what that tag
+carries, which is the allocator work and none of this.
 
 ### Added
 
@@ -75,10 +79,6 @@ functions or read fields out of the descriptor has work to do, and every such ch
   - The flags are arnm's own bits, translated one at a time. A bit the header does not define is
     refused with `ARNM_ERROR_INVALID_PARAM` at `init`, before a byte of the reader is written,
     rather than passed through.
-- **`bench_json` — one benchmark for both directions, over one payload.** Each document is
-  built by the writer, rendered, and then parsed back by the reader, so the two directions are
-  measured on bytes neither of them merely resembles. It replaces `bench_json_reader` and
-  `bench_json_writer`, which described their payloads separately and could drift apart.
 - **`arnm/json_writer.h` — the way back out, on the reader's terms.** An opaque
   `arnm_json_writer` with `init`/`create`/`release`/`destroy`, the flags named once at `init`,
   one `add` per struct member, and the first error kept with the field name it happened at.
@@ -98,12 +98,9 @@ functions or read fields out of the descriptor has work to do, and every such ch
   - Nesting is `open_object`/`open_array` and `close`, with the levels kept by the writer up to
     `ARNM_JSON_WRITER_MAX_DEPTH`. A key of `NULL` is an element of the current array, mirroring
     the reader, where a NULL key is the current value itself.
-- **`arnm_uint64_to_string_size()` answered one digit short above 10^19.** The ladder stopped at
-  nineteen, so every value from `10000000000000000000` up was reported as nineteen digits --
-  and since `arnm_uint64_to_string()` fills its buffer from the back, the number it wrote was
-  missing its first digit. `UINT64_MAX` came out as `8446744073709551615`. The test that was
-  meant to catch it compared against a reference implementation carrying the same off-by-one;
-  that reference is fixed too, and the twenty digit range is now checked against its own text.
+- **`bench_json` — one benchmark for both directions, over one payload.** Each document is
+  built by the writer, rendered, and then parsed back by the reader, so the two directions are
+  measured on bytes neither of them merely resembles.
 - **`third_party/yyjson` 0.12.0, the first and only vendored dependency.** A git submodule,
   pinned to a release tag rather than a branch head, compiled into `libarnm` and invisible
   from outside: no installed header names it, its include path is private to the library
@@ -111,6 +108,24 @@ functions or read fields out of the descriptor has work to do, and every such ch
   `arnm_alloc`/`arnm_realloc`/`arnm_free` — its own default allocator is on no path this library
   takes. A fresh clone needs `git submodule update --init --recursive`; both builds check for the
   source and name it when it is missing.
+
+### Fixed
+
+- **`arnm_uint64_to_string_size()` answered one digit short above 10^19.** The ladder stopped at
+  nineteen, so every value from `10000000000000000000` up was reported as nineteen digits --
+  and since `arnm_uint64_to_string()` fills its buffer from the back, the number it wrote was
+  missing its first digit. `UINT64_MAX` came out as `8446744073709551615`. The test that was
+  meant to catch it compared against a reference implementation carrying the same off-by-one;
+  that reference is fixed too, and the twenty digit range is now checked against its own text.
+
+## 0.6.0 -- 2026-08-24
+
+The arena and the multi arena became one allocator behind one handle. A consumer that only ever
+called `arnm_alloc()` and `arnm_free()` is unaffected; one that named the multi arena's own
+functions or read fields out of the descriptor has work to do, and every such change is below.
+
+### Added
+
 - **A chain can be capped.** `arnm_multi_arena_options::arena_max_count` bounds the number of
   arenas; a chain at its cap answers `ARNM_ERROR_RESOURCE_EXHAUSTED` instead of opening another,
   which turns it into a budget with a known peak. 0 keeps the old behaviour of growing as long

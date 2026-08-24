@@ -13,6 +13,11 @@
 extern "C" {
 #endif
 
+/* C11 static assert fallback; in C++ the keyword is already there */
+#if !defined(__cplusplus) && !defined(static_assert)
+#define static_assert _Static_assert
+#endif
+
 /**
  * @defgroup arnm_json_writer arnm_json_writer
  * @brief A JSON document built one field at a time and written into an arena.
@@ -96,11 +101,6 @@ extern "C" {
  * @{
  */
 
-/* C11 static assert fallback; in C++ the keyword is already there */
-#if !defined(__cplusplus) && !defined(static_assert)
-#define static_assert _Static_assert
-#endif
-
 /**
  * @brief Bytes the opaque writer state occupies.
  *
@@ -183,7 +183,7 @@ typedef struct arnm_json_writer {
     uint8_t bytes[ARNM_JSON_WRITER_SIZE]; /**< Opaque; never read these directly. */
     void *alignment_pointer;              /**< Never read. Present for its alignment alone. */
     uint64_t alignment_integer;           /**< Never read. Present for its alignment alone. */
-  } opaque;
+  } opaque;                               /**< The storage itself. Never named by a caller. */
 } arnm_json_writer;
 
 /**
@@ -517,7 +517,7 @@ uint32_t arnm_json_writer_size(const arnm_json_writer *writer);
  * @param[in,out] allocator  Where the text comes from, or NULL for the host. May be the one the
  *                           document is built in.
  * @param[out]    out        Receives pointer and size; not NULL. Untouched unless the call
- *                           succeeds. Give it back with @ref arnm_memory_block_free().
+ *                           succeeds. Give it back with `arnm_memory_block_free()`.
  * @param[out]    out_length Receives the text length, terminator excluded; may be NULL. JSON
  *                           never holds a NUL byte, so `strlen` answers the same thing.
  * @retval ARNM_SUCCESS                   Written.
