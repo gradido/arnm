@@ -14,9 +14,9 @@
  * A multi arena serves a request first fit, scanning from `first_open` -- the earliest arena
  * that may still have room. Under allocation alone that marker only walks forward, and only
  * over arenas whose remainder has fallen to the chain's full threshold or below. (A free or a
- * realloc that hands bytes back can pull it onto an earlier arena again; nothing here does.) An arena left with more than the
- * threshold but less than the current request is therefore neither served from nor skipped: it
- * is walked over, on this allocation and on every one that follows.
+ * realloc that hands bytes back can pull it onto an earlier arena again; nothing here does.) An
+ * arena left with more than the threshold but less than the current request is therefore neither
+ * served from nor skipped: it is walked over, on this allocation and on every one that follows.
  *
  * The threshold is named at init, so these chains name it rather than inherit it: the figures
  * below say what a caller buys by moving it, and they should not shift when the default does.
@@ -82,7 +82,7 @@ static_assert(PROBE_SIZE % 8u == 0u, "probe must survive the arena's rounding");
  * large enough for the whole run keeps every host call outside the measured loop.
  */
 typedef struct scan_case {
-  arnm *chain; /**< Owned by this file; released with arnm_destroy(). */
+  arnm *chain;        /**< Owned by this file; released with arnm_destroy(). */
   uint8_t *tail;      /**< Borrowed buffer every probe lands in; owned by this file. */
   uint32_t tail_size; /**< Bytes of @c tail, exactly PROBE_COUNT probes worth. */
 } scan_case;
@@ -104,6 +104,21 @@ static volatile uint64_t g_sink = 0;
  * request -- a step finishing suspiciously fast and reported as a result. Checked during
  * preparation only, never inside a measured loop.
  */
+/**
+ * Every step of a measured loop has to have run, or the row is a lie.
+ *
+ * bench_step() divides the elapsed time by the count it was given and calls the result a per
+ * allocation figure. A loop that left early did less work than that count, so the row prints
+ * as the fastest on the page -- the one shape a benchmark must never take. Checked after the
+ * loop and not inside it: the branch that leaves is already there, and a call per iteration
+ * would show up in figures measured in tens of nanoseconds.
+ */
+static void require_all_steps(int served, int steps, const char *what) {
+  if (served == steps) { return; }
+  fprintf(stderr, "benchmark aborted: %s served %d of %d steps\n", what, served, steps);
+  exit(EXIT_FAILURE);
+}
+
 static void require_ok(arnm_result result, const char *what) {
   if (ARNM_SUCCESS == result) { return; }
   fprintf(stderr, "benchmark setup failed: %s: %s\n", what, arnm_result_to_string(result));
@@ -194,12 +209,14 @@ static void release_test_data(void) {
  */
 static void probe(scan_case *c, int steps) {
   uint64_t sink = 0;
-  for (int i = 0; i < steps; ++i) {
+  int i = 0;
+  for (; i < steps; ++i) {
     uint8_t *block = NULL;
     if (ARNM_SUCCESS != arnm_alloc(&block, PROBE_SIZE, c->chain)) { break; }
     sink += (uint64_t)(uintptr_t)block;
   }
   g_sink += sink;
+  require_all_steps(i, steps, "probe");
 }
 
 static void test_stranded_0(int steps) {
@@ -247,12 +264,14 @@ static void test_full_1024(int steps) {
 static void test_growth_stranded(int steps) {
   arnm *m = make_chain();
   uint64_t sink = 0;
-  for (int i = 0; i < steps; ++i) {
+  int i = 0;
+  for (; i < steps; ++i) {
     uint8_t *block = NULL;
     if (ARNM_SUCCESS != arnm_alloc(&block, FILL_SIZE, m)) { break; }
     sink += (uint64_t)(uintptr_t)block;
   }
   g_sink += sink;
+  require_all_steps(i, steps, "growth, stranding");
   arnm_destroy(m, NULL);
 }
 
@@ -260,12 +279,14 @@ static void test_growth_stranded(int steps) {
 static void test_growth_full(int steps) {
   arnm *m = make_chain();
   uint64_t sink = 0;
-  for (int i = 0; i < steps; ++i) {
+  int i = 0;
+  for (; i < steps; ++i) {
     uint8_t *block = NULL;
     if (ARNM_SUCCESS != arnm_alloc(&block, ARENA_CAPACITY, m)) { break; }
     sink += (uint64_t)(uintptr_t)block;
   }
   g_sink += sink;
+  require_all_steps(i, steps, "growth, filling");
   arnm_destroy(m, NULL);
 }
 
@@ -274,8 +295,7 @@ static void test_growth_full(int steps) {
 int main(void) {
   arnm_mono_timer timeUsed;
 
-  arnm_mono_timer_init();
-  arnm_mono_timer_reset(&timeUsed);
+  if (!bench_timer_start(&timeUsed)) { return EXIT_FAILURE; }
   prepare_test_data();
   bench_prepared(timeUsed);
 

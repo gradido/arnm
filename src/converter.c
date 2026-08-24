@@ -32,27 +32,27 @@
  * - Any modification should preserve the exact boundary conditions (powers of 10),
  *   otherwise subtle off-by-one errors may occur.
  */
-uint8_t arnm_uint64_to_string_size(uint64_t v) {
-  if (v < 100000000ULL) {
-    if (v < 10000ULL) {
-      if (v < 100ULL) return v < 10 ? 1 : 2;
-      return v < 1000ULL ? 3 : 4;
+uint8_t arnm_uint64_to_string_size(uint64_t value) {
+  if (value < 100000000ULL) {
+    if (value < 10000ULL) {
+      if (value < 100ULL) return value < 10 ? 1 : 2;
+      return value < 1000ULL ? 3 : 4;
     }
-    if (v < 1000000ULL) { return v < 100000ULL ? 5 : 6; }
-    return v < 10000000ULL ? 7 : 8;
+    if (value < 1000000ULL) { return value < 100000ULL ? 5 : 6; }
+    return value < 10000000ULL ? 7 : 8;
   }
 
-  if (v < 1000000000000ULL) {
-    if (v < 10000000000ULL) { return v < 1000000000ULL ? 9 : 10; }
-    return v < 100000000000ULL ? 11 : 12;
+  if (value < 1000000000000ULL) {
+    if (value < 10000000000ULL) { return value < 1000000000ULL ? 9 : 10; }
+    return value < 100000000000ULL ? 11 : 12;
   }
 
-  if (v < 10000000000000000ULL) {
-    if (v < 100000000000000ULL) { return v < 10000000000000ULL ? 13 : 14; }
-    return v < 1000000000000000ULL ? 15 : 16;
+  if (value < 10000000000000000ULL) {
+    if (value < 100000000000000ULL) { return value < 10000000000000ULL ? 13 : 14; }
+    return value < 1000000000000000ULL ? 15 : 16;
   }
 
-  return v < 100000000000000000ULL ? 17 : (v < 1000000000000000000ULL ? 18 : 19);
+  return value < 100000000000000000ULL ? 17 : (value < 1000000000000000000ULL ? 18 : 19);
 }
 
 /*
@@ -83,8 +83,7 @@ uint8_t arnm_uint64_to_string_known_string_size(char *buffer, uint64_t value, ui
     return 1;
   }
   uint64_t temp = value;
-  int len = stringSize;
-  int cursor = len;
+  int cursor = stringSize;
   buffer[cursor] = '\0';
 
   static const char DIGIT_TABLE[201] = "00010203040506070809"
@@ -123,7 +122,7 @@ uint8_t arnm_uint64_to_string_known_string_size(char *buffer, uint64_t value, ui
     buffer[--cursor] = DIGIT_TABLE[temp * 2 + 1];
     buffer[--cursor] = DIGIT_TABLE[temp * 2];
   }
-  return len; // return number of characters written, not counting null terminator
+  return stringSize; // return number of characters written, not counting null terminator
 }
 
 uint8_t arnm_int64_to_string_known_string_size(char *buffer, int64_t value, uint8_t stringSize) {
@@ -150,7 +149,7 @@ uint8_t arnm_uint64_to_string(char *buffer, uint8_t bufferSize, uint64_t value) 
 }
 
 uint8_t arnm_int64_to_string(char *buffer, uint8_t bufferSize, int64_t value) {
-  size_t requiredSize = arnm_int64_to_string_size(value);
+  uint8_t requiredSize = arnm_int64_to_string_size(value);
   if (bufferSize < requiredSize + 1) {
     // better safe then sorry
     if (bufferSize) { buffer[0] = '\0'; }

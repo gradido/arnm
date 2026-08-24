@@ -61,7 +61,9 @@ TEST(MemoryTest, DestroyReportsWhatTheArenaCouldNotTakeBack) {
   const uint32_t index_before = ARNM_INTERN(&host)->last_index;
 
   EXPECT_EQ(arnm_destroy(buried, &host), ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED);
-  EXPECT_EQ(ARNM_INTERN(&host)->last_index, index_before); // the index did not move by the wrong amount either
+  EXPECT_EQ(
+      ARNM_INTERN(&host)->last_index, index_before
+  ); // the index did not move by the wrong amount either
 
   // NULL is a no-op success, not a warning: nothing was ever handed out to keep
   EXPECT_EQ(arnm_destroy(nullptr, &host), ARNM_SUCCESS);
@@ -1106,7 +1108,12 @@ TEST(MemoryBlockTest, ReleasesUnusedScratchTail) {
 
   // take everything that is left as scratch space, like the decoders do for pbtools
   arnm_memory_block scratch{};
-  ASSERT_EQ(arnm_memory_block_alloc(&scratch, ARNM_INTERN(&mem)->capacity - ARNM_INTERN(&mem)->last_index, &mem), ARNM_SUCCESS);
+  ASSERT_EQ(
+      arnm_memory_block_alloc(
+          &scratch, ARNM_INTERN(&mem)->capacity - ARNM_INTERN(&mem)->last_index, &mem
+      ),
+      ARNM_SUCCESS
+  );
   EXPECT_EQ(ARNM_INTERN(&mem)->last_index, ARNM_INTERN(&mem)->capacity);
 
   // only the first 40 bytes were actually used

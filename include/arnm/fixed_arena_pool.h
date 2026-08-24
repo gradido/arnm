@@ -152,7 +152,7 @@ arnm_fixed_arena_pool *arnm_fixed_arena_pool_create(
 /**
  * @brief Take a free arena out of the pool and hand it to the caller. O(1).
  *
- * The arena arrives empty and is an ordinary @ref arnm: allocate from it, reset it, measure
+ * The arena arrives empty and is an ordinary @ref arnm -- allocate from it, reset it, measure
  * it. The pool stops knowing about it until arnm_fixed_arena_pool_free() brings it back, so
  * the only thing not permitted is letting it go out of scope without returning it.
  *

@@ -406,7 +406,10 @@ TEST(FixedArenaPool, EverythingCanComeFromHostStorage) {
   const std::vector<arnm *> taken = DrainPool(pool, kArenaCount);
   ASSERT_EQ(taken.size(), kArenaCount);
   for (arnm *arena : taken) {
-    EXPECT_GE(reinterpret_cast<uintptr_t>(ARNM_INTERN(arena)->data), reinterpret_cast<uintptr_t>(source_blob));
+    EXPECT_GE(
+        reinterpret_cast<uintptr_t>(ARNM_INTERN(arena)->data),
+        reinterpret_cast<uintptr_t>(source_blob)
+    );
     EXPECT_LE(
         reinterpret_cast<uintptr_t>(ARNM_INTERN(arena)->data) + ARNM_INTERN(arena)->capacity,
         reinterpret_cast<uintptr_t>(source_blob) + sizeof(source_blob)

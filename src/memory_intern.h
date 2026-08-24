@@ -35,15 +35,23 @@ static_assert(
     "arnm_alloc_type arena values must be contiguous"
 );
 
-
+/** @brief What a chain holds: its arenas, the shape it opens them with, and where to look. */
 typedef struct arnm_multi_arena {
-  arnm_bvec arenas;    /**< Every arena, oldest first. Never reordered. */
+  arnm_bvec arenas;         /**< Every arena, oldest first. Never reordered. */
   uint32_t arena_capacity;  /**< Bytes a regular arena reserves; 0 means the default. */
   uint32_t arena_max_count; /**< Max arena count, 0 for unlimited */
   uint32_t full_remaining;  /**< Remainder that counts as used up; 0 means the default. */
   uint32_t first_open;      /**< Earliest arena that may still have room; only walks forward. */
 } arnm_multi_arena;
 
+/**
+ * @brief The layout behind the opaque @ref arnm -- one of two shapes, told apart by @c
+ *        allocation_type.
+ *
+ * A single arena carries its block and the index into it; a chain carries only a pointer to
+ * its @ref arnm_multi_arena. They share storage, so nothing but @c allocation_type says which
+ * one is present.
+ */
 typedef struct arnm_intern {
   union {
     struct {
@@ -67,13 +75,13 @@ static inline bool is_arena(const arnm_intern *memory) {
   return type >= ARNM_ALLOC_TYPE_ARENA_OWNED && type <= ARNM_ALLOC_TYPE_MULTI_ARENA_FIXED;
 }
 
-static inline bool is_single_arena(const arnm_intern* memory) {
+static inline bool is_single_arena(const arnm_intern *memory) {
   if (!memory) return false;
   const arnm_alloc_type type = (arnm_alloc_type)memory->allocation_type;
   return ARNM_ALLOC_TYPE_ARENA_OWNED == type || ARNM_ALLOC_TYPE_ARENA_EXTERNAL == type;
 }
 
-static inline bool is_multi_arena(const arnm_intern* memory) {
+static inline bool is_multi_arena(const arnm_intern *memory) {
   if (!memory || !memory->multi_arena) return false;
   const arnm_alloc_type type = (arnm_alloc_type)memory->allocation_type;
   return ARNM_ALLOC_TYPE_MULTI_ARENA_DYNAMIC == type || ARNM_ALLOC_TYPE_MULTI_ARENA_FIXED == type;

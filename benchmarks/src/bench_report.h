@@ -3,6 +3,7 @@
 
 #include "arnm/mono_timer.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 
 /*
@@ -43,6 +44,28 @@ static inline void bench_per_step_string(char *buffer, size_t buffer_size, doubl
 }
 
 /** Header line, printed once before the first section. */
+/**
+ * Start the clock, or report that there is nothing to measure with.
+ *
+ * arnm_mono_timer_init() can fail -- on Windows, where it reads the performance counter
+ * frequency, and only there. Every figure a benchmark prints is derived from that frequency, so
+ * ignoring the answer would not produce a benchmark without a clock, it would produce one whose
+ * numbers came from an uninitialized one. Same rule the require_ok() helpers follow: stop on a
+ * failed setup rather than measure the wreckage.
+ *
+ * @param[out] time_used Receives the run's start time; only written when this returns true.
+ * @return true when the clock is running. On false nothing has been printed and main() should
+ *         return a nonzero status without reporting anything.
+ */
+static inline bool bench_timer_start(arnm_mono_timer *time_used) {
+  if (!arnm_mono_timer_init()) {
+    fprintf(stderr, "benchmark setup failed: no monotonic clock to measure against\n");
+    return false;
+  }
+  arnm_mono_timer_reset(time_used);
+  return true;
+}
+
 static inline void bench_prepared(arnm_mono_timer time_used) {
   char buffer[BENCH_STRING_BUFFER_SIZE];
   arnm_mono_timer_string(buffer, BENCH_STRING_BUFFER_SIZE, time_used);

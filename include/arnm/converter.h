@@ -51,6 +51,19 @@ extern "C" {
  * @whisper Number becomes word, digit by digit
  */
 uint8_t arnm_uint64_to_string(char *buffer, uint8_t bufferSize, uint64_t value);
+/**
+ * @brief As arnm_uint64_to_string(), for a signed value.
+ *
+ * A negative number is written with a leading '-', which counts towards the return value and
+ * towards the space @p buffer has to have.
+ *
+ * @param[out] buffer     Destination buffer receiving the resulting string.
+ * @param[in]  bufferSize Size of buffer (must contain result + sign + null terminator).
+ * @param[in]  value      The int64_t value to transform.
+ * @return Characters written (excluding '\0'), or the length that would have been needed when
+ *         @p buffer is too small.
+ * @whisper The same digits, and the sign that leads them
+ */
 uint8_t arnm_int64_to_string(char *buffer, uint8_t bufferSize, int64_t value);
 
 /**
@@ -71,6 +84,15 @@ uint8_t arnm_int64_to_string(char *buffer, uint8_t bufferSize, int64_t value);
  * @whisper When size is known, conversion becomes a smooth stride
  */
 uint8_t arnm_uint64_to_string_known_string_size(char *buffer, uint64_t value, uint8_t stringSize);
+/**
+ * @brief As arnm_uint64_to_string_known_string_size(), for a signed value.
+ *
+ * @param[out] buffer     Destination buffer, at least @p stringSize + 1 bytes.
+ * @param[in]  value      The int64_t value to transform.
+ * @param[in]  stringSize Pre-calculated length from arnm_int64_to_string_size(), sign included.
+ * @return Number of characters written (excluding '\0').
+ * @note Caller is responsible for ensuring buffer space is adequate.
+ */
 uint8_t arnm_int64_to_string_known_string_size(char *buffer, int64_t value, uint8_t stringSize);
 
 /**
@@ -88,6 +110,13 @@ uint8_t arnm_int64_to_string_known_string_size(char *buffer, int64_t value, uint
  * @whisper Know the shape before filling the space
  */
 uint8_t arnm_uint64_to_string_size(uint64_t value);
+/**
+ * @brief As arnm_uint64_to_string_size(), for a signed value.
+ *
+ * @param[in] value The int64_t value to measure.
+ * @return String length in characters (excluding null terminator), counting the '-' of a
+ *         negative value.
+ */
 uint8_t arnm_int64_to_string_size(int64_t value);
 
 /**

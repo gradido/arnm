@@ -1013,16 +1013,14 @@ TEST(BucketVectorLimits, ReserveHugeFailsWithoutDamage) {
   // because the difference is "refused before anything was asked for" either way but for a
   // different reason.
   EXPECT_EQ(
-      u32_vec_reserve(&v, MaxReserve<uint32_t>(u32_vec_BUCKET_MASK)),
-      ARNM_ERROR_ARITHMETIC_OVERFLOW
+      u32_vec_reserve(&v, MaxReserve<uint32_t>(u32_vec_BUCKET_MASK)), ARNM_ERROR_ARITHMETIC_OVERFLOW
   );
   EXPECT_EQ(u32_vec_reserve(&v, 1u << 20), ARNM_ERROR_ARITHMETIC_OVERFLOW);
 
   // The largest count the guard still lets through: exactly the buckets the index can address.
   // It is only ever exercised against a bounded arena -- asking malloc for it would spend real
   // memory before returning -- and there it fails on the allocator, as it should.
-  constexpr uint32_t kLargestAllowed =
-      ARNM_BVEC_MAX_INDEX_CAPACITY * u32_vec_BUCKET_CAPACITY;
+  constexpr uint32_t kLargestAllowed = ARNM_BVEC_MAX_INDEX_CAPACITY * u32_vec_BUCKET_CAPACITY;
   EXPECT_EQ(u32_vec_reserve(&v, kLargestAllowed), ARNM_ERROR_OUT_OF_MEMORY);
   EXPECT_EQ(u32_vec_reserve(&v, kLargestAllowed + 1u), ARNM_ERROR_ARITHMETIC_OVERFLOW);
 
@@ -1044,10 +1042,7 @@ TEST(BucketVectorLimits, IndexCapacityIsBoundedByItsOwnCounters) {
       static_cast<uint64_t>(ARNM_BVEC_MAX_INDEX_CAPACITY) * sizeof(void *) <= UINT16_MAX,
       "the whole index array must be measurable in the uint16_t its size is derived through"
   );
-  static_assert(
-      ARNM_BVEC_MAX_INDEX_CAPACITY <= UINT16_MAX,
-      "the slot count itself is a uint16_t"
-  );
+  static_assert(ARNM_BVEC_MAX_INDEX_CAPACITY <= UINT16_MAX, "the slot count itself is a uint16_t");
 
   // What the ceiling means for a caller: a reservation past it is refused, and refused before
   // anything is taken -- the vector is as usable afterwards as it was before.
@@ -1058,9 +1053,7 @@ TEST(BucketVectorLimits, IndexCapacityIsBoundedByItsOwnCounters) {
   constexpr uint64_t kBeyond =
       static_cast<uint64_t>(ARNM_BVEC_MAX_INDEX_CAPACITY) * u32_vec_BUCKET_CAPACITY + 1u;
   ASSERT_LE(kBeyond, UINT32_MAX);
-  EXPECT_EQ(
-      u32_vec_reserve(&v, static_cast<uint32_t>(kBeyond)), ARNM_ERROR_ARITHMETIC_OVERFLOW
-  );
+  EXPECT_EQ(u32_vec_reserve(&v, static_cast<uint32_t>(kBeyond)), ARNM_ERROR_ARITHMETIC_OVERFLOW);
   EXPECT_EQ(u32_vec_size(&v), 0u);
   EXPECT_EQ(v.buckets, nullptr); // refused before the allocator was ever asked
   CheckInvariants(v, u32_vec_BUCKET_CAPACITY);
@@ -1121,7 +1114,7 @@ TEST(BucketVectorLimits, RepeatedClearAndReserve) {
   for (int round = 0; round < 200; ++round) {
     const uint32_t count = static_cast<uint32_t>(round % 50) * 7 + 1;
     ASSERT_EQ(u32_vec_reserve(&v, count), ARNM_SUCCESS);
-    ASSERT_EQ(u32_vec_reserve(&v, count), ARNM_SUCCESS); // idempotent
+    ASSERT_EQ(u32_vec_reserve(&v, count), ARNM_SUCCESS);         // idempotent
     ASSERT_EQ(u32_vec_reserve(&v, 0), ARNM_ERROR_INVALID_PARAM); // 0 is not a reservation
 
     for (uint32_t i = 0; i < count; ++i) {

@@ -20,11 +20,14 @@ extern "C" {
  * file. Which strategy answers them is decided when the handle is made, and callers never
  * branch on it:
  *
- * | handle                          | made by                                                  | what @ref arnm_alloc() does                     |
+ * | handle                          | made by                                                  |
+ * what @ref arnm_alloc() does                     |
  * |---------------------------------|----------------------------------------------------------|-------------------------------------------------|
- * | `NULL`, or a zeroed @ref arnm   | nothing, or @ref arnm_create()                           | hands the request to the host (malloc/free)     |
- * | arena                           | @ref arnm_init_arena(), @ref arnm_init_arena_borrow()    | bumps an index inside one fixed block           |
- * | chain                           | @ref arnm_create_multi_arena()                           | bumps an index in the first arena with room     |
+ * | `NULL`, or a zeroed @ref arnm   | nothing, or @ref arnm_create()                           |
+ * hands the request to the host (malloc/free)     | | arena                           | @ref
+ * arnm_init_arena(), @ref arnm_init_arena_borrow()    | bumps an index inside one fixed block | |
+ * chain                           | @ref arnm_create_multi_arena()                           |
+ * bumps an index in the first arena with room     |
  *
  * A function that takes an `arnm *` therefore works against all three, and a caller with no
  * opinion passes NULL and gets the host. That is the point of the handle being one type.
@@ -194,9 +197,10 @@ arnm_result arnm_alloc(uint8_t **buffer, uint32_t size, arnm *memory);
  * |----------|-----------|-------------------------------------------------|---------|
  * | tail     | shrink    | index moves back, the bytes are reusable        | SUCCESS |
  * | tail     | grow      | index moves on, the address does not change     | SUCCESS |
- * | tail     | grow, no room in *this* arena, chain only | fresh block elsewhere in the chain, contents copied, old block given back | SUCCESS |
- * | non tail | grow      | fresh block, @p old_size bytes copied, old one abandoned | WARNING |
- * | non tail | shrink    | nothing at all, address and bytes kept          | WARNING |
+ * | tail     | grow, no room in *this* arena, chain only | fresh block elsewhere in the chain,
+ * contents copied, old block given back | SUCCESS | | non tail | grow      | fresh block, @p
+ * old_size bytes copied, old one abandoned | WARNING | | non tail | shrink    | nothing at all,
+ * address and bytes kept          | WARNING |
  *
  * @param[in,out] buffer   Not NULL, but may point to NULL to allocate from scratch. Updated
  *                         when the block moves.
