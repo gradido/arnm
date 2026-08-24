@@ -53,10 +53,10 @@ functions or read fields out of the descriptor has work to do, and every such ch
     `const char *const *` of up to 255 names, at every depth, so an array of objects is covered
     by naming its member once. Both numbers are exact — terminator and eight byte rounding
     included — and both walk the document's flat value array rather than its tree, so nesting is
-    a number rather than a call depth. `bench_json_reader` puts the trade-off in figures: on a
-    document of 61 values with five members read and twenty-five ignored, the full walk costs
-    about 65 ns and reserves 1440 bytes while the keyed walk costs about 133 ns and reserves
-    240, against about 450 ns for the parse itself.
+    a number rather than a call depth. `bench_json` puts the trade-off in figures: on a document
+    of 61 values with five members read and twenty-five ignored, the full walk costs about 62 ns
+    and reserves 1200 bytes while the keyed walk costs about 148 ns and reserves 200, against
+    about 395 ns for the parse itself.
   - **The value level is still there underneath**, each call answering an `arnm_result` of its
     own: `arnm_json_read_null/_bool/_int64/_uint64/_int32/_uint32/_double/_string()`, plus arrays
     and objects by index, by key, or through an iterator. Values are opaque handles owned by the
@@ -75,6 +75,35 @@ functions or read fields out of the descriptor has work to do, and every such ch
   - The flags are arnm's own bits, translated one at a time. A bit the header does not define is
     refused with `ARNM_ERROR_INVALID_PARAM` at `init`, before a byte of the reader is written,
     rather than passed through.
+- **`bench_json` — one benchmark for both directions, over one payload.** Each document is
+  built by the writer, rendered, and then parsed back by the reader, so the two directions are
+  measured on bytes neither of them merely resembles. It replaces `bench_json_reader` and
+  `bench_json_writer`, which described their payloads separately and could drift apart.
+- **`arnm/json_writer.h` — the way back out, on the reader's terms.** An opaque
+  `arnm_json_writer` with `init`/`create`/`release`/`destroy`, the flags named once at `init`,
+  one `add` per struct member, and the first error kept with the field name it happened at.
+  `arnm_json_writer_write()` renders into an allocation the caller owns and frees, and a writer
+  carrying an error refuses to write, so its result stands in for a check after every field.
+  - **Strings are borrowed.** `arnm_json_writer_add_string()` keeps the pointer and nothing
+    else, which is what makes serialising a struct cost almost nothing -- and what makes every
+    string and key the caller's to hold still until the write.
+    `arnm_json_writer_add_string_copy()` takes a copy into the writer's own allocator for a
+    value that will not.
+  - **The output size is known before the text exists.** `arnm_json_writer_size()` reads a
+    running total the writer keeps as fields arrive -- nothing is walked, nothing is rendered
+    twice -- and `arnm_json_writer_write()` takes exactly that many bytes from the allocator it
+    is handed. It is exact for integers, booleans, nulls and valid UTF-8 strings under every
+    layout; a `double` is charged its longest form and an escaped non-ASCII byte six, both of
+    which can only make it too large.
+  - Nesting is `open_object`/`open_array` and `close`, with the levels kept by the writer up to
+    `ARNM_JSON_WRITER_MAX_DEPTH`. A key of `NULL` is an element of the current array, mirroring
+    the reader, where a NULL key is the current value itself.
+- **`arnm_uint64_to_string_size()` answered one digit short above 10^19.** The ladder stopped at
+  nineteen, so every value from `10000000000000000000` up was reported as nineteen digits --
+  and since `arnm_uint64_to_string()` fills its buffer from the back, the number it wrote was
+  missing its first digit. `UINT64_MAX` came out as `8446744073709551615`. The test that was
+  meant to catch it compared against a reference implementation carrying the same off-by-one;
+  that reference is fixed too, and the twenty digit range is now checked against its own text.
 - **`third_party/yyjson` 0.12.0, the first and only vendored dependency.** A git submodule,
   pinned to a release tag rather than a branch head, compiled into `libarnm` and invisible
   from outside: no installed header names it, its include path is private to the library

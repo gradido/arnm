@@ -53,6 +53,7 @@ allocator is on no path this library takes.
 | `arnm/fixed_arena_pool.h` | a fixed set of equal sized arenas, lent out and returned; the peak is known at init |
 | `arnm/bucket_vector.h` | growing sequence with stable element addresses; no copy on growth |
 | `arnm/json_reader.h` | JSON parsed into your arena; one line per struct field, the first error kept with its field name, an in-situ path that copies nothing |
+| `arnm/json_writer.h` | the way back: one line per struct field, strings borrowed rather than copied, and the output size known before the text exists |
 | `arnm/converter.h` | integer to decimal string, roughly 4× faster than `snprintf`; bytes to lowercase hex and back, uuid to its 8-4-4-4-12 form and back |
 | `arnm/duration.h` | nanoseconds to a readable span |
 | `arnm/mono_timer.h` | monotonic clock, one type, three units |
@@ -181,10 +182,10 @@ bytes = arnm_json_reader_output_size_for_keys(&reader, wanted, 2);   // only wha
 The first is the cheaper call and the larger answer: a document carrying members you never read
 pays for them. The second compares every member name against the list, at every depth, so an
 array of objects is covered by naming its member once — and it reserves only what a mapper will
-actually copy. Measured in `bench_json_reader` on a document of 61 values, five of whose members
-are read and twenty-five of which are not: the full walk takes about 65 ns and reserves 1440
-bytes, the keyed walk takes about 133 ns and reserves 240. Both sit well under the parse that
-precedes them, which costs about 450 ns for the same document.
+actually copy. Measured in `bench_json` on a document of 61 values, five of whose members are
+read and twenty-five of which are not: the full walk takes about 62 ns and reserves 1200 bytes,
+the keyed walk takes about 148 ns and reserves 200. Both sit well under the parse that precedes
+them, which costs about 395 ns for the same document.
 
 A read is refused rather than rounded: `arnm_json_reader_get_int64()` on `3.5` records
 `ARNM_ERROR_ARITHMETIC_OVERFLOW` instead of handing back `3`, and reading a string as a number
@@ -199,6 +200,70 @@ arena that one sits at the tail, so releasing gives every byte back. The price i
 buffer is modified, has to outlive the document, and has to carry
 `ARNM_JSON_READER_INSITU_PADDING` spare bytes past the JSON. The copying `arnm_json_reader_parse()`
 asks none of that and costs one input copy, which stays buried in an arena until `arnm_reset()`.
+
+## Writing JSON
+
+`arnm/json_writer.h` is the reader read backwards, and keeps its three habits: one line per
+field, strings borrowed rather than copied, and one check at the end.
+
+```c
+#include "arnm/json_writer.h"
+
+arnm_json_writer writer;
+arnm_json_writer_init(&writer, scratch, ARNM_JSON_WRITE_DEFAULT);   // or ..._PRETTY
+
+arnm_json_writer_add_string(&writer, "host", config.host);
+arnm_json_writer_add_uint64(&writer, "port", config.port);
+arnm_json_writer_add_bool(&writer, "debug", config.debug);
+
+arnm_memory_block text;
+if (ARNM_SUCCESS == arnm_json_writer_write(&writer, output, &text, NULL)) {
+  send(text.data);                          // NUL terminated
+  arnm_memory_block_free(&text, output);
+}
+```
+
+No `begin` is needed for an object root; the first field opens one.
+`arnm_json_writer_begin_array()` opens an array instead, and either one starts the next payload
+through the same writer. A writer carrying an error refuses to write and answers that error, so
+the result above stands in for a check after every field —
+`arnm_json_writer_status()` and `arnm_json_writer_error_field()` are there when you want the
+verdict earlier.
+
+`arnm_json_writer_add_string()` keeps the pointer it is given and nothing else. Every string and
+every key therefore has to stay where it is until the write, which is what makes serialising a
+struct cost almost nothing: the payload is read once, at the end, straight out of your own
+memory. `arnm_json_writer_add_string_copy()` is there for a value that will not stand still that
+long.
+
+Nesting is an open and a close, and the writer keeps the levels itself — up to
+`ARNM_JSON_WRITER_MAX_DEPTH`, past which it records `ARNM_ERROR_RESOURCE_EXHAUSTED` rather than
+reaching for memory mid-field. A key of `NULL` means "an element of the current array".
+
+```c
+arnm_json_writer_open_array(&writer, "peers");
+for (uint32_t i = 0; i < config.peer_count; ++i) {
+  arnm_json_writer_open_object(&writer, NULL);
+  arnm_json_writer_add_string(&writer, "name", config.peers[i].name);
+  arnm_json_writer_close(&writer);
+}
+arnm_json_writer_close(&writer);
+```
+
+**The size of the output is known before the text exists.** `arnm_json_writer_size()` reads a
+number the writer has been keeping all along: every field knows its own length, its separator
+and its indentation the moment it is added, so nothing is walked and nothing is rendered twice.
+It is **exact** for a document of integers, booleans, nulls and valid UTF-8 strings, under every
+layout — and `arnm_json_writer_write()` takes exactly that many bytes from the allocator you
+name, so an arena sized by it comes out full to the byte. Two things make it an upper bound
+instead, and only ever too large: a `double` is charged its longest form (24 bytes), and under
+`ARNM_JSON_WRITE_ESCAPE_UNICODE` a byte outside ASCII is charged six. The slack goes back before
+`write()` returns.
+
+Asking costs 1.4 ns whatever the document holds. Keeping the number costs one table lookup per
+string byte, about 0.2 ns — `bench_json` prices both against the work they precede, and runs
+every payload through the reader and the writer alike so the two directions can be read against
+each other.
 
 ## Build
 

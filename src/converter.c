@@ -52,7 +52,12 @@ uint8_t arnm_uint64_to_string_size(uint64_t value) {
     return value < 1000000000000000ULL ? 15 : 16;
   }
 
-  return value < 100000000000000000ULL ? 17 : (value < 1000000000000000000ULL ? 18 : 19);
+  if (value < 100000000000000000ULL) { return 17; }
+  if (value < 1000000000000000000ULL) { return 18; }
+  // 2^64 - 1 is twenty digits wide, so the ladder has to reach twenty. Stopping at nineteen
+  // does not merely misreport the length: the writer fills the buffer from the back and would
+  // leave its first digit unwritten.
+  return value < 10000000000000000000ULL ? 19 : 20;
 }
 
 /*

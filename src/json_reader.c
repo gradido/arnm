@@ -2,7 +2,7 @@
 
 #include "arnm/converter.h"
 
-#include "yyjson.h"
+#include "json_memory.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -14,14 +14,8 @@
  *
  * Two things have to be bridged for that to hold.
  *
- * First, the allocator. yyjson asks for memory through four function pointers and hands the
- * size back on realloc but not on free; arnm needs that size at every release. The gap is
- * closed by a header of eight bytes ahead of every block, which records what was reserved.
- * Eight and not four: arnm hands out eight byte aligned blocks and every size it charges for
- * is a multiple of eight, so a header of that width leaves the payload exactly where the
- * allocator put it. Sizes are not stored anywhere else in arnm, and they are not stored here
- * either in the sense the memory contract means -- this records what a third party interface
- * refuses to carry, at the one seam where it crosses.
+ * First, the allocator: yyjson frees without a size and arnm needs one. That seam is shared
+ * with the writer and lives in json_memory.h.
  *
  * Second, the flags. yyjson's read flags are its own numbering and free to move; the
  * ARNM_JSON_READ_* bits are ours and pinned by the public header. They are translated one by
@@ -43,49 +37,29 @@
 #define JSON_READER_MAGIC 0x6172736Eu /* "arsn" */
 
 /**
- * @brief The eight bytes ahead of every block yyjson is handed.
- *
- * @c total_size counts the header itself, because that is the number arnm_free() and
- * arnm_realloc() have to be told -- the payload size alone would move an arena's index by too
- * little and hand the same bytes out twice.
- */
-typedef struct json_block_header {
-  uint32_t total_size; /**< Bytes reserved through arnm_alloc(), this header included. */
-  uint32_t padding;    /**< Never read. Keeps the payload on the eight byte grid. */
-} json_block_header;
-
-static_assert(
-    sizeof(json_block_header) == 8, "the block header has to be exactly one alignment step wide"
-);
-
-/** @brief Largest payload that still leaves room for the header inside a uint32_t. */
-#define JSON_BLOCK_MAX_PAYLOAD (ARNM_MAX_ALLOC_SIZE - (uint32_t)sizeof(json_block_header))
-
-/**
  * @brief The layout behind the opaque @ref arnm_json_reader.
  *
- * @c alc carries a pointer to this very struct as its context, which is why a reader may not
- * be moved once it has been initialized: the document keeps its own copy of @c alc and calls
- * back through it when it is released.
+ * @c alc carries a pointer to @c alc_context as its context, which is why a reader may not be
+ * moved once it has been initialized: the document keeps its own copy of @c alc and calls back
+ * through it when it is released.
  *
  * @c walk is the memory of the last array walked, and the reason a loop over an array costs one
  * step per element instead of one walk per element. It is a hint and nothing more: it is
  * checked against @c walk_array before it is trusted, and dropped whenever the document goes.
  */
 typedef struct json_reader_state {
-  arnm *allocator;             /**< Where documents come from; NULL is the host. */
-  arnm *output_allocator;      /**< Where copied strings go; NULL borrows instead. */
-  yyjson_alc alc;              /**< The three hooks below, bound to this struct as context. */
-  yyjson_doc *doc;             /**< The document held, or NULL. */
-  yyjson_val *current;         /**< What the field getters read members of, or NULL. */
-  yyjson_val *walk_array;      /**< The array @c walk stands in, or NULL. */
-  yyjson_arr_iter walk;        /**< Where the last walk of @c walk_array stopped. */
-  const char *error_message;   /**< Static text of the last parse refusal, or NULL. */
-  yyjson_read_flag read_flags; /**< The public flags, translated once at init. */
-  uint32_t error_position;     /**< Byte offset of the last parse refusal, or 0. */
-  arnm_result status;          /**< First error since the last parse, or ARNM_SUCCESS. */
-  uint32_t magic;              /**< JSON_READER_MAGIC once initialized. */
-  bool arena_kept_bytes;       /**< An arena could not take a block back during the last release. */
+  json_alc_context alc_context; /**< Where documents come from, and what an arena kept back. */
+  arnm *output_allocator;       /**< Where copied strings go; NULL borrows instead. */
+  yyjson_alc alc;               /**< yyjson's hooks, bound to alc_context. */
+  yyjson_doc *doc;              /**< The document held, or NULL. */
+  yyjson_val *current;          /**< What the field getters read members of, or NULL. */
+  yyjson_val *walk_array;       /**< The array @c walk stands in, or NULL. */
+  yyjson_arr_iter walk;         /**< Where the last walk of @c walk_array stopped. */
+  const char *error_message;    /**< Static text of the last parse refusal, or NULL. */
+  yyjson_read_flag read_flags;  /**< The public flags, translated once at init. */
+  uint32_t error_position;      /**< Byte offset of the last parse refusal, or 0. */
+  arnm_result status;           /**< First error since the last parse, or ARNM_SUCCESS. */
+  uint32_t magic;               /**< JSON_READER_MAGIC once initialized. */
   char error_field[ARNM_JSON_READER_FIELD_NAME_SIZE]; /**< Field name of @c status, or empty. */
 } json_reader_state;
 
@@ -135,67 +109,6 @@ static uint32_t narrow_count(size_t count) {
   if (count > (size_t)UINT32_MAX) { return UINT32_MAX; }
 #endif
   return (uint32_t)count;
-}
-
-// ********** the allocator yyjson is handed *******************
-
-static void *json_block_alloc(void *context, size_t size) {
-  json_reader_state *state = (json_reader_state *)context;
-  if (!state) { return NULL; }
-  if (0 == size || size > (size_t)JSON_BLOCK_MAX_PAYLOAD) { return NULL; }
-
-  const uint32_t total = (uint32_t)size + (uint32_t)sizeof(json_block_header);
-  uint8_t *block = NULL;
-  if (ARNM_SUCCESS != arnm_alloc(&block, total, state->allocator)) { return NULL; }
-
-  json_block_header *header = (json_block_header *)(void *)block;
-  header->total_size = total;
-  header->padding = 0;
-  return block + sizeof(json_block_header);
-}
-
-static void *json_block_realloc(void *context, void *pointer, size_t old_size, size_t size) {
-  // yyjson always tells us the old payload size, and the header beside the block says the same
-  // thing including its own width. The header is the one that is used -- it is what arnm was
-  // told at reservation time, and the two can never disagree without the block being foreign.
-  (void)old_size;
-
-  if (!pointer) { return json_block_alloc(context, size); }
-  json_reader_state *state = (json_reader_state *)context;
-  if (!state) { return NULL; }
-  if (0 == size || size > (size_t)JSON_BLOCK_MAX_PAYLOAD) { return NULL; }
-
-  uint8_t *block = (uint8_t *)pointer - sizeof(json_block_header);
-  uint8_t *before = block;
-  const uint32_t reserved = ((const json_block_header *)(const void *)block)->total_size;
-  const uint32_t total = (uint32_t)size + (uint32_t)sizeof(json_block_header);
-
-  const arnm_result result = arnm_realloc(&block, reserved, total, state->allocator);
-  if (ARNM_SUCCESS != result && ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED != result) { return NULL; }
-
-  // The recorded size follows the allocation and not the request. On a buried shrink an arena
-  // changes nothing at all and still holds the original reservation; writing the smaller number
-  // there would strand the block for good, because a size that does not match the reservation
-  // never matches the arena tail again. Same reasoning as arnm_memory_block_realloc().
-  if (ARNM_SUCCESS == result || before != block) {
-    ((json_block_header *)(void *)block)->total_size = total;
-  }
-  return block + sizeof(json_block_header);
-}
-
-static void json_block_dispose(void *context, void *pointer) {
-  if (!pointer) { return; }
-  json_reader_state *state = (json_reader_state *)context;
-  if (!state) { return; }
-
-  uint8_t *block = (uint8_t *)pointer - sizeof(json_block_header);
-  const uint32_t reserved = ((const json_block_header *)(const void *)block)->total_size;
-
-  // The warning is neither success nor failure and has to reach the caller, but yyjson has no
-  // way to carry it -- so it is caught here and answered by arnm_json_reader_release().
-  if (ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED == arnm_free(block, reserved, state->allocator)) {
-    state->arena_kept_bytes = true;
-  }
 }
 
 // ********** flags *******************
@@ -290,10 +203,11 @@ static arnm_result dispose_document(json_reader_state *state) {
   state->walk_array = NULL;
   if (!state->doc) { return ARNM_SUCCESS; }
 
-  state->arena_kept_bytes = false;
+  state->alc_context.arena_kept_bytes = false;
   yyjson_doc_free(state->doc);
   state->doc = NULL;
-  return state->arena_kept_bytes ? ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED : ARNM_SUCCESS;
+  return state->alc_context.arena_kept_bytes ? ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED
+                                             : ARNM_SUCCESS;
 }
 
 arnm_result arnm_json_reader_init(
@@ -308,12 +222,10 @@ arnm_result arnm_json_reader_init(
   if (ARNM_SUCCESS != translated) { return translated; }
 
   json_reader_state *state = (json_reader_state *)(void *)reader;
-  state->allocator = allocator;
+  state->alc_context.allocator = allocator;
+  state->alc_context.arena_kept_bytes = false;
+  json_alc_bind(&state->alc, &state->alc_context);
   state->output_allocator = NULL;
-  state->alc.malloc = json_block_alloc;
-  state->alc.realloc = json_block_realloc;
-  state->alc.free = json_block_dispose;
-  state->alc.ctx = state;
   state->doc = NULL;
   state->current = NULL;
   state->walk_array = NULL;
@@ -322,7 +234,6 @@ arnm_result arnm_json_reader_init(
   state->read_flags = read_flags;
   state->error_position = 0;
   state->status = ARNM_SUCCESS;
-  state->arena_kept_bytes = false;
   state->error_field[0] = '\0';
   state->magic = JSON_READER_MAGIC;
   return ARNM_SUCCESS;
