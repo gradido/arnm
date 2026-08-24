@@ -3,13 +3,22 @@ const zcc = @import("compile_commands");
 
 /// Flags every first-party C source is compiled with.
 ///
-/// -Wconversion earns its place here because this library narrows on purpose and often:
+/// -Wall and -Wextra are the baseline: unused results, a signed/unsigned comparison, a switch
+/// that forgot an enumerator. They cost nothing to keep clean and the tree is clean under them,
+/// so anything they print is new and worth reading.
+///
+/// -Wconversion earns its place beside them because this library narrows on purpose and often:
 /// element_size into a uint16_t field, element counts into bucket counts, bucket counts into
 /// index slots. A silent narrowing is exactly how those turn into wrong results instead of
 /// ARNM_ERROR_ARITHMETIC_OVERFLOW, so every remaining one is meant to carry an explicit cast
 /// next to the check that bounds it -- and anything without that check is a bug worth hearing
-/// about. The googletest sources are exempt: their macros warn under this flag and they are
+/// about. The googletest sources are exempt: their macros warn under these flags and they are
 /// not ours to fix. CMakeLists.txt mirrors this, MSVC spelling included.
+///
+/// The two compilers do not overlap, which is the reason to check both before calling a change
+/// clean: gcc finds the signed/unsigned comparisons and stays quiet about an unused
+/// `static inline`, clang reports every uncalled wrapper a macro expanded into the translation
+/// unit -- which is what ARNM_BVEC_MAYBE_UNUSED in arnm/bucket_vector.h is for.
 ///
 /// Where these actually become visible is not obvious: `zig build` drops C compiler warnings
 /// entirely when a step succeeds, and relabels them as errors inside its diagnostic bundle when
@@ -17,7 +26,7 @@ const zcc = @import("compile_commands");
 /// editor, because the cdb step copies these flags into compile_commands.json, and in the CMake
 /// build, which prints them as the warnings they are. To check a single file by hand:
 ///
-///   zig cc -std=c11 -Wconversion -Iinclude -c src/<file>.c -o /dev/null
+///   zig cc -std=c11 -Wall -Wextra -Wconversion -Iinclude -c src/<file>.c -o /dev/null
 ///
 /// -c and not -fsyntax-only: zig 0.15.1 answers the latter with "error: FileNotFound" no matter
 /// what it is handed, so the diagnostics arrive but the exit code is useless.
@@ -31,7 +40,7 @@ const zcc = @import("compile_commands");
 /// src/mono_timer.c then fails on an undeclared `clock_gettime`. The alternative is
 /// `-std=c11 -D_POSIX_C_SOURCE=199309L`, which compiles just as well but would put this build
 /// on a different dialect from the CMake one for no gain.
-const c_flags = [_][]const u8{ "-std=gnu11", "-Wconversion" };
+const c_flags = [_][]const u8{ "-std=gnu11", "-Wall", "-Wextra", "-Wconversion" };
 
 /// Recursively add .c files from a directory
 fn addDirSources(

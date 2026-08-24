@@ -15,11 +15,29 @@ than left to be discovered.
 Entries before 0.4.0 were reconstructed from the git history after the fact, so they summarise
 what the commits show rather than what was noted at the time.
 
-## Unreleased
+## 0.6.0 -- 2026-08-24
 
 The arena and the multi arena became one allocator behind one handle. A consumer that only ever
 called `arnm_alloc()` and `arnm_free()` is unaffected; one that named the multi arena's own
 functions or read fields out of the descriptor has work to do, and every such change is below.
+
+### Added
+
+- **A chain can be capped.** `arnm_multi_arena_options::arena_max_count` bounds the number of
+  arenas; a chain at its cap answers `ARNM_ERROR_RESOURCE_EXHAUSTED` instead of opening another,
+  which turns it into a budget with a known peak. 0 keeps the old behaviour of growing as long
+  as the host gives ground.
+- **`arnm/arena.h`** collects what belongs to a single arena: `arnm_init_arena()`,
+  `arnm_init_arena_borrow()`, `arnm_reinit_arena()`, `arnm_is_arena()` and
+  `arnm_arena_overflow_total()`. It includes `arnm/memory.h`, so an arena using host code needs
+  this header alone.
+- **`arnm_is_multi_arena()`** tells a chain from a plain arena -- `arnm_is_arena()` is true for
+  both, a chain allocating by moving an index as well, only in more than one block.
+- **`ARNM_BVEC_MAYBE_UNUSED`** in `arnm/bucket_vector.h` marks the wrappers
+  `ARNM_BVEC_DEFINE` generates. The macro emits the whole typed set, so a caller who wants three
+  of them got clang's `-Wunused-function` for the other sixteen -- noise no consumer could
+  silence without giving up the macro. gcc never warned here and MSVC's C4514 is off at every
+  level, so the fallback expands to nothing.
 
 ### Changed
 
@@ -29,8 +47,8 @@ functions or read fields out of the descriptor has work to do, and every such ch
   `arnm_multi_arena_measure()` or `arnm_arena_overflow_total()` instead; code that reached for
   them to tell allocators apart asks `arnm_is_arena()` or `arnm_is_multi_arena()`.
 - **The multi arena is reached through the same calls as everything else.** It has no public
-  struct and no functions of its own for allocation: `arnm_multi_arena_init/_alloc/_free/
-  _realloc/_clone/_reset/_release/_destroy` are gone. A chain comes from
+  struct and no functions of its own for allocation: `arnm_multi_arena_init/_alloc/_clone/
+  _free/_reset/_release/_destroy` are gone. A chain comes from
   `arnm_create_multi_arena()` as an `arnm *` and is then handed to `arnm_alloc()`,
   `arnm_free()`, `arnm_reset()`, `arnm_destroy()` -- the same names an arena takes. What remains
   chain specific is what only a chain can answer: `_reserve()`, `_borrow()`, `_shrink()`,
@@ -84,6 +102,27 @@ functions or read fields out of the descriptor has work to do, and every such ch
   it has nowhere else to go -- and a buried block still moves without reclaiming, as before.
 - **Every call in `arnm/bucket_vector.h` checks its pointers.** `arnm_bvec_clear()`,
   `_emplace()`, `_push_ptr()` and `_pop()` used to read the descriptor before anything else.
+- **A chain's default arena is 1 KiB, and its default full threshold 64 bytes.**
+  `ARNM_MULTI_ARENA_DEFAULT_CAPACITY` was 1 MiB and
+  `ARNM_MULTI_ARENA_DEFAULT_FULL_REMAINING` 128. A megabyte per arena is a lot of ground to take
+  for a chain that is barely used, and the defaults are for the caller who has not measured yet
+  -- one who has names both at `arnm_create_multi_arena()`, where nothing changed.
+  `ARNM_MULTI_ARENA_BUCKET_LOG2` is now `ARNM_MULTI_ARENA_DEFAULT_BUCKET_LOG2`, so all three
+  read as what they are.
+- **The bucket vector's macro surface is one macro.** `ARNM_BVEC_DECLARE`,
+  `ARNM_BVEC_BUCKET_BYTES` and `ARNM_BVEC_INDEX_INITIAL_CAPACITY` are gone with
+  `ARNM_BVEC_STATIC`: the accessors are generated in place by `ARNM_BVEC_DEFINE`, a bucket's
+  byte size is `sizeof(type) << log2` in the caller's own code, and the index array grows by
+  `ARNM_BVEC_DEFAULT_INDEX_GROW_STEP_SIZE` slots at a time instead of doubling from an initial
+  capacity.
+- `ARNM_ALIGN8` rounds with `/8*8` rather than a `& ~7` mask, so the operand keeps its own type
+  instead of being converted through `int`. Same value for everything the library rounds; it is
+  the `-Wconversion` noise at every use site that goes away.
+- **Both builds compile the first-party C with `-Wall -Wextra` beside `-Wconversion`**
+  (`/W4` on MSVC), and the tree is clean under them on gcc and clang alike. The two do not
+  overlap: gcc reports the signed/unsigned comparisons, clang the wrappers a macro expanded but
+  the translation unit never called -- so a change is worth checking against both. The
+  googletest translation units stay exempt.
 - The public headers carry full reference documentation, and the doxygen run is warning free.
 
 ### Fixed
@@ -110,6 +149,9 @@ functions or read fields out of the descriptor has work to do, and every such ch
 - **`arnm_result_to_string(ARNM_ERROR_RESOURCE_SIZE_EXCEED)` answered
   `"ARNM_ERROR_UNKNOWN"`** -- the value had no entry in the message table. `test_result` now
   walks the whole range, so a value added without its string fails the suite.
+- `arnm_duration_string()` compared a `size_t` buffer size against an `int` sum of `uint8_t`
+  terms, across the sign boundary. The sum is widened before the comparison now; every term was
+  small and non-negative, so no answer changes.
 - `Doxyfile` carried absolute paths for `OUTPUT_DIRECTORY` and `INPUT`, so a checkout anywhere
   else documented nothing -- or, on the machine those paths pointed at, silently documented the
   other tree. Both are repository relative.
