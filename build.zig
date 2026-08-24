@@ -193,6 +193,31 @@ pub fn build(b: *std.Build) void {
 
     addDirSources(core_lib, b, "src");
 
+    // yyjson, the parser behind arnm/json_reader.h. It is a submodule under third_party/ and is
+    // compiled straight into libarnm, so a consumer links one library and adds one include path
+    // -- the same as before there was a JSON reader at all. The include path below is private:
+    // no installed header names yyjson, and nothing of it reaches include/arnm/json_reader.h.
+    //
+    // The submodule is checked rather than assumed. A fresh `git clone` without --recursive
+    // leaves the directory empty, and the error that follows would otherwise be a missing
+    // header three layers down, which says nothing about what to do next.
+    const yyjson_source = "third_party/yyjson/src/yyjson.c";
+    b.build_root.handle.access(yyjson_source, .{}) catch {
+        std.debug.panic(
+            "'{s}' is missing -- the yyjson submodule is not checked out.\n" ++
+                "  git submodule update --init --recursive\n",
+            .{yyjson_source},
+        );
+    };
+    core_lib.addIncludePath(b.path("third_party/yyjson/src"));
+    core_lib.addCSourceFiles(.{
+        .files = &[_][]const u8{yyjson_source},
+        // The standard is named for the same reason as in c_flags, so both builds compile the
+        // same language. -Wconversion is deliberately absent: it is a rule arnm holds itself to,
+        // and a third party source is not ours to keep clean under it.
+        .flags = &[_][]const u8{"-std=gnu11"},
+    });
+
     // keep track of it, so later we can pass it to compile_commands
     cdbTargets.append(b.allocator, core_lib) catch @panic("OOM");
 
@@ -213,6 +238,7 @@ pub fn build(b: *std.Build) void {
         processBuildTarget(&context, .{ .name = "bench_multi_arena", .srcs = &.{"bench_multi_arena.c"} }, path);
         processBuildTarget(&context, .{ .name = "bench_numberToString", .srcs = &.{"bench_numberToString.c"} }, path);
         processBuildTarget(&context, .{ .name = "bench_binaryToString", .srcs = &.{"bench_binaryToString.c"} }, path);
+        processBuildTarget(&context, .{ .name = "bench_json", .srcs = &.{"bench_json.c"} }, path);
     }
 
     if (enable_tests) {
@@ -222,6 +248,8 @@ pub fn build(b: *std.Build) void {
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_duration", .srcs = &.{"test_duration.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_memory", .srcs = &.{"test_memory.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_fixed_arena_pool", .srcs = &.{"test_fixed_arena_pool.cpp"} }, path);
+        processBuildTarget(&context, .{ .link_googletest = true, .name = "test_json_reader", .srcs = &.{"test_json_reader.cpp"} }, path);
+        processBuildTarget(&context, .{ .link_googletest = true, .name = "test_json_writer", .srcs = &.{"test_json_writer.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_multi_arena", .srcs = &.{"test_multi_arena.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_result", .srcs = &.{"test_result.cpp"} }, path);
     }
