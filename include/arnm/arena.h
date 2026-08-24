@@ -40,6 +40,11 @@ extern "C" {
  * run the real workload once, read the figure, and size the arena by it instead of by guess.
  * A chain (@ref arnm_multi_arena) is the other answer -- it opens more ground instead.
  *
+ * The two figures are read from opposite sides of the same line.
+ * @ref arnm_arena_remaining() is what is still there and can be asked before a request, so a
+ * caller that has somewhere else to put a large block never has to be refused to find out;
+ * @ref arnm_arena_overflow_total() is what was already turned away, and only afterwards.
+ *
  * @{
  */
 
@@ -112,6 +117,27 @@ static inline arnm_result arnm_reinit_arena(arnm *memory, uint32_t capacity) {
  *       `memory != NULL`, so callers can skip their own null check.
  */
 bool arnm_is_arena(const arnm *memory);
+
+/**
+ * @brief Bytes this arena can still hand out.
+ *
+ * What lies between the index and the end of the block: the largest request that would still
+ * be served, an arena never reaching past the ground it was given. The figure is a
+ * subtraction of two fields -- nothing is walked and nothing is counted -- so it is cheap
+ * enough to ask before every allocation, which @ref arnm_multi_arena_measure() is not.
+ *
+ * @param[in] memory Handle to ask.
+ * @return Bytes still to be had, always a multiple of 8. 0 for NULL, for host mode, for a
+ *         chain, and for an arena that was released or never initialized.
+ * @note The 0 of a full arena and the 0 of a handle that is no arena at all read alike; @ref
+ *       arnm_is_arena() and @ref arnm_is_multi_arena() tell them apart where it matters. A
+ *       chain is asked through @ref arnm_multi_arena_measure() instead: it opens more ground
+ *       rather than running dry, so one number could not say what it appears to.
+ * @note Not a reservation. The figure holds until the next call that moves the index --
+ *       @ref arnm_alloc(), @ref arnm_realloc(), @ref arnm_free(), @ref arnm_reset().
+ * @whisper How much ground is still open, before the last of it is spoken for
+ */
+uint32_t arnm_arena_remaining(const arnm *memory);
 
 /**
  * @brief Bytes this arena had to refuse since the last reset, saturating.

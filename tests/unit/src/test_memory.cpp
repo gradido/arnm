@@ -377,6 +377,138 @@ TEST(MemoryTest, OverflowCounterSaturatesInsteadOfWrapping) {
 }
 
 // ---------------------------------------------------------------------------
+// arena introspection
+// ---------------------------------------------------------------------------
+
+TEST(MemoryTest, RemainingIsWhatLiesBetweenTheIndexAndTheEnd) {
+  arnm mem{};
+  ASSERT_EQ(arnm_init_arena(&mem, 64), ARNM_SUCCESS);
+
+  // an untouched arena still holds all of it
+  EXPECT_EQ(arnm_arena_remaining(&mem), 64u);
+
+  uint8_t *first = nullptr;
+  ASSERT_EQ(arnm_alloc(&first, 8, &mem), ARNM_SUCCESS);
+  EXPECT_EQ(arnm_arena_remaining(&mem), 56u);
+
+  // the reserved figure is what is subtracted, not the requested one: 20 costs 24
+  uint8_t *second = nullptr;
+  ASSERT_EQ(arnm_alloc(&second, 20, &mem), ARNM_SUCCESS);
+  EXPECT_EQ(arnm_arena_remaining(&mem), 32u);
+
+  // the tail comes back and the remainder grows again
+  EXPECT_EQ(arnm_free(second, 20, &mem), ARNM_SUCCESS);
+  EXPECT_EQ(arnm_arena_remaining(&mem), 56u);
+
+  // which puts the first block back at the tail, so it comes back too
+  EXPECT_EQ(arnm_free(first, 8, &mem), ARNM_SUCCESS);
+  EXPECT_EQ(arnm_arena_remaining(&mem), 64u);
+
+  // and the whole of it returns at once
+  ASSERT_EQ(arnm_alloc(&first, 40, &mem), ARNM_SUCCESS);
+  EXPECT_EQ(arnm_arena_remaining(&mem), 24u);
+  arnm_reset(&mem);
+  EXPECT_EQ(arnm_arena_remaining(&mem), 64u);
+
+  arnm_release(&mem);
+}
+
+TEST(MemoryTest, RemainingIsExactlyTheLargestRequestStillServed) {
+  arnm mem{};
+  ASSERT_EQ(arnm_init_arena(&mem, 64), ARNM_SUCCESS);
+
+  uint8_t *head = nullptr;
+  ASSERT_EQ(arnm_alloc(&head, 17, &mem), ARNM_SUCCESS); // 24 reserved
+  const uint32_t remaining = arnm_arena_remaining(&mem);
+  ASSERT_EQ(remaining, 40u);
+
+  // one byte past the figure is refused, and refused without touching the index
+  uint8_t *too_big = nullptr;
+  EXPECT_EQ(arnm_alloc(&too_big, remaining + 1, &mem), ARNM_ERROR_OUT_OF_MEMORY);
+  EXPECT_EQ(too_big, nullptr);
+  EXPECT_EQ(arnm_arena_remaining(&mem), remaining);
+
+  // the figure itself fits exactly, and leaves nothing behind
+  uint8_t *exact = nullptr;
+  ASSERT_EQ(arnm_alloc(&exact, remaining, &mem), ARNM_SUCCESS);
+  EXPECT_EQ(arnm_arena_remaining(&mem), 0u);
+  EXPECT_EQ(ARNM_INTERN(&mem)->last_index, ARNM_INTERN(&mem)->capacity);
+
+  arnm_release(&mem);
+}
+
+TEST(MemoryTest, RemainingCountsTheRoundedCapacityOfAnOwnedArena) {
+  // an owned arena rounds its capacity up to 8, so the remainder starts above what was asked for
+  arnm mem{};
+  ASSERT_EQ(arnm_init_arena(&mem, 100), ARNM_SUCCESS);
+  EXPECT_EQ(arnm_arena_remaining(&mem), 104u);
+  arnm_release(&mem);
+
+  // a borrowed one is taken exactly as it is, and is measured the same way afterwards
+  alignas(8) uint8_t storage[64];
+  arnm borrowed{};
+  ASSERT_EQ(arnm_init_arena_borrow(&borrowed, storage, sizeof(storage)), ARNM_SUCCESS);
+  EXPECT_EQ(arnm_arena_remaining(&borrowed), 64u);
+
+  uint8_t *buffer = nullptr;
+  ASSERT_EQ(arnm_alloc(&buffer, 33, &borrowed), ARNM_SUCCESS); // 40 reserved
+  EXPECT_EQ(arnm_arena_remaining(&borrowed), 24u);
+
+  // letting a borrowed block go leaves the caller's buffer alone, and nothing to report
+  arnm_release(&borrowed);
+  EXPECT_EQ(arnm_arena_remaining(&borrowed), 0u);
+}
+
+TEST(MemoryTest, RemainingAnswersZeroWhereThereIsNoArenaToMeasure) {
+  // nothing to ask
+  EXPECT_EQ(arnm_arena_remaining(nullptr), 0u);
+
+  // host mode has no ceiling of its own, so it reports none
+  arnm host{};
+  EXPECT_EQ(arnm_arena_remaining(&host), 0u);
+  uint8_t *buffer = nullptr;
+  ASSERT_EQ(arnm_alloc(&buffer, 32, &host), ARNM_SUCCESS);
+  EXPECT_EQ(arnm_arena_remaining(&host), 0u);
+  arnm_free(buffer, 32, &host);
+
+  // an arena type without a buffer -- released, or never initialized
+  arnm uninitialized{};
+  ARNM_INTERN(&uninitialized)->allocation_type = ARNM_ALLOC_TYPE_ARENA_OWNED;
+  EXPECT_EQ(arnm_arena_remaining(&uninitialized), 0u);
+
+  arnm released{};
+  ASSERT_EQ(arnm_init_arena(&released, 64), ARNM_SUCCESS);
+  ASSERT_EQ(arnm_arena_remaining(&released), 64u);
+  arnm_release(&released);
+  EXPECT_EQ(arnm_arena_remaining(&released), 0u);
+  // it still reads as an arena; the 0 is about the ground, not about the kind of handle
+  EXPECT_TRUE(arnm_is_arena(&released));
+}
+
+TEST(MemoryTest, RemainingAndOverflowTotalReadTheSameLineFromBothSides) {
+  arnm mem{};
+  ASSERT_EQ(arnm_init_arena(&mem, 64), ARNM_SUCCESS);
+
+  uint8_t *buffer = nullptr;
+  ASSERT_EQ(arnm_alloc(&buffer, 48, &mem), ARNM_SUCCESS);
+  EXPECT_EQ(arnm_arena_remaining(&mem), 16u);
+  EXPECT_EQ(arnm_arena_overflow_total(&mem), 0u);
+
+  // what was refused is the reserved size of the request, not the part that did not fit
+  uint8_t *refused = nullptr;
+  EXPECT_EQ(arnm_alloc(&refused, 17, &mem), ARNM_ERROR_OUT_OF_MEMORY);
+  EXPECT_EQ(arnm_arena_remaining(&mem), 16u); // a refusal moves no index
+  EXPECT_EQ(arnm_arena_overflow_total(&mem), 24u);
+
+  // reset clears the record and opens the ground again
+  arnm_reset(&mem);
+  EXPECT_EQ(arnm_arena_remaining(&mem), 64u);
+  EXPECT_EQ(arnm_arena_overflow_total(&mem), 0u);
+
+  arnm_release(&mem);
+}
+
+// ---------------------------------------------------------------------------
 // arnm_alloc
 // ---------------------------------------------------------------------------
 

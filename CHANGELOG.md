@@ -15,6 +15,43 @@ than left to be discovered.
 Entries before 0.4.0 were reconstructed from the git history after the fact, so they summarise
 what the commits show rather than what was noted at the time.
 
+## 0.7.1 -- 2026-08-24
+
+An arena could always say how much it had already refused. Now it can also be asked how much is
+still there, before anything is refused at all.
+
+Additive only: nothing that was there behaves differently, so the patch number moves rather than
+the minor one -- against the rule at the top of this file, which reserves the minor number for
+new API. The exception is named here rather than left to be noticed: one function was added and
+no existing one changed, so code built against 0.7.0 links and behaves the same.
+
+### Added
+
+- **`arnm_arena_remaining()` in `arnm/arena.h` -- the bytes an arena can still hand out.** What
+  lies between the index and the end of the block, and therefore the largest request that would
+  still be served. A subtraction of two fields: nothing is walked and nothing is counted, so it
+  is cheap enough to ask before every allocation, which `arnm_multi_arena_measure()` is not.
+  - **It is read before a request, where the overflow counter is read after one.** The two
+    figures sit on opposite sides of the same line. A caller with somewhere else to put a large
+    block can look first instead of having to be refused to find out;
+    `arnm_arena_overflow_total()` stays the answer to the sizing question a whole run asks.
+  - **0 where there is no single arena to measure** -- NULL, host mode, a chain, and an arena
+    that was released or never initialized. That matches `arnm_arena_overflow_total()`, and it
+    means a 0 reads as "full" only once the handle is known to be a single arena;
+    `arnm_is_arena()` and `arnm_is_multi_arena()` tell the cases apart. A chain is asked through
+    `arnm_multi_arena_measure()` instead: it opens more ground rather than running dry, so one
+    remainder could not say what it appears to.
+  - The figure is always a multiple of 8, being the difference of two figures that are, and it
+    holds until the next call that moves the index -- `arnm_alloc()`, `arnm_realloc()`,
+    `arnm_free()`, `arnm_reset()`.
+- Seven tests. Five in `test_memory.cpp`: the remainder against allocation and reclaim, the
+  exact fit at the boundary, the rounding an owned arena does against the exactness a borrowed
+  one keeps, the four handles that answer 0, and the two figures read side by side. Two in
+  `test_multi_arena.cpp`: a chain answers 0 while `_measure()` answers for real, and each arena
+  inside a chain still answers on its own.
+- README: a section on asking an arena where it stands, which also documents
+  `arnm_arena_overflow_total()` -- it had only ever been described in the header.
+
 ## 0.7.0 -- 2026-08-24
 
 JSON in both directions, over the allocator that is already there. A reader that fills a struct

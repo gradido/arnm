@@ -350,6 +350,63 @@ TEST(MultiArena, CreateAndDestroy) {
 }
 
 // ---------------------------------------------------------------------------
+// what a chain reports
+// ---------------------------------------------------------------------------
+
+TEST(MultiArena, ArenaRemainingIsNotAChainsQuestion) {
+  // arnm_is_arena() answers true for a chain, so arnm_arena_remaining() is reachable with one
+  // in hand. It answers 0 whatever the chain holds -- a chain opens more ground instead of
+  // running dry, and a single remainder would read as a ceiling the chain does not have.
+  // arnm_multi_arena_measure() is where a chain is asked, and it answers while the other stays 0.
+  arnm *m = MakeChain();
+  ASSERT_NE(m, nullptr);
+  ASSERT_TRUE(arnm_is_arena(m));
+
+  EXPECT_EQ(arnm_arena_remaining(m), 0u);
+  EXPECT_EQ(arnm_arena_overflow_total(m), 0u);
+
+  uint8_t *buffer = nullptr;
+  ASSERT_EQ(arnm_alloc(&buffer, 64, m), ARNM_SUCCESS);
+  EXPECT_EQ(arnm_arena_remaining(m), 0u);
+
+  const arnm_multi_arena_stats stats = Measure(m);
+  EXPECT_EQ(stats.reserved, kArenaCapacity);
+  EXPECT_EQ(stats.used, 64u);
+  EXPECT_EQ(stats.arena_count, 1u);
+  EXPECT_EQ(stats.open_count, 1u);
+
+  arnm_destroy(m, nullptr);
+}
+
+TEST(MultiArena, EachArenaOfAChainStillAnswersOnItsOwn) {
+  // The descriptors a chain holds are arenas like any other, so the remainder of a single one
+  // is readable through the internal view -- which is how the chain itself decides where a
+  // request lands, and what the reported figures are built from.
+  arnm *m = MakeChain();
+  ASSERT_NE(m, nullptr);
+
+  uint8_t *first = nullptr;
+  ASSERT_EQ(arnm_alloc(&first, 100, m), ARNM_SUCCESS); // 104 reserved
+  const arnm_bvec *arenas = &ARNM_INTERN(m)->multi_arena->arenas;
+  ASSERT_EQ(arnm_bvec_size(arenas), 1u);
+
+  const arnm *arena = static_cast<const arnm *>(arnm_bvec_at(arenas, 0));
+  EXPECT_EQ(arnm_arena_remaining(arena), kArenaCapacity - 104u);
+
+  // a request the first arena cannot serve opens a second one and leaves the first as it was
+  uint8_t *large = nullptr;
+  ASSERT_EQ(arnm_alloc(&large, kArenaCapacity, m), ARNM_SUCCESS);
+  ASSERT_EQ(arnm_bvec_size(arenas), 2u);
+  EXPECT_EQ(
+      arnm_arena_remaining(static_cast<const arnm *>(arnm_bvec_at(arenas, 0))),
+      kArenaCapacity - 104u
+  );
+  EXPECT_EQ(arnm_arena_remaining(static_cast<const arnm *>(arnm_bvec_at(arenas, 1))), 0u);
+
+  arnm_destroy(m, nullptr);
+}
+
+// ---------------------------------------------------------------------------
 // allocation
 // ---------------------------------------------------------------------------
 
