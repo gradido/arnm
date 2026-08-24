@@ -686,6 +686,18 @@ arnm_result arnm_json_writer_write(
   }
 
   const uint32_t needed = narrow_length(length) + 1u; /* the terminator yyjson wrote */
+  // The measurement is a bound and the block was taken at it, so this can only fail if the
+  // bound is wrong -- and a bound that is wrong by a byte is a copy past the end of the
+  // caller's block. Checked rather than trusted: the accounting above is ours to keep correct,
+  // but it is spread across every adder and stands against a serializer we do not own, and a
+  // refusal here is a bug report where the alternative is a corrupted heap.
+  if (needed > reserved) {
+    (void)arnm_free(text, reserved, allocator);
+    json_buffer_dispose(&scratch, written);
+    record_error(state, ARNM_ERROR_ENCODE_FAILED, NULL);
+    return ARNM_ERROR_ENCODE_FAILED;
+  }
+
   memcpy(text, written, (size_t)needed);
   json_buffer_dispose(&scratch, written);
 

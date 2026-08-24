@@ -130,11 +130,17 @@ extern "C" {
 /**
  * @brief Longest text yyjson can render one number as, terminator excluded.
  *
- * `-1.7976931348623157e+308` is twenty-four characters and nothing a `double` can hold is
- * longer. @ref arnm_json_writer_size() charges this for every real number it cannot know the
- * length of in advance, which is where its answer stops being exact.
+ * The ceiling belongs to fixed point notation and not to the exponents, which is the opposite
+ * of what the extremes suggest. `-1.7976931348623157e+308` is twenty-four characters and so is
+ * every other number written with an exponent, sign and all. But a number whose decimal point
+ * falls just left of the first significant digit is written out in full, and seventeen
+ * significant digits behind `-0.00000` is twenty-five -- `-0.0000018498776203445192` is one such
+ * `double`, and nothing a `double` can hold is longer than that.
+ *
+ * @ref arnm_json_writer_size() charges this for every real number it cannot know the length of
+ * in advance, which is where its answer stops being exact.
  */
-#define ARNM_JSON_WRITER_MAX_NUMBER_TEXT 24
+#define ARNM_JSON_WRITER_MAX_NUMBER_TEXT 25
 
 // ********** flags *******************
 

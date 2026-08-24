@@ -25,7 +25,7 @@
  *
  * Range:
  * - Supports full uint64_t range [0, UINT64_MAX].
- * - Maximum return value is 19 (since UINT64_MAX < 10^20).
+ * - Maximum return value is 20: UINT64_MAX is 18446744073709551615, twenty digits wide.
  *
  * Notes:
  * - The structure may look unusual, but it is intentionally optimized for performance.

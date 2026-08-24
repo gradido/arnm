@@ -584,18 +584,69 @@ TEST(JsonWriter, ARealNumberIsChargedItsLongestForm) {
   EXPECT_EQ(Write(owner.writer(), owner.arena(), /*size_is_exact=*/false), "{\"ratio\":0.5}");
 }
 
+namespace {
+
+/**
+ * The doubles that reach the longest text, in both notations the serializer chooses between.
+ *
+ * The exponent forms are the obvious ones and they are not the long ones. A number whose
+ * decimal point falls just left of its first significant digit is written out in full instead,
+ * and seventeen significant digits behind `-0.00000` is one byte longer than the largest
+ * `double` ever written with an exponent -- which is the byte the ceiling exists for.
+ */
+const double kLongestReals[] = {
+    -1.7976931348623157e308,  /* 23 -- the largest magnitude, in exponent form */
+    1.7976931348623157e308,   /* 22 -- the same without the sign */
+    -2.2250738585072014e-308, /* 24 -- the smallest normal, in exponent form */
+    5e-324,                   /*  6 -- the smallest subnormal */
+    -0.0,                     /*  4 -- the sign that survives a zero */
+    1.0 / 3.0,                /* 18 -- decimal point inside the digits */
+    0.0000018498776203445192, /* 24 -- fixed point, without a sign */
+    -0.000012345678901234567, /* 24 -- one zero fewer behind the point */
+    -0.00012345678901234567,  /* 23 */
+    -1.2345678901234567e-7,   /* 22 -- just past where the exponent form takes over */
+};
+
+/**
+ * The two that reach the ceiling: sign, `0.` and five zeros, then seventeen significant digits.
+ *
+ * Kept apart from the list above because a document mixing them with shorter numbers proves
+ * nothing -- the slack the short ones leave pays for the long ones, and a ceiling one byte too
+ * low still comes out ahead. A document of nothing but these has no slack to hide in.
+ */
+const double kCeilingReals[] = {
+    -0.0000018498776203445192,
+    -0.0000012345678901234567,
+};
+
+} // namespace
+
 TEST(JsonWriter, TheLongestRealNumberStillFitsItsCharge) {
   // the ceiling is a claim about doubles, so it is checked against the ones that reach it
-  const double extremes[] = {
-      -1.7976931348623157e308,
-      1.7976931348623157e308,
-      -2.2250738585072014e-308,
-      5e-324,
-      -0.0,
-      1.0 / 3.0,
-  };
+  std::vector<double> reaching(std::begin(kLongestReals), std::end(kLongestReals));
+  reaching.insert(reaching.end(), std::begin(kCeilingReals), std::end(kCeilingReals));
 
-  for (double value : extremes) {
+  for (double value : reaching) {
+    ArenaWriter owner;
+    arnm_json_writer_begin_array(owner.writer());
+    arnm_json_writer_add_double(owner.writer(), nullptr, value);
+    ASSERT_EQ(arnm_json_writer_status(owner.writer()), ARNM_SUCCESS);
+
+    // Write() itself refuses a measurement that comes out shorter than the text, which is what
+    // a ceiling set too low looks like from here -- a copy past the end of the caller's block.
+    const std::string text = Write(owner.writer(), owner.arena(), /*size_is_exact=*/false);
+    ASSERT_GE(text.size(), 2u);
+    EXPECT_LE(text.size() - 2u, ARNM_JSON_WRITER_MAX_NUMBER_TEXT)
+        << "rendered as " << text << ", which is longer than the ceiling promises";
+  }
+}
+
+TEST(JsonWriter, TheCeilingIsReachedByADoubleAndNotMerelyGuessedAt) {
+  // A ceiling nobody reaches is a ceiling nobody has measured, and it would hide the next byte
+  // the serializer grows by. One of these has to render exactly as long as the charge.
+  size_t longest = 0;
+  std::string longest_text;
+  for (double value : kCeilingReals) {
     ArenaWriter owner;
     arnm_json_writer_begin_array(owner.writer());
     arnm_json_writer_add_double(owner.writer(), nullptr, value);
@@ -603,9 +654,35 @@ TEST(JsonWriter, TheLongestRealNumberStillFitsItsCharge) {
 
     const std::string text = Write(owner.writer(), owner.arena(), /*size_is_exact=*/false);
     ASSERT_GE(text.size(), 2u);
-    EXPECT_LE(text.size() - 2u, ARNM_JSON_WRITER_MAX_NUMBER_TEXT)
-        << "rendered as " << text << ", which is longer than the ceiling promises";
+    if (text.size() - 2u > longest) {
+      longest = text.size() - 2u;
+      longest_text = text;
+    }
   }
+  EXPECT_EQ(longest, ARNM_JSON_WRITER_MAX_NUMBER_TEXT)
+      << "the longest of them rendered as " << longest_text;
+}
+
+TEST(JsonWriter, ADocumentOfLongRealsStaysInsideTheBlockItWasMeasuredFor) {
+  // One double short of its charge is a byte; a document of nothing but those is a byte per
+  // field, and the copy into the caller's block is what runs off the end. The arena puts
+  // something of its own right behind that block, so an overrun lands in it.
+  ArenaWriter owner;
+  for (int round = 0; round < 8; ++round) {
+    for (double value : kCeilingReals) {
+      arnm_json_writer_add_double(owner.writer(), "value", value);
+    }
+  }
+  ASSERT_EQ(arnm_json_writer_status(owner.writer()), ARNM_SUCCESS);
+
+  const uint32_t promised = arnm_json_writer_size(owner.writer());
+
+  arnm_memory_block block{};
+  uint32_t length = 0;
+  ASSERT_EQ(arnm_json_writer_write(owner.writer(), owner.arena(), &block, &length), ARNM_SUCCESS);
+  EXPECT_GE(promised, length + 1u) << "the text did not fit what was reserved for it";
+  EXPECT_EQ(std::strlen(reinterpret_cast<const char *>(block.data)), length);
+  EXPECT_EQ(arnm_memory_block_free(&block, owner.arena()), ARNM_SUCCESS);
 }
 
 TEST(JsonWriter, TheTextIsShrunkToWhatItActuallyNeeded) {

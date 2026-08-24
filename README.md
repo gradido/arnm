@@ -276,7 +276,7 @@ and its indentation the moment it is added, so nothing is walked and nothing is 
 It is **exact** for a document of integers, booleans, nulls and valid UTF-8 strings, under every
 layout — and `arnm_json_writer_write()` takes exactly that many bytes from the allocator you
 name, so an arena sized by it comes out full to the byte. Two things make it an upper bound
-instead, and only ever too large: a `double` is charged its longest form (24 bytes), and under
+instead, and only ever too large: a `double` is charged its longest form (25 bytes), and under
 `ARNM_JSON_WRITE_ESCAPE_UNICODE` a byte outside ASCII is charged six. The slack goes back before
 `write()` returns.
 
