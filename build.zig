@@ -193,22 +193,17 @@ pub fn build(b: *std.Build) void {
 
     addDirSources(core_lib, b, "src");
 
-    // yyjson, the parser behind arnm/json_reader.h. It is a submodule under third_party/ and is
-    // compiled straight into libarnm, so a consumer links one library and adds one include path
-    // -- the same as before there was a JSON reader at all. The include path below is private:
-    // no installed header names yyjson, and nothing of it reaches include/arnm/json_reader.h.
+    // yyjson, the parser behind arnm/json_reader.h. Its two files are copied into
+    // third_party/yyjson/ rather than pulled in as a submodule, because `zig fetch` takes the
+    // repository tree and nothing under it -- a submodule would reach a consumer as an empty
+    // directory and take the JSON half of the library with it. See third_party/yyjson/README.md
+    // for the version, the upstream commit, and how to move it.
     //
-    // The submodule is checked rather than assumed. A fresh `git clone` without --recursive
-    // leaves the directory empty, and the error that follows would otherwise be a missing
-    // header three layers down, which says nothing about what to do next.
+    // It is compiled straight into libarnm, so a consumer links one library and adds one include
+    // path -- the same as before there was a JSON reader at all. The include path below is
+    // private: no installed header names yyjson, and nothing of it reaches
+    // include/arnm/json_reader.h.
     const yyjson_source = "third_party/yyjson/src/yyjson.c";
-    b.build_root.handle.access(yyjson_source, .{}) catch {
-        std.debug.panic(
-            "'{s}' is missing -- the yyjson submodule is not checked out.\n" ++
-                "  git submodule update --init --recursive\n",
-            .{yyjson_source},
-        );
-    };
     core_lib.addIncludePath(b.path("third_party/yyjson/src"));
     core_lib.addCSourceFiles(.{
         .files = &[_][]const u8{yyjson_source},

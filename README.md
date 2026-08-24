@@ -162,7 +162,7 @@ keeps the search short and writes off up to a threshold worth of bytes per arena
 ## Reading JSON
 
 `arnm/json_reader.h` parses a document into the allocator you name and reads it back one field
-per line. The parser is yyjson, vendored under `third_party/` as a submodule — it is compiled
+per line. The parser is yyjson, copied into `third_party/` at release 0.12.0 — it is compiled
 into `libarnm` and never surfaces: the header is plain C11, and you link one library.
 
 The reader keeps the **first** error and the field it happened at, so a struct is filled without
@@ -315,7 +315,6 @@ each other.
 ## Build
 
 ```bash
-git submodule update --init --recursive                      # third_party/yyjson, once per clone
 zig build                                                    # the static library, host target
 zig build -Dtests=true -Dbenchmarks=true
 ./run_all.sh                                                 # run everything in zig-out/bin
@@ -358,11 +357,20 @@ signed to string          snprintf   58.2 ns      arnm  13.8 ns
 
 ## Using it from another zig project
 
+```bash
+zig fetch --save git+https://github.com/gradido/arnm#v0.7.2
+```
+
 ```zig
 const arnm = b.dependency("arnm", .{ .target = target, .optimize = optimize });
 lib.linkLibrary(arnm.artifact("arnm"));
 lib.addIncludePath(arnm.path("include"));
 ```
+
+Nothing else to check out. `zig fetch` takes the repository tree and nothing under it, so
+everything arnm compiles has to be in that tree — which is why yyjson is a copy of two files
+under `third_party/` and not a submodule. It was one until 0.7.2, and a project that depended on
+arnm got the JSON half as a missing header three layers down.
 
 ## Changes
 
@@ -370,4 +378,8 @@ lib.addIncludePath(arnm.path("include"));
 
 ## License
 
-Apache 2.0
+Apache 2.0.
+
+`third_party/yyjson` is MIT, and carries its own `LICENSE` beside the two files it consists of.
+It is the only third party code in the tree, and it is compiled into `libarnm`, so a binary
+built from this repository carries both notices.

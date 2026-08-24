@@ -15,6 +15,51 @@ than left to be discovered.
 Entries before 0.4.0 were reconstructed from the git history after the fact, so they summarise
 what the commits show rather than what was noted at the time.
 
+## 0.7.2 -- 2026-08-24
+
+yyjson stops being a git submodule and becomes two files in this tree. Nothing an `arnm_` call
+does changes; what changes is whether a project that depends on arnm gets a library that
+compiles.
+
+`zig fetch` takes the repository tree and nothing under it. A submodule arrives as an empty
+directory, so a project depending on arnm through `build.zig.zon` got the JSON half as a missing
+header three layers down -- and `git submodule update --init --recursive` is not something a
+dependency can ask of the projects that use it. Fetching arnm now fetches all of arnm.
+
+### Changed
+
+- **`third_party/yyjson` is a copy, not a submodule.** `src/yyjson.c`, `src/yyjson.h` and the
+  MIT `LICENSE` are in the tree unmodified, at the same release the submodule was pinned to
+  (`0.12.0`, upstream commit `8b4a38dc994a110abaec8a400615567bd996105f`). Nothing else came
+  with them: upstream's build files, tests, fuzzers and packaging are not here, because the one
+  source is compiled straight into `libarnm` and yyjson is never built as a project of its own.
+  - `.gitmodules` is gone, and with it `git submodule update --init --recursive` -- a clone is
+    a clone again.
+  - Both builds lost the check that named the missing submodule. There is nothing left for it
+    to catch, and a file that is simply absent from the tree is a different problem with a
+    different fix.
+  - Neither build changed otherwise: the same source, the same private include path, the same
+    `-Wconversion` exemption. `include/arnm/json_reader.h` and `include/arnm/json_writer.h` are
+    plain C11 and still name nothing of what is underneath.
+- **`third_party/yyjson/README.md`** records where the copy came from, which files were taken,
+  and the three commands that move it to a newer release -- the pin a submodule used to hold on
+  its own.
+
+### Notes
+
+- The tree carries about 700 KB it did not before. That is the price of a fetch that works, and
+  it is paid once per clone rather than by every consumer's build configuration.
+- A version bump is now a copy that nothing verifies for you. The commit recorded in that README
+  is what makes an update a diff against a known point rather than a guess, which is why the two
+  files are kept byte-identical to the tag -- everything arnm needs on top of them lives in
+  `src/json_memory.h`.
+- Verified by extracting the tracked tree into a clean directory with no `.git` and building a
+  small consumer project against it through `b.dependency("arnm", ...)`: the library builds and
+  the JSON reader parses. The same tree with `third_party/yyjson` emptied -- which is what a
+  submodule looked like to a consumer -- fails to compile, which is the bug this release closes.
+- The MSVC ABI route through `CMakeLists.txt` was not built here; the change to it is the
+  removal of an existence check and no source or flag moved.
+
 ## 0.7.1 -- 2026-08-24
 
 An arena could always say how much it had already refused. Now it can also be asked how much is
