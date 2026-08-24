@@ -93,19 +93,47 @@ endif()
 FILE(GLOB ARNM_SRC "src/*.c")
 FILE(GLOB ARNM_HEADERS "include/arnm/*.h")
 
-add_library(${PROJECT_NAME} STATIC ${ARNM_SRC} ${ARNM_HEADERS})
+# yyjson is the parser behind arnm/json_reader.h. It is a submodule under third_party/ and is
+# compiled into libarnm itself, so a consumer links one library and adds one include path --
+# mirrors build.zig, which does the same and leads here. The submodule is checked rather than
+# assumed: a `git clone` without --recursive leaves the directory empty, and the error that
+# follows would otherwise be a missing header three layers down, saying nothing about the fix.
+set(YYJSON_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/yyjson/src/yyjson.c)
+if(NOT EXISTS ${YYJSON_SOURCE})
+  message(FATAL_ERROR
+    "${YYJSON_SOURCE} is missing -- the yyjson submodule is not checked out.\n"
+    "  git submodule update --init --recursive")
+endif()
+
+add_library(${PROJECT_NAME} STATIC ${ARNM_SRC} ${ARNM_HEADERS} ${YYJSON_SOURCE})
 
 target_include_directories(${PROJECT_NAME} PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
 
+# PRIVATE, and not part of the install interface: no installed header names yyjson, so a
+# consumer never needs this path and never learns which parser is underneath.
+target_include_directories(${PROJECT_NAME} PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/yyjson/src
+)
+
 # PRIVATE: a consumer of the installed library picks its own warning level.
 target_compile_options(${PROJECT_NAME} PRIVATE ${ARNM_WARNING_FLAGS})
+
+# The narrowing warnings are a rule arnm holds itself to; a third party source is not ours to
+# keep clean under it. A source property is appended after the target options, so the last word
+# on that translation unit is the one below. Mirrors the flag set build.zig gives yyjson.c.
+if(MSVC)
+  set_source_files_properties(${YYJSON_SOURCE} PROPERTIES COMPILE_OPTIONS "/wd4242;/wd4244;/wd4267")
+else()
+  set_source_files_properties(${YYJSON_SOURCE} PROPERTIES COMPILE_OPTIONS "-Wno-conversion")
+endif()
 
 if(MSVC)
   source_group("src" FILES ${ARNM_SRC})
   source_group("include" FILES ${ARNM_HEADERS})
+  source_group("third_party" FILES ${YYJSON_SOURCE})
   # debug symbols for a parent project stepping into this one
   target_compile_options(${PROJECT_NAME} PRIVATE $<$<CONFIG:Debug>:/JMC>)
 endif()

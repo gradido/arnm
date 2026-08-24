@@ -21,6 +21,68 @@ The arena and the multi arena became one allocator behind one handle. A consumer
 called `arnm_alloc()` and `arnm_free()` is unaffected; one that named the multi arena's own
 functions or read fields out of the descriptor has work to do, and every such change is below.
 
+### Added
+
+- **`arnm/json_reader.h` — a JSON reader that parses into your allocator and fills a struct one
+  line per field.** An opaque `arnm_json_reader` with `init`/`create`/`release`/`destroy`, where
+  the allocator and the read flags are named once at `init` and every later parse reads under
+  them.
+  - **The first error stays, with the field it happened at.** Every
+    `arnm_json_reader_get_string/_bool/_int64/_uint64/_int32/_uint32/_double()` reads a member of
+    the current value and answers its empty value — NULL, false, 0 — on a refusal, without
+    overwriting what was recorded. So a whole struct is read without a test between the lines and
+    asked about once, through `arnm_json_reader_status()` and `arnm_json_reader_error_field()`.
+    A parse that fails is that same first error. `arnm_json_reader_clear_error()` picks the
+    reading up again.
+  - **Nesting costs two lines and no bookkeeping.** `arnm_json_reader_enter()` steps into a
+    member and hands back the value it left; `arnm_json_reader_leave()` puts it back, on every
+    path, so a step that failed pairs exactly like one that did not. Arrays go by
+    `arnm_json_reader_enter_at()` with `arnm_json_reader_count()` as the bound, and the reader
+    remembers where it stood — walking an array costs a step per element rather than a walk per
+    element. A key of `NULL` names the current value itself, which is how an array of scalars is
+    read. `arnm_json_reader_has()` and `arnm_json_reader_type_of()` ask without recording
+    anything, for optional members.
+  - **Borrowed strings, or copied ones.** A string a getter hands back points into the document
+    by default. `arnm_json_reader_set_output_allocator()` copies each one into the arena it names
+    instead, NUL terminated, so it outlives the document and the buffer an in-situ parse read
+    through. NULL there means borrow, and is the one place in arnm where NULL is not the host: a
+    copy nobody can free one at a time belongs in an arena.
+  - **The output arena can be sized before it is built.**
+    `arnm_json_reader_output_size()` answers the bytes every string in the document costs;
+    `arnm_json_reader_output_size_for_keys()` counts only the members named in a
+    `const char *const *` of up to 255 names, at every depth, so an array of objects is covered
+    by naming its member once. Both numbers are exact — terminator and eight byte rounding
+    included — and both walk the document's flat value array rather than its tree, so nesting is
+    a number rather than a call depth. `bench_json_reader` puts the trade-off in figures: on a
+    document of 61 values with five members read and twenty-five ignored, the full walk costs
+    about 65 ns and reserves 1440 bytes while the keyed walk costs about 133 ns and reserves
+    240, against about 450 ns for the parse itself.
+  - **The value level is still there underneath**, each call answering an `arnm_result` of its
+    own: `arnm_json_read_null/_bool/_int64/_uint64/_int32/_uint32/_double/_string()`, plus arrays
+    and objects by index, by key, or through an iterator. Values are opaque handles owned by the
+    document; a `release` or the next parse invalidates every one of them.
+  - A number is refused rather than rounded. `arnm_json_read_int64()` on `3.5` answers
+    `ARNM_ERROR_ARITHMETIC_OVERFLOW`, as does one on a value outside the target type;
+    `arnm_json_value_number_type()` says beforehand which of `uint64`, `int64` and `double`
+    carries a given number whole.
+  - `arnm_json_reader_parse_insitu()` unescapes strings inside the caller's buffer instead of
+    copying it, which leaves a document at a single allocation — and that one sits at an arena's
+    tail, so `arnm_json_reader_release()` gives every byte back. It asks for a writable buffer
+    that outlives the document and carries `ARNM_JSON_READER_INSITU_PADDING` spare bytes.
+    `arnm_json_reader_parse()` asks none of that and pays one input copy, which stays buried in
+    an arena until `arnm_reset()` and is reported as
+    `ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED`.
+  - The flags are arnm's own bits, translated one at a time. A bit the header does not define is
+    refused with `ARNM_ERROR_INVALID_PARAM` at `init`, before a byte of the reader is written,
+    rather than passed through.
+- **`third_party/yyjson` 0.12.0, the first and only vendored dependency.** A git submodule,
+  pinned to a release tag rather than a branch head, compiled into `libarnm` and invisible
+  from outside: no installed header names it, its include path is private to the library
+  target in both builds, and every allocation it makes is forwarded to
+  `arnm_alloc`/`arnm_realloc`/`arnm_free` — its own default allocator is on no path this library
+  takes. A fresh clone needs `git submodule update --init --recursive`; both builds check for the
+  source and name it when it is missing.
+
 ### Changed
 
 - **`arnm` is opaque.** The descriptor is a sized 32 byte struct with no readable fields, so it
