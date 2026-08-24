@@ -50,9 +50,10 @@ int arnm_duration_string(
 
   uint8_t int_size = arnm_int64_to_string_size(integerPart);
   uint8_t suffix_len = (uint8_t)strlen(suffix);
-  // +2 for possible '-' and '.' and +precision for fractional part. Widened to size_t before
-  // the comparison: every term is a uint8_t and promotes to int, which buffer_size would then
-  // be compared against across the sign boundary.
+  // +2 for the '.' and the terminator, +precision for the fractional part. A '-' is not among
+  // them: arnm_int64_to_string_size() counts the sign inside int_size already. Widened to
+  // size_t before the comparison: every term is a uint8_t and promotes to int, which
+  // buffer_size would then be compared against across the sign boundary.
   size_t needed = (size_t)int_size + 2u + precision + suffix_len;
   if (buffer_size < needed) {
     return int_size + 1 + precision + suffix_len; // return required size without null terminator

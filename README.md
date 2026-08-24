@@ -38,7 +38,9 @@ its end, so the size is questioned instead of corrected. Declare the blob at a m
 
 Pass `NULL` instead of an allocator and every call falls back to malloc/free. That is the only
 place in the library where `malloc` appears — `lint.sh` fails the build if a second one shows
-up.
+up. The JSON parser vendored under `third_party/` is held to the same line: it is handed an
+allocator that forwards to `arnm_alloc`/`arnm_realloc`/`arnm_free`, so its own default
+allocator is on no path this library takes.
 
 ## What is in it
 
@@ -50,6 +52,8 @@ up.
 | `arnm/multi_arena.h` | a chain of arenas that opens another one instead of running dry |
 | `arnm/fixed_arena_pool.h` | a fixed set of equal sized arenas, lent out and returned; the peak is known at init |
 | `arnm/bucket_vector.h` | growing sequence with stable element addresses; no copy on growth |
+| `arnm/json_reader.h` | JSON parsed into your arena; one line per struct field, the first error kept with its field name, an in-situ path that copies nothing |
+| `arnm/json_writer.h` | the way back: one line per struct field, strings borrowed rather than copied, and the output size known before the text exists |
 | `arnm/converter.h` | integer to decimal string, roughly 4× faster than `snprintf`; bytes to lowercase hex and back, uuid to its 8-4-4-4-12 form and back |
 | `arnm/duration.h` | nanoseconds to a readable span |
 | `arnm/mono_timer.h` | monotonic clock, one type, three units |
@@ -128,9 +132,163 @@ nanosecond per arena walked, which only bites once a thousand of them have piled
 keeps the search short and writes off up to a threshold worth of bytes per arena.
 `bench_multi_arena` puts numbers on both ends.
 
+## Reading JSON
+
+`arnm/json_reader.h` parses a document into the allocator you name and reads it back one field
+per line. The parser is yyjson, vendored under `third_party/` as a submodule — it is compiled
+into `libarnm` and never surfaces: the header is plain C11, and you link one library.
+
+The reader keeps the **first** error and the field it happened at, so a struct is filled without
+a test between the lines and asked about once, at the end:
+
+```c
+#include "arnm/json_reader.h"
+
+arnm_json_reader reader;
+arnm_json_reader_init(&reader, &mem, ARNM_JSON_READ_DEFAULT);  // NULL is the host, as everywhere
+arnm_json_reader_parse(&reader, text, length);
+
+config.host    = arnm_json_reader_get_string(&reader, "host");
+config.port    = arnm_json_reader_get_uint32(&reader, "port");
+config.timeout = arnm_json_reader_get_double(&reader, "timeout");
+config.debug   = arnm_json_reader_get_bool(&reader, "debug");
+
+if (ARNM_SUCCESS != arnm_json_reader_status(&reader)) {
+  log("%s at '%s'", arnm_result_to_string(arnm_json_reader_status(&reader)),
+      arnm_json_reader_error_field(&reader));
+}
+
+arnm_json_reader_release(&reader);              // every borrowed string dangles from here on
+```
+
+Once something is refused, every later getter answers its empty value — NULL, false, 0 — and
+leaves the recorded error alone. A refusal in the middle of a struct therefore does not have to
+stop the reading, and `arnm_json_reader_clear_error()` picks it up again where you want to go on
+deliberately.
+
+Nesting is two lines and no bookkeeping: `arnm_json_reader_enter()` steps into a member and
+hands back the value it left, `arnm_json_reader_leave()` puts it back. Arrays go by
+`arnm_json_reader_enter_at()` with `arnm_json_reader_count()` as the bound, and the reader
+remembers where it stood, so walking one costs a step per element rather than a walk per
+element. A key of `NULL` names the current value itself, which is how the elements of an array of
+scalars are read.
+
+```c
+arnm_json_value *array = arnm_json_reader_enter(&reader, "peers");
+for (uint32_t i = 0, n = arnm_json_reader_count(&reader); i < n; ++i) {
+  arnm_json_value *element = arnm_json_reader_enter_at(&reader, i);
+  config.peers[i].name = arnm_json_reader_get_string(&reader, "name");
+  config.peers[i].port = arnm_json_reader_get_uint32(&reader, "port");
+  arnm_json_reader_leave(&reader, element);
+}
+arnm_json_reader_leave(&reader, array);
+```
+
+A string a getter hands back points into the document and dies with it. Naming an output
+allocator — `arnm_json_reader_set_output_allocator(&reader, &strings)` — copies each one there
+instead, NUL terminated, so it outlives the document, the reader, and the buffer an in-situ
+parse read through. Nothing else is copied; numbers and bools travel by value already.
+
+The arena that receives those copies can be sized before it is built. Both measurements walk
+the document's value array rather than its tree — a flat run, no recursion — and answer the exact
+byte count, terminators and eight byte rounding included:
+
+```c
+uint32_t bytes = arnm_json_reader_output_size(&reader);              // every string in the tree
+static const char *const wanted[] = {"host", "name"};
+bytes = arnm_json_reader_output_size_for_keys(&reader, wanted, 2);   // only what you will read
+```
+
+The first is the cheaper call and the larger answer: a document carrying members you never read
+pays for them. The second compares every member name against the list, at every depth, so an
+array of objects is covered by naming its member once — and it reserves only what a mapper will
+actually copy. Measured in `bench_json` on a document of 61 values, five of whose members are
+read and twenty-five of which are not: the full walk takes about 62 ns and reserves 1200 bytes,
+the keyed walk takes about 148 ns and reserves 200. Both sit well under the parse that precedes
+them, which costs about 395 ns for the same document.
+
+A read is refused rather than rounded: `arnm_json_reader_get_int64()` on `3.5` records
+`ARNM_ERROR_ARITHMETIC_OVERFLOW` instead of handing back `3`, and reading a string as a number
+records `ARNM_ERROR_INVALID_ENUM_TYPE`. Under the field level sit the value level calls the same
+document is reachable through — `arnm_json_object_get()`, `arnm_json_read_uint32()`,
+`arnm_json_array_iter_next()` and the rest — each answering an `arnm_result` of its own, for
+code that wants every step checked where it happens.
+
+`arnm_json_reader_parse_insitu()` is the cheaper path. It unescapes strings inside your own
+buffer instead of copying it, which leaves a document at exactly one allocation — and behind an
+arena that one sits at the tail, so releasing gives every byte back. The price is that the
+buffer is modified, has to outlive the document, and has to carry
+`ARNM_JSON_READER_INSITU_PADDING` spare bytes past the JSON. The copying `arnm_json_reader_parse()`
+asks none of that and costs one input copy, which stays buried in an arena until `arnm_reset()`.
+
+## Writing JSON
+
+`arnm/json_writer.h` is the reader read backwards, and keeps its three habits: one line per
+field, strings borrowed rather than copied, and one check at the end.
+
+```c
+#include "arnm/json_writer.h"
+
+arnm_json_writer writer;
+arnm_json_writer_init(&writer, scratch, ARNM_JSON_WRITE_DEFAULT);   // or ..._PRETTY
+
+arnm_json_writer_add_string(&writer, "host", config.host);
+arnm_json_writer_add_uint64(&writer, "port", config.port);
+arnm_json_writer_add_bool(&writer, "debug", config.debug);
+
+arnm_memory_block text;
+if (ARNM_SUCCESS == arnm_json_writer_write(&writer, output, &text, NULL)) {
+  send(text.data);                          // NUL terminated
+  arnm_memory_block_free(&text, output);
+}
+```
+
+No `begin` is needed for an object root; the first field opens one.
+`arnm_json_writer_begin_array()` opens an array instead, and either one starts the next payload
+through the same writer. A writer carrying an error refuses to write and answers that error, so
+the result above stands in for a check after every field —
+`arnm_json_writer_status()` and `arnm_json_writer_error_field()` are there when you want the
+verdict earlier.
+
+`arnm_json_writer_add_string()` keeps the pointer it is given and nothing else. Every string and
+every key therefore has to stay where it is until the write, which is what makes serialising a
+struct cost almost nothing: the payload is read once, at the end, straight out of your own
+memory. `arnm_json_writer_add_string_copy()` is there for a value that will not stand still that
+long.
+
+Nesting is an open and a close, and the writer keeps the levels itself — up to
+`ARNM_JSON_WRITER_MAX_DEPTH`, past which it records `ARNM_ERROR_RESOURCE_EXHAUSTED` rather than
+reaching for memory mid-field. A key of `NULL` means "an element of the current array".
+
+```c
+arnm_json_writer_open_array(&writer, "peers");
+for (uint32_t i = 0; i < config.peer_count; ++i) {
+  arnm_json_writer_open_object(&writer, NULL);
+  arnm_json_writer_add_string(&writer, "name", config.peers[i].name);
+  arnm_json_writer_close(&writer);
+}
+arnm_json_writer_close(&writer);
+```
+
+**The size of the output is known before the text exists.** `arnm_json_writer_size()` reads a
+number the writer has been keeping all along: every field knows its own length, its separator
+and its indentation the moment it is added, so nothing is walked and nothing is rendered twice.
+It is **exact** for a document of integers, booleans, nulls and valid UTF-8 strings, under every
+layout — and `arnm_json_writer_write()` takes exactly that many bytes from the allocator you
+name, so an arena sized by it comes out full to the byte. Two things make it an upper bound
+instead, and only ever too large: a `double` is charged its longest form (25 bytes), and under
+`ARNM_JSON_WRITE_ESCAPE_UNICODE` a byte outside ASCII is charged six. The slack goes back before
+`write()` returns.
+
+Asking costs 1.4 ns whatever the document holds. Keeping the number costs one table lookup per
+string byte, about 0.2 ns — `bench_json` prices both against the work they precede, and runs
+every payload through the reader and the writer alike so the two directions can be read against
+each other.
+
 ## Build
 
 ```bash
+git submodule update --init --recursive                      # third_party/yyjson, once per clone
 zig build                                                    # the static library, host target
 zig build -Dtests=true -Dbenchmarks=true
 ./run_all.sh                                                 # run everything in zig-out/bin

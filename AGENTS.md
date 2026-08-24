@@ -16,6 +16,7 @@ are not negotiable; the rest is what saves you a wasted afternoon.
 gets verified; a change to the build belongs there first.
 
 ```bash
+git submodule update --init --recursive       # once per clone; third_party/yyjson
 zig build -Dtests=true -Dbenchmarks=true      # host target, resolved by zig
 ./run_all.sh                 # every binary in zig-out/bin, one line each
 ./run_all.sh --tests         # skip the benchmarks
@@ -42,7 +43,8 @@ ctest --test-dir build -C Release
 
 Adding a source file needs nothing in CMake — all three globs pick up `src/*.c`,
 `benchmarks/src/bench_*.c` and `tests/unit/src/test_*.cpp`. Adding a *build option* means
-touching both files, and build.zig first.
+touching both files, and build.zig first. A *test binary* is named explicitly in build.zig and
+globbed in CMake, so a new `test_*.cpp` needs one line there and nothing here.
 
 **Nothing in the library may assume clang.** That assumption used to sit in `mono_timer.c` as a
 `__int128` scaling step, which MSVC has no type for. Where a compiler extension looks tempting,
@@ -130,8 +132,30 @@ on both architectures. Never claim a target you did not build.
   needs `<stdlib.h>`; that `windows.h` drags it in is luck, not a contract.
 - **Every `.c` includes its own header first**, so the compiler checks declaration against
   definition.
-- **Nothing vendored.** There is no `third_party/`. A dependency here becomes a dependency for
-  every host that embeds this, in every language — the bar is accordingly high.
+- **One vendored dependency, and it stays hidden.** `third_party/yyjson` is a git submodule
+  and the only one. A dependency here becomes a dependency for every host that embeds this,
+  in every language, so the bar stays high — and what got over it lives under three rules:
+  - **No public header names it.** `arnm/json_reader.h` and `arnm/json_writer.h` are plain
+    C11 and install on their own; the yyjson include path is private to the library target in
+    both builds, and `yyjson.h` is included by exactly one place, `src/json_memory.h` -- which
+    is internal, not installed, and holds the allocator seam both `src/json_reader.c` and
+    `src/json_writer.c` cross. A consumer links `arnm` and adds one include path, the same as
+    before there was a parser in the tree.
+  - **Its allocations come back through `arnm`.** Every yyjson entry point is handed an
+    allocator that forwards to `arnm_alloc`/`arnm_realloc`/`arnm_free`, so nothing in it
+    ever reaches libc — yyjson's own default allocator is on no path this library takes.
+    That is what keeps the memory contract true with a parser in the tree, and it is worth
+    re-checking whenever the submodule moves.
+  - **It is not held to our warning flags.** `-Wconversion` is a rule arnm holds itself to,
+    and `yyjson.c` is exempted from it in both builds. `lint.sh` does not walk
+    `third_party/` either, which is deliberate: the `malloc` rule is about arnm's own
+    sources, and the promise it backs is the one above.
+
+  It is pinned to a release tag (`0.12.0`) and not to a branch head, for the same reason
+  `tests/CMakeLists.txt` pins googletest: a submodule following `master` makes two clones
+  build different libraries without either saying so. A fresh clone needs
+  `git submodule update --init --recursive`; both builds check for the source and name it when
+  it is missing, rather than failing on a header three layers down.
 
 ----------
 

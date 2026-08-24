@@ -61,7 +61,7 @@ size_t arnm_uint64_to_string_size_old(uint64_t value) {
       10000000000000000000u
   };
   int i = 0;
-  while (value >= powers[i] && i < 18) { ++i; }
+  while (i < 19 && value >= powers[i]) { ++i; }
   return i + 1;
 }
 
@@ -545,5 +545,31 @@ TEST(UuidTest, AcceptsExactlyTheHexDigitsAtEveryPosition) {
       ) << "character "
         << c << " at position " << position;
     }
+  }
+}
+
+TEST(Converter, arnm_uint64_to_string_twenty_digits) {
+  // Everything at or above 10^19 is twenty digits wide, and the conversion fills its buffer
+  // from the back: a length one short does not shorten the number, it drops its first digit and
+  // says nothing. The whole top of the uint64_t range lives here.
+  struct {
+    uint64_t value;
+    const char *text;
+  } cases[] = {
+      {9999999999999999999ULL, "9999999999999999999"},
+      {10000000000000000000ULL, "10000000000000000000"},
+      {12345678901234567890ULL, "12345678901234567890"},
+      {UINT64_MAX, "18446744073709551615"},
+  };
+
+  for (auto &one : cases) {
+    char buffer[32];
+    std::memset(buffer, '?', sizeof(buffer));
+    const uint8_t reported = arnm_uint64_to_string_size(one.value);
+    const uint8_t written = arnm_uint64_to_string(buffer, sizeof(buffer), one.value);
+
+    EXPECT_STREQ(buffer, one.text);
+    EXPECT_EQ(written, std::strlen(one.text));
+    EXPECT_EQ(reported, written) << "the size answered ahead has to be the size written";
   }
 }
