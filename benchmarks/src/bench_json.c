@@ -188,7 +188,9 @@ static void build_payload_only(payload *one, int steps) {
   uint64_t sink = 0;
   for (int step = 0; step < steps; ++step) {
     arnm_json_writer writer;
-    require_ok(arnm_json_writer_init(&writer, &scratch, ARNM_JSON_WRITE_DEFAULT), "writer init");
+    require_ok(
+        arnm_json_writer_init(&writer, &scratch, ARNM_JSON_WRITE_DEFAULT, NULL), "writer init"
+    );
     build_payload(&writer, &one->form);
     require_ok(arnm_json_writer_status(&writer), "build");
     sink += arnm_json_writer_size(&writer);
@@ -203,7 +205,9 @@ static void write_payload(payload *one, int steps) {
   uint64_t sink = 0;
   for (int step = 0; step < steps; ++step) {
     arnm_json_writer writer;
-    require_ok(arnm_json_writer_init(&writer, &scratch, ARNM_JSON_WRITE_DEFAULT), "writer init");
+    require_ok(
+        arnm_json_writer_init(&writer, &scratch, ARNM_JSON_WRITE_DEFAULT, NULL), "writer init"
+    );
     build_payload(&writer, &one->form);
 
     arnm_memory_block rendered;
@@ -312,7 +316,9 @@ static void prepare_test_data(void) {
     payload *one = payloads[index];
 
     // the writer that stays: its document is what the measuring section asks about
-    require_ok(arnm_json_writer_init(&one->writer, &kept, ARNM_JSON_WRITE_DEFAULT), "writer init");
+    require_ok(
+        arnm_json_writer_init(&one->writer, &kept, ARNM_JSON_WRITE_DEFAULT, NULL), "writer init"
+    );
     build_payload(&one->writer, &one->form);
     require_ok(arnm_json_writer_status(&one->writer), one->name);
 

@@ -9,6 +9,7 @@
 #include <cstring>
 #include <random>
 #include <string>
+#include <vector>
 
 TEST(Converter, arnm_uint64_to_string) {
   char buffer[20];
@@ -572,4 +573,130 @@ TEST(Converter, arnm_uint64_to_string_twenty_digits) {
     EXPECT_EQ(written, std::strlen(one.text));
     EXPECT_EQ(reported, written) << "the size answered ahead has to be the size written";
   }
+}
+
+// ---------------------------------------------------------------------------
+// base64
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::string Base64Of(const std::string &input) {
+  std::string out(ARNM_BASE64_STRING_LENGTH(input.size()) + 1u, '\0');
+  const arnm_memory_block block{
+      reinterpret_cast<uint8_t *>(const_cast<char *>(input.data())), (uint32_t)input.size()
+  };
+  EXPECT_EQ(arnm_binary_to_base64(out.data(), &block), ARNM_SUCCESS);
+  out.resize(std::strlen(out.c_str()));
+  return out;
+}
+
+} // namespace
+
+TEST(Base64, TheVectorsFromRfc4648) {
+  // the ones the RFC prints, which pin all three padding cases and the alphabet's order
+  EXPECT_EQ(Base64Of("f"), "Zg==");
+  EXPECT_EQ(Base64Of("fo"), "Zm8=");
+  EXPECT_EQ(Base64Of("foo"), "Zm9v");
+  EXPECT_EQ(Base64Of("foob"), "Zm9vYg==");
+  EXPECT_EQ(Base64Of("fooba"), "Zm9vYmE=");
+  EXPECT_EQ(Base64Of("foobar"), "Zm9vYmFy");
+}
+
+TEST(Base64, EverySixBitValueMapsToItsCharacterOfTheStandardAlphabet) {
+  // The encoder computes the character instead of reading a table, which is four compares
+  // walking an offset across five runs. Every one of the 64 values is checked here, because a
+  // boundary that is off by one is a character that is wrong and nothing else notices.
+  static const char *alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+  for (uint32_t value = 0; value < 64u; ++value) {
+    // three bytes whose first six bits are the value under test, so it lands in character 0
+    const uint8_t bytes[3] = {(uint8_t)(value << 2u), 0, 0};
+    const arnm_memory_block block{const_cast<uint8_t *>(bytes), sizeof(bytes)};
+    char text[5];
+    ASSERT_EQ(arnm_binary_to_base64(text, &block), ARNM_SUCCESS);
+    EXPECT_EQ(text[0], alphabet[value]) << "six bit value " << value;
+  }
+}
+
+TEST(Base64, BothCharactersOutsideTheAlphanumericRunAreWritten) {
+  // 0xFB 0xFF encodes the two groups that reach '+' and '/', which a table can get wrong
+  const uint8_t bytes[] = {0xfb, 0xff, 0xbf};
+  const arnm_memory_block block{const_cast<uint8_t *>(bytes), sizeof(bytes)};
+  char text[ARNM_BASE64_STRING_LENGTH(sizeof(bytes)) + 1u];
+  ASSERT_EQ(arnm_binary_to_base64(text, &block), ARNM_SUCCESS);
+  EXPECT_STREQ(text, "+/+/");
+}
+
+TEST(Base64, EveryLengthSurvivesTheRoundTrip) {
+  // every remainder class, several times over, with bytes that use the whole range
+  for (uint32_t size = 1; size <= 300; ++size) {
+    std::vector<uint8_t> bytes(size);
+    for (uint32_t i = 0; i < size; ++i) { bytes[i] = (uint8_t)((i * 37u + size) & 0xFFu); }
+
+    std::string text(ARNM_BASE64_STRING_LENGTH(size) + 1u, '\0');
+    const arnm_memory_block block{bytes.data(), size};
+    ASSERT_EQ(arnm_binary_to_base64(text.data(), &block), ARNM_SUCCESS) << "size " << size;
+    ASSERT_EQ(std::strlen(text.c_str()), ARNM_BASE64_STRING_LENGTH(size))
+        << "the length macro has to be exact, a writer counts a field with it";
+
+    std::vector<uint8_t> back(ARNM_BASE64_BINARY_SIZE(std::strlen(text.c_str())));
+    uint32_t written = 0;
+    ASSERT_EQ(arnm_binary_from_base64(back.data(), &written, text.c_str()), ARNM_SUCCESS);
+    ASSERT_EQ(written, size);
+    EXPECT_EQ(0, std::memcmp(back.data(), bytes.data(), size)) << "size " << size;
+  }
+}
+
+TEST(Base64, NoBytesIsRefusedAndAnEmptyStringDecodesToNothing) {
+  const uint8_t byte = 0;
+  const arnm_memory_block empty{const_cast<uint8_t *>(&byte), 0};
+  char text[8];
+  EXPECT_EQ(arnm_binary_to_base64(text, &empty), ARNM_ERROR_INVALID_PARAM);
+
+  uint8_t out[4] = {1, 2, 3, 4};
+  uint32_t written = 99;
+  EXPECT_EQ(arnm_binary_from_base64(out, &written, ""), ARNM_SUCCESS);
+  EXPECT_EQ(written, 0u);
+  EXPECT_EQ(out[0], 1u) << "nothing to write means nothing written";
+}
+
+TEST(Base64, ALengthThatIsNotAMultipleOfFourIsRefusedBeforeAnythingIsWritten) {
+  uint8_t out[8] = {7, 7, 7, 7, 7, 7, 7, 7};
+  uint32_t written = 0;
+  EXPECT_EQ(arnm_binary_from_base64(out, &written, "Zm9vY"), ARNM_ERROR_INVALID_PARAM);
+  EXPECT_EQ(out[0], 7u) << "refused before anything is written, so the buffer is untouched";
+}
+
+TEST(Base64, AForeignCharacterIsRefusedAndTheOutputZeroed) {
+  // '-' and '_' are the URL safe alphabet, which this pair deliberately does not read
+  // all eight characters long, so it is the alphabet that refuses them and not the length
+  for (const char *bad : {"Zm9v!mFy", "Zm9vYm-y", "Zm9vYm_y", "Zm9v Zm9", "Zm9v\nYmF"}) {
+    uint8_t out[6] = {9, 9, 9, 9, 9, 9};
+    uint32_t written = 0;
+    EXPECT_EQ(arnm_binary_from_base64(out, &written, bad), ARNM_ERROR_DECODE_FAILED) << bad;
+    EXPECT_EQ(out[0], 0u) << "a caller who overlooks the code must not read half a decode";
+  }
+}
+
+TEST(Base64, WhitespaceIsNotSkippedEvenWhereTheLengthWouldAllowIt) {
+  // a wrapped base64 blob is a common thing to be handed; this pair refuses it rather than
+  // quietly reading past the newline, which is the one behaviour a caller cannot detect
+  uint8_t out[6] = {9, 9, 9, 9, 9, 9};
+  uint32_t written = 0;
+  EXPECT_EQ(arnm_binary_from_base64(out, &written, "Zm9v\nYmFyZm9v"), ARNM_ERROR_INVALID_PARAM);
+}
+
+TEST(Base64, PaddingIsOnlyAllowedWhereItBelongs) {
+  for (const char *bad : {"Zm=vYmFy", "Zm9=YmFy", "=m9vYmFy", "Zm9vY==y", "Z===Zm9v"}) {
+    uint8_t out[6] = {9, 9, 9, 9, 9, 9};
+    uint32_t written = 0;
+    EXPECT_EQ(arnm_binary_from_base64(out, &written, bad), ARNM_ERROR_DECODE_FAILED) << bad;
+  }
+  // and where it does belong it is read
+  uint8_t out[4] = {0};
+  uint32_t written = 0;
+  EXPECT_EQ(arnm_binary_from_base64(out, &written, "Zg=="), ARNM_SUCCESS);
+  EXPECT_EQ(written, 1u);
+  EXPECT_EQ(out[0], 'f');
 }

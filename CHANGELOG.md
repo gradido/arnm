@@ -8,12 +8,145 @@ version name the symbols as they were spelled at the time, so the record still m
 tags -- read a `hostmem_` there as today's `arnm_`.
 
 The version lives in `build.zig.zon`; `Doxyfile` carries it a second time for the generated
-documentation. Until 1.0 the minor number moves for new API, the patch number for fixes -- a
-minor release may still change what is already there, and such a change is named here rather
-than left to be discovered.
+documentation. Until 1.0 the minor number moves when a release takes something away or changes
+what a call already did -- when code built against the release before would go wrong rather than
+simply stop compiling. The patch number carries everything else: fixes, API that is only added,
+and a parameter appended to a setup call where passing nothing gives the old behaviour back.
+While this library has a handful of consumers, a compile error that every call site answers with
+`NULL` is not worth a minor; a call that quietly does something else always is. Either way, a
+release that costs its callers an edit names it here rather than leaving it to be found at the
+next build.
 
 Entries before 0.4.0 were reconstructed from the git history after the fact, so they summarise
 what the commits show rather than what was noted at the time.
+
+## 0.7.3 -- 2026-08-26
+
+Four ways for a document to cost less. Three calls for the field types that cost the writer the
+most -- binary as hex, binary as base64, and the uuid beside them -- all three formatted
+straight into the document and written out verbatim. And a hint at init, so the document's two
+pools open once at the size they will need instead of doubling their way there.
+
+base64 arrives as a converter pair of its own as well, so a project that had to reach for a
+crypto library to get it no longer does. And the uuid pair, which had been converting a byte at
+a time through 784 bytes of its own tables, goes through the hex pair instead: writes a uuid in
+a little over half the time and leaves that much L1 to whoever is calling.
+
+**`arnm_json_writer_init()` takes a fourth parameter and `arnm_json_writer_create()` a third**,
+both the hint, and both are the last one. Every existing call site answers with `NULL` and is
+then exactly the writer it was: nothing that was there behaves differently and nothing was taken
+away, which is why the patch number moves. Named here because it is still an edit at every call
+site, and a build that stops is easier to meet knowing why.
+
+### Added
+
+- **`arnm_json_writer_add_hex()`** in `arnm/json_writer.h`, taking a pointer and a size and
+  writing them as a lowercase hex string, two characters per byte. NULL or a size of 0 writes
+  the empty string; past `(ARNM_MAX_ALLOC_SIZE - 3) / 2` the field is refused with
+  `ARNM_ERROR_RESOURCE_SIZE_EXCEED`, which `arnm_json_writer_status()` answers with. The bytes
+  are read where they are added and never again.
+  - **It does not ask the serializer for six times its length.** Before writing a string,
+    yyjson reserves `str_len * 6 + 16` -- room for the case where every byte escapes to
+    `\uXXXX`. Hex escapes to nothing, and this is the one call that can say so, because it is
+    what put the digits there: the text goes in already quoted, as a raw value, which is
+    reserved for at `str_len + 2`. On a document whose longest field is a 1 KiB blob that is
+    about 2 KiB of working buffer instead of about 12 KiB, and the working buffer is what
+    decides the peak of the whole write.
+  - **No scratch buffer, and no copy out of one.** The characters are formatted directly into
+    the document's string pool. A caller doing this through
+    `arnm_json_writer_add_string_copy()` had to allocate `2 * size + 1` somewhere, hex into it,
+    and hand it back -- and against an arena that scratch never came back, because the
+    document's own copy of it was allocated on top. Both the scratch and the copy are gone.
+  - `arnm_json_writer_size()` stays exact over it: hex holds no character any write flag
+    escapes, so the length is counted rather than bounded.
+
+- **`arnm_binary_to_base64()` and `arnm_binary_from_base64()`** in `arnm/converter.h`, with
+  `ARNM_BASE64_STRING_LENGTH()` and `ARNM_BASE64_BINARY_SIZE()` beside them. The standard
+  alphabet with padding -- what `atob()` reads -- and nothing else: whitespace, a newline and
+  the URL safe `-_` are refused rather than skipped, and padding anywhere but in the last group
+  is refused too. The length macro is exact, which is what lets a writer count a field before
+  it exists.
+  - **Not constant time, deliberately.** Both halves branch on the data. libsodium's pair does
+    not -- it computes every character from branchless masks either way -- and `bench_base64` in
+    gradido-blockchain-core puts the two side by side: same text out of both, arnm's around
+    eight times faster. That is the price of the property, and payloads that are already
+    encrypted or already public do not need it. The group warning in `converter.h` says so, and
+    says what does need it.
+  - **Both directions read a lookup table, and that is a measured choice.** Computing the
+    characters instead is the obvious idea -- the five runs of the alphabet are not contiguous,
+    so it is four compares walking an offset, and a compare chain is something a vectoriser can
+    turn into blends where a table load stops it. The argument is sound and the measurement
+    does not follow it. Swapping only the character mapping, same loop, same build:
+    - Encoder, CMake Release, one buffer over and over: 33 ns against 61 at 64 bytes, 241
+      against 479 at 512, 1.9 us against 5.4 at 4096 -- **twice slower and worse as it grows**.
+      In zig ReleaseFast over payloads past the size of L1 the two came out level, 694 ns
+      against 684 at 1024 bytes, because there the loop is waiting on the payload either way.
+    - Decoder: 1.8x slower for the plain arithmetic, 2.2x fully branchless. A compact table over
+      `'+'..'z'`, 80 bytes instead of 256, cost 1.5x for the one bounds check per character it
+      adds.
+    - The tables are 64 and 256 bytes and stay in L1 across any loop that converts more than one
+      block, which is why taking them out buys a caller less than it looks like it should. Both
+      figures and the reasoning are written at the tables in `converter.c` so the experiment is
+      not run a third time.
+    - What did survive is the loop shape: the encoder walks a group index rather than two
+      induction variables at 3 and at 4. It costs the table nothing and it is the form the
+      arithmetic needed to be within reach at all -- with induction variables that one measured
+      1.7 us where the group indexed form measured 0.68.
+  - `bench_binaryToString` gains both base64 directions beside the hex rows it already had, at
+    every length it already measured. They do not read the way the character counts suggest:
+    base64 writes a third fewer characters and takes several times as long for them. hex maps
+    one byte to two characters with no carry between them and the compiler vectorises it
+    tightly; base64 has to shuffle bits across a three byte group, and that regrouping is what
+    an auto vectoriser handles badly.
+- **`arnm_json_writer_add_base64()`**, the same field written through the writer: encoded
+  straight into the document, quoted, and written verbatim, exactly as add_hex() does it. Four
+  characters per three bytes rather than two per one, so a payload field costs a third less
+  than its hex.
+
+- **A pool hint on `arnm_json_writer_init()`**, as `arnm_json_writer_hint` -- how many values
+  the document will hold, keys counted, and how many bytes its copied strings will take. NULL
+  says nothing and leaves the growth as it was.
+  - The document is built in two pools that start at 384 and 256 bytes and double when they run
+    out, keeping every chunk they ever opened. A document that needs four chunks pays for all
+    four. On the largest transaction of a real ledger that is 2688 bytes of value pool where
+    1968 were wanted, and 3840 of string pool where 2590 were: **1968 bytes of the 6712 the
+    document occupied were chunks it had outgrown.** With the hint both pools open once.
+  - Neither figure has to be right. Too low costs one extra chunk, which is where the growth
+    would have started anyway; too high reserves room nothing uses. A hint sized for the largest
+    document is paid by every small one, so a writer that builds documents of one shape can
+    afford to be exact and one that does not should say nothing.
+  - **A hint larger than the allocator behind it could ever serve is dropped, not attempted.**
+    yyjson takes a chunk size in a `size_t` and only checks it against `SIZE_MAX`, so on a 64 bit
+    host it accepts a figure no arnm allocator can hand out and then fails on the first
+    allocation -- which would turn a hint into a write that does not happen. Both figures are
+    bounded against `JSON_BLOCK_MAX_PAYLOAD` before they are passed on.
+  - `ARNM_JSON_WRITER_SIZE` grows from 320 to 328 bytes for the two figures the writer now
+    keeps. The static_assert in `json_writer.c` is what holds the two in step.
+
+- **`arnm_json_writer_add_uuid()`**, the same for the one binary field that is not hex: 16 bytes
+  in the canonical 8-4-4-4-12 form, formatted into the document and written verbatim, reserved
+  for at 38 bytes rather than at `36 * 6 + 16`. No buffer to hold one uuid in on the way past.
+  - **NULL is the literal `null`, not the empty string.** A uuid is sixteen bytes or it is not
+    there; unlike `add_hex()`, which takes a size and can therefore tell a block of no bytes --
+    written as `""` -- from an argument that is missing.
+  - Whether it moves a peak depends on the document. Where a long hex field is present, that
+    field decides the buffer and this changes nothing; where the uuids are among the longest
+    strings, it is the same saving as above at a smaller scale.
+
+### Changed
+
+- **`arnm_uuid_to_string()` and `arnm_uuid_from_string()` go through the hex pair** instead of
+  converting a byte at a time through tables of their own. Same output, same result codes, same
+  refusals -- including the separator check by position that 0.4.0 fixed the heap overflow with.
+  - **Writing a uuid is a little under twice as fast**: 6.0 ns to 3.7 in zig ReleaseFast, 6.8 to
+    3.7 under CMake Release, both builds agreeing. Reading one comes out level either way.
+  - **784 bytes of lookup table are gone** -- 512 to write a byte pair, 256 to read one, 16 for
+    the scattered positions -- and with them about thirty lines that did what the hex pair
+    already does.
+  - The tables were there on the reasoning that a run broken by four dashes is not a run a
+    vectoriser can help with. The dashes were the wrong thing to look at: the sixteen bytes are
+    contiguous and only their text is not, so hexing them whole and placing five stretches of it
+    costs less than converting them one at a time. `converter.c` says so where the tables were.
 
 ## 0.7.2 -- 2026-08-24
 
@@ -65,10 +198,9 @@ dependency can ask of the projects that use it. Fetching arnm now fetches all of
 An arena could always say how much it had already refused. Now it can also be asked how much is
 still there, before anything is refused at all.
 
-Additive only: nothing that was there behaves differently, so the patch number moves rather than
-the minor one -- against the rule at the top of this file, which reserves the minor number for
-new API. The exception is named here rather than left to be noticed: one function was added and
-no existing one changed, so code built against 0.7.0 links and behaves the same.
+Additive only: nothing that was there behaves differently, so the patch number moves. One
+function was added and no existing one changed, so code built against 0.7.0 links and behaves
+the same.
 
 ### Added
 

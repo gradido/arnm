@@ -31,7 +31,7 @@ extern "C" {
  *
  * @code
  * arnm_json_writer writer;
- * arnm_json_writer_init(&writer, scratch, ARNM_JSON_WRITE_DEFAULT);
+ * arnm_json_writer_init(&writer, scratch, ARNM_JSON_WRITE_DEFAULT, NULL);
  *
  * arnm_json_writer_add_string(&writer, "host", config.host);
  * arnm_json_writer_add_uint64(&writer, "port", config.port);
@@ -108,7 +108,7 @@ extern "C" {
  * remember the containers it has open, where a reader only ever remembers where it stands. The
  * implementation pins this against its real layout with a `static_assert`.
  */
-#define ARNM_JSON_WRITER_SIZE 320
+#define ARNM_JSON_WRITER_SIZE 328
 
 /**
  * @brief Containers that may stand open at once, the root included.
@@ -187,6 +187,41 @@ typedef struct arnm_json_writer {
 } arnm_json_writer;
 
 /**
+ * @brief What a document is expected to hold, so its pools are opened at that size once.
+ *
+ * The document is built in two pools that start small -- a few hundred bytes each -- and double
+ * every time they run out, keeping every chunk they ever opened. A document that needs four
+ * chunks therefore pays for all four, and the three it outgrew are dead weight until it is
+ * released. Saying up front how big it will be replaces the whole series with one chunk.
+ *
+ * Both figures are hints and neither has to be right. Too low costs one extra chunk, which is
+ * where the growth would have started anyway; too high reserves room the document does not use,
+ * and one past what the allocator behind the writer could ever hand out is dropped rather than
+ * attempted -- a hint never turns into a write that does not happen.
+ * A writer that builds documents of one shape can afford to be exact about it; one that does
+ * not should leave the hint out and let the pools grow, because a hint sized for the largest
+ * document is paid by every small one.
+ *
+ * @see arnm_json_writer_init()
+ */
+typedef struct arnm_json_writer_hint {
+  /** Values the document will hold, every key counted as one of them. 0 says nothing.
+   *
+   *  A scalar member of an object is two: the key and the value. A member whose value is an
+   *  object or an array is two as well, plus whatever that container holds. An element of an
+   *  array is one, plus its contents. The container itself is one.
+   */
+  uint32_t values;
+  /** Bytes the copied strings will take, each one's terminator counted. 0 says nothing.
+   *
+   *  Only what is copied lands here: @ref arnm_json_writer_add_string_copy(),
+   *  @ref arnm_json_writer_add_hex() and @ref arnm_json_writer_add_uuid(). A borrowed string
+   *  and every key cost nothing, whatever their length.
+   */
+  uint32_t string_bytes;
+} arnm_json_writer_hint;
+
+/**
  * @brief Prepare a writer in storage the caller owns. Allocates nothing.
  *
  * The allocator and the flags are only remembered here; the first field is what draws from the
@@ -197,6 +232,9 @@ typedef struct arnm_json_writer {
  * @param[in,out] allocator Where the document being built comes from, or NULL for the host.
  *                          Kept for the writer's whole life.
  * @param[in]     flags     Bit set of `ARNM_JSON_WRITE_*`, or @ref ARNM_JSON_WRITE_DEFAULT.
+ * @param[in]     hint      How big the documents this writer builds will be, or NULL to let
+ *                          the pools grow on their own. Copied here, so it does not have to
+ *                          outlive the call, and applied to every document the writer begins.
  * @retval ARNM_SUCCESS             Ready, holding no document.
  * @retval ARNM_ERROR_NULL_POINTER  @p writer is NULL.
  * @retval ARNM_ERROR_INVALID_PARAM @p flags holds a bit this header does not define; @p writer
@@ -208,7 +246,10 @@ typedef struct arnm_json_writer {
  * @whisper An empty page, and the ink already chosen
  */
 arnm_result arnm_json_writer_init(
-    arnm_json_writer *writer, arnm *allocator, arnm_json_write_flags flags
+    arnm_json_writer *writer,
+    arnm *allocator,
+    arnm_json_write_flags flags,
+    const arnm_json_writer_hint *hint
 );
 
 /**
@@ -217,10 +258,13 @@ arnm_result arnm_json_writer_init(
  * @param[in,out] allocator Where the state's @ref ARNM_JSON_WRITER_SIZE bytes and the document
  *                          come from, or NULL for the host.
  * @param[in]     flags     As @ref arnm_json_writer_init().
+ * @param[in]     hint      As @ref arnm_json_writer_init(), NULL for none.
  * @return The new writer, or NULL if @p allocator had no room or @p flags holds an unknown bit.
  * @note Give it back with @ref arnm_json_writer_destroy().
  */
-arnm_json_writer *arnm_json_writer_create(arnm *allocator, arnm_json_write_flags flags);
+arnm_json_writer *arnm_json_writer_create(
+    arnm *allocator, arnm_json_write_flags flags, const arnm_json_writer_hint *hint
+);
 
 /**
  * @brief Let go of the document, keep the writer.
@@ -442,6 +486,100 @@ void arnm_json_writer_add_string_copy(arnm_json_writer *writer, const char *key,
 void arnm_json_writer_add_string_copy_length(
     arnm_json_writer *writer, const char *key, const char *value, uint32_t length
 );
+
+/**
+ * @brief Add a block of bytes as a lowercase hex string, formatted where it will be written.
+ *
+ * The pair to @c arnm_binary_to_hex(), with the buffer question taken off the caller: the
+ * characters are formatted directly into the document's own storage, so there is no scratch to
+ * size, none to hand back, and no copy from the one into the other. Two characters per byte, in
+ * order, no separators. An empty block is the empty string, not `null`.
+ *
+ * ### Why this is not add_string_copy() with a hex buffer in front of it
+ *
+ * The serializer reserves room for a string by assuming the worst: every byte of it might come
+ * out as `\uXXXX`, so it asks for six bytes per character before it writes one. Hex escapes to
+ * nothing -- the sixteen digits are the tamest characters there are -- and this call is the one
+ * place that can say so, because it is what put them there. The text goes into the document
+ * already quoted and is written out verbatim, which costs one byte per character plus the
+ * separator instead of six.
+ *
+ * On a document whose longest field is a hex blob, that reservation is what decides the peak:
+ * a 1 KiB block written through @ref arnm_json_writer_add_string_copy() asks the serializer for
+ * about 12 KiB of working buffer and through this call for about 2 KiB. Reach for it wherever
+ * the bytes are a key, a hash, a signature or a payload -- which is nearly everywhere a binary
+ * field meets JSON.
+ *
+ * @param[in,out] writer Writer to add to; may be NULL.
+ * @param[in]     key    Field name, or NULL for an element of the current array.
+ * @param[in]     data   Bytes to render; NULL writes the empty string.
+ * @param[in]     size   How many, 0 writing the empty string. Past
+ *                       `(ARNM_MAX_ALLOC_SIZE - 3) / 2` the field is refused with
+ *                       @ref ARNM_ERROR_RESOURCE_SIZE_EXCEED, which
+ *                       @ref arnm_json_writer_status() answers with.
+ * @note @p data is read here and never again: unlike the value
+ *       @ref arnm_json_writer_add_string() takes, it does not have to stay standing until the
+ *       write. @p key still does -- every adder borrows the key, as the group note above says.
+ * @whisper Every byte says its name twice, and the page already knows it will not shout
+ */
+void arnm_json_writer_add_hex(
+    arnm_json_writer *writer, const char *key, const uint8_t *data, uint32_t size
+);
+
+/**
+ * @brief Add a block of bytes as a base64 string, encoded where it will be written.
+ *
+ * @ref arnm_json_writer_add_hex() for a payload rather than for a value a person will read:
+ * four characters per three bytes instead of two per one, so the field costs a third less than
+ * its hex. The standard alphabet with padding, which is what `atob()` reads.
+ *
+ * Everything else is as add_hex(): the characters are formatted straight into the document, the
+ * text goes in already quoted and is written out verbatim, and the serializer is asked for one
+ * byte a character rather than the six it reserves against escaping. An empty block is the
+ * empty string, not `null`.
+ *
+ * Which of the two to reach for is a question about the reader, not about the bytes. Hex where
+ * the value will be compared against another tool's output by eye -- a key, a hash, a
+ * transaction id. This where it is a payload nobody reads directly and its length is what
+ * matters.
+ *
+ * @param[in,out] writer Writer to add to; may be NULL.
+ * @param[in]     key    Field name, or NULL for an element of the current array.
+ * @param[in]     data   Bytes to encode; NULL writes the empty string.
+ * @param[in]     size   How many, 0 writing the empty string. Past
+ *                       `((ARNM_MAX_ALLOC_SIZE - 3) / 4) * 3` the field is refused with
+ *                       @ref ARNM_ERROR_RESOURCE_SIZE_EXCEED, which
+ *                       @ref arnm_json_writer_status() answers with.
+ * @note @p data is read here and never again and does not have to outlive the call. @p key
+ *       still does, as with every adder.
+ * @whisper Three bytes fold into four letters, on a page that will not ask them to shout
+ */
+void arnm_json_writer_add_base64(
+    arnm_json_writer *writer, const char *key, const uint8_t *data, uint32_t size
+);
+
+/**
+ * @brief Add 16 bytes as a uuid in the canonical 8-4-4-4-12 form.
+ *
+ * The pair to @c arnm_uuid_to_string(), and @ref arnm_json_writer_add_hex() for the one binary
+ * field that is not written as hex: the characters are formatted directly into the document and
+ * written out verbatim, so there is no buffer to hold one uuid in on the way past and the
+ * serializer is not asked for six bytes a character it will never need.
+ *
+ * Nothing is validated -- any 16 bytes are a uuid here, as they are in arnm_uuid_to_string();
+ * version and variant are the caller's business.
+ *
+ * @param[in,out] writer Writer to add to; may be NULL.
+ * @param[in]     key    Field name, or NULL for an element of the current array.
+ * @param[in]     uuid   The 16 bytes, or NULL for the literal `null`. There is no size here
+ *                       that could make an absent uuid an empty one, which is why NULL is the
+ *                       member that is not there rather than the empty string
+ *                       @ref arnm_json_writer_add_hex() writes for a block of no bytes.
+ * @note @p uuid is read here and never again and does not have to outlive the call. @p key
+ *       still does, as with every adder.
+ * @whisper Sixteen bytes take the shape the world reads them by, on the page they were written for
+ */
+void arnm_json_writer_add_uuid(arnm_json_writer *writer, const char *key, const uint8_t *uuid);
 
 // ********** nesting *******************
 

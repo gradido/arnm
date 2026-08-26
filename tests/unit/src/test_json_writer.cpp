@@ -1,4 +1,5 @@
 #include "arnm/arena.h"
+#include "arnm/converter.h"
 #include "arnm/json_reader.h"
 #include "arnm/json_writer.h"
 #include "arnm/memory.h"
@@ -25,9 +26,12 @@ constexpr uint32_t kArenaCapacity = 256 * 1024;
 /** A writer over an arena, torn down in the right order at the end of a scope. */
 class ArenaWriter {
 public:
-  explicit ArenaWriter(arnm_json_write_flags flags = ARNM_JSON_WRITE_DEFAULT) {
+  explicit ArenaWriter(
+      arnm_json_write_flags flags = ARNM_JSON_WRITE_DEFAULT,
+      const arnm_json_writer_hint *hint = nullptr
+  ) {
     EXPECT_EQ(arnm_init_arena(&arena_, kArenaCapacity), ARNM_SUCCESS);
-    EXPECT_EQ(arnm_json_writer_init(&writer_, &arena_, flags), ARNM_SUCCESS);
+    EXPECT_EQ(arnm_json_writer_init(&writer_, &arena_, flags, hint), ARNM_SUCCESS);
   }
   ~ArenaWriter() {
     arnm_json_writer_release(&writer_);
@@ -113,7 +117,7 @@ TEST(JsonWriter, InitWritesEveryFieldAndAllocatesNothing) {
   // deliberately dirty storage: init reads none of it
   arnm_json_writer writer;
   std::memset(&writer, 0xAB, sizeof(writer));
-  ASSERT_EQ(arnm_json_writer_init(&writer, &arena, ARNM_JSON_WRITE_DEFAULT), ARNM_SUCCESS);
+  ASSERT_EQ(arnm_json_writer_init(&writer, &arena, ARNM_JSON_WRITE_DEFAULT, NULL), ARNM_SUCCESS);
 
   EXPECT_EQ(arnm_json_writer_status(&writer), ARNM_SUCCESS);
   EXPECT_EQ(arnm_json_writer_depth(&writer), 0u) << "no document until the first field";
@@ -127,11 +131,12 @@ TEST(JsonWriter, InitWritesEveryFieldAndAllocatesNothing) {
 TEST(JsonWriter, AnUnknownFlagBitIsRefusedBeforeAnythingIsWritten) {
   arnm_json_writer writer;
   std::memset(&writer, 0, sizeof(writer));
-  EXPECT_EQ(arnm_json_writer_init(&writer, nullptr, 1u << 20), ARNM_ERROR_INVALID_PARAM);
+  EXPECT_EQ(arnm_json_writer_init(&writer, nullptr, 1u << 20, nullptr), ARNM_ERROR_INVALID_PARAM);
   EXPECT_EQ(arnm_json_writer_status(&writer), ARNM_ERROR_NOT_INITIALIZED);
-  EXPECT_EQ(arnm_json_writer_create(nullptr, 1u << 20), nullptr);
+  EXPECT_EQ(arnm_json_writer_create(nullptr, 1u << 20, nullptr), nullptr);
   EXPECT_EQ(
-      arnm_json_writer_init(nullptr, nullptr, ARNM_JSON_WRITE_DEFAULT), ARNM_ERROR_NULL_POINTER
+      arnm_json_writer_init(nullptr, nullptr, ARNM_JSON_WRITE_DEFAULT, nullptr),
+      ARNM_ERROR_NULL_POINTER
   );
 }
 
@@ -140,7 +145,7 @@ TEST(JsonWriter, ACreatedWriterGoesHomeThroughDestroy) {
   ASSERT_EQ(arnm_init_arena(&arena, kArenaCapacity), ARNM_SUCCESS);
   const uintptr_t before = ArenaMark(&arena);
 
-  arnm_json_writer *writer = arnm_json_writer_create(&arena, ARNM_JSON_WRITE_DEFAULT);
+  arnm_json_writer *writer = arnm_json_writer_create(&arena, ARNM_JSON_WRITE_DEFAULT, nullptr);
   ASSERT_NE(writer, nullptr);
   EXPECT_EQ(ArenaMark(&arena) - before, ARNM_ALIGN8(sizeof(arnm_json_writer)));
 
@@ -388,6 +393,286 @@ TEST(JsonWriter, EscapedUnicodeIsMeasuredGenerously) {
 }
 
 // ---------------------------------------------------------------------------
+// hex: formatted where it is written
+// ---------------------------------------------------------------------------
+
+TEST(JsonWriter, HexIsTwoLowercaseCharactersPerByteInOrder) {
+  uint8_t bytes[] = {0x00, 0x0f, 0x10, 0xa5, 0xff};
+
+  ArenaWriter owner;
+  arnm_json_writer_add_hex(owner.writer(), "value", bytes, sizeof(bytes));
+  // the bytes are read where they are added and never again, so changing them afterwards
+  // changes nothing about what comes out
+  std::memset(bytes, 0, sizeof(bytes));
+
+  EXPECT_EQ(Write(owner.writer(), owner.arena()), "{\"value\":\"000f10a5ff\"}");
+}
+
+TEST(JsonWriter, HexMatchesTheConverterThatWritesItElsewhere) {
+  std::vector<uint8_t> bytes(64);
+  for (size_t index = 0; index < bytes.size(); ++index) { bytes[index] = (uint8_t)(index * 7u); }
+
+  std::string expected(bytes.size() * 2u + 1u, '\0');
+  const arnm_memory_block block{bytes.data(), (uint32_t)bytes.size()};
+  ASSERT_EQ(arnm_binary_to_hex(expected.data(), &block), ARNM_SUCCESS);
+  expected.resize(bytes.size() * 2u);
+
+  ArenaWriter owner;
+  arnm_json_writer_add_hex(owner.writer(), "h", bytes.data(), (uint32_t)bytes.size());
+
+  EXPECT_EQ(Write(owner.writer(), owner.arena()), "{\"h\":\"" + expected + "\"}");
+}
+
+TEST(JsonWriter, NoBytesIsTheEmptyStringAndNotNull) {
+  const uint8_t byte = 0x42;
+
+  ArenaWriter owner;
+  arnm_json_writer_add_hex(owner.writer(), "empty", &byte, 0);
+  arnm_json_writer_add_hex(owner.writer(), "absent", nullptr, 4);
+
+  EXPECT_EQ(Write(owner.writer(), owner.arena()), "{\"empty\":\"\",\"absent\":\"\"}");
+}
+
+TEST(JsonWriter, HexTakesItsPlaceInArraysAndUnderPretty) {
+  const uint8_t bytes[] = {0xde, 0xad};
+
+  ArenaWriter owner(ARNM_JSON_WRITE_PRETTY_TWO_SPACES);
+  arnm_json_writer_open_array(owner.writer(), "list");
+  arnm_json_writer_add_hex(owner.writer(), nullptr, bytes, sizeof(bytes));
+  arnm_json_writer_add_hex(owner.writer(), nullptr, bytes, sizeof(bytes));
+  arnm_json_writer_close(owner.writer());
+
+  EXPECT_EQ(
+      Write(owner.writer(), owner.arena()), "{\n  \"list\": [\n    \"dead\",\n    \"dead\"\n  ]\n}"
+  );
+}
+
+TEST(JsonWriter, HexDoesNotAskTheSerializerForSixTimesItsLength) {
+  // The serializer reserves six bytes per character of a string, for the case where every one
+  // of them escapes to \uXXXX. Hex escapes to nothing and goes in as a raw value, which is
+  // reserved for at one byte per character -- the whole point of this call existing.
+  //
+  // An arena that fits the second and not the first is the plainest way to hold that apart:
+  // 1 KiB of bytes is 2048 characters, which the string path asks about 12 KiB of working
+  // buffer for and this path about 2 KiB.
+  std::vector<uint8_t> bytes(1024);
+  for (size_t index = 0; index < bytes.size(); ++index) { bytes[index] = (uint8_t)index; }
+
+  constexpr uint32_t kTightCapacity = 8 * 1024;
+
+  {
+    alignas(8) uint8_t storage[kTightCapacity] = {0};
+    arnm arena{};
+    ASSERT_EQ(arnm_init_arena_borrow(&arena, storage, sizeof(storage)), ARNM_SUCCESS);
+    arnm_json_writer writer{};
+    ASSERT_EQ(arnm_json_writer_init(&writer, &arena, ARNM_JSON_WRITE_DEFAULT, NULL), ARNM_SUCCESS);
+
+    arnm_json_writer_add_hex(&writer, "payload", bytes.data(), (uint32_t)bytes.size());
+    arnm_memory_block block{};
+    uint32_t length = 0;
+    EXPECT_EQ(arnm_json_writer_write(&writer, &arena, &block, &length), ARNM_SUCCESS);
+    EXPECT_EQ(length, bytes.size() * 2u + 14u) << R"({"payload":"..."})" << " around the hex";
+
+    arnm_json_writer_release(&writer);
+    arnm_release(&arena);
+  }
+
+  {
+    std::string hex(bytes.size() * 2u + 1u, '\0');
+    const arnm_memory_block source{bytes.data(), (uint32_t)bytes.size()};
+    ASSERT_EQ(arnm_binary_to_hex(hex.data(), &source), ARNM_SUCCESS);
+
+    alignas(8) uint8_t storage[kTightCapacity] = {0};
+    arnm arena{};
+    ASSERT_EQ(arnm_init_arena_borrow(&arena, storage, sizeof(storage)), ARNM_SUCCESS);
+    arnm_json_writer writer{};
+    ASSERT_EQ(arnm_json_writer_init(&writer, &arena, ARNM_JSON_WRITE_DEFAULT, NULL), ARNM_SUCCESS);
+
+    arnm_json_writer_add_string_copy(&writer, "payload", hex.c_str());
+    arnm_memory_block block{};
+    // the same document, the same arena, refused for the room the string path asks for
+    EXPECT_EQ(arnm_json_writer_write(&writer, &arena, &block, nullptr), ARNM_ERROR_OUT_OF_MEMORY);
+
+    arnm_json_writer_release(&writer);
+    arnm_release(&arena);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// base64: a payload rather than a value to read
+// ---------------------------------------------------------------------------
+
+TEST(JsonWriter, Base64IsTheStandardAlphabetWithPadding) {
+  uint8_t bytes[] = {'f', 'o', 'o', 'b'};
+
+  ArenaWriter owner;
+  arnm_json_writer_add_base64(owner.writer(), "payload", bytes, sizeof(bytes));
+  std::memset(bytes, 0, sizeof(bytes));
+
+  EXPECT_EQ(Write(owner.writer(), owner.arena()), "{\"payload\":\"Zm9vYg==\"}");
+}
+
+TEST(JsonWriter, Base64MatchesTheConverterThatWritesItElsewhere) {
+  std::vector<uint8_t> bytes(200);
+  for (size_t i = 0; i < bytes.size(); ++i) { bytes[i] = (uint8_t)(i * 11u); }
+
+  std::string expected(ARNM_BASE64_STRING_LENGTH(bytes.size()) + 1u, '\0');
+  const arnm_memory_block block{bytes.data(), (uint32_t)bytes.size()};
+  ASSERT_EQ(arnm_binary_to_base64(expected.data(), &block), ARNM_SUCCESS);
+  expected.resize(ARNM_BASE64_STRING_LENGTH(bytes.size()));
+
+  ArenaWriter owner;
+  arnm_json_writer_add_base64(owner.writer(), "p", bytes.data(), (uint32_t)bytes.size());
+
+  EXPECT_EQ(Write(owner.writer(), owner.arena()), "{\"p\":\"" + expected + "\"}");
+}
+
+TEST(JsonWriter, Base64OfNoBytesIsTheEmptyString) {
+  const uint8_t byte = 0x42;
+
+  ArenaWriter owner;
+  arnm_json_writer_add_base64(owner.writer(), "empty", &byte, 0);
+  arnm_json_writer_add_base64(owner.writer(), "absent", nullptr, 4);
+
+  EXPECT_EQ(Write(owner.writer(), owner.arena()), "{\"empty\":\"\",\"absent\":\"\"}");
+}
+
+TEST(JsonWriter, Base64CostsAThirdLessThanTheSameBytesAsHex) {
+  std::vector<uint8_t> bytes(600);
+  for (size_t i = 0; i < bytes.size(); ++i) { bytes[i] = (uint8_t)i; }
+
+  ArenaWriter as_hex;
+  arnm_json_writer_add_hex(as_hex.writer(), "p", bytes.data(), (uint32_t)bytes.size());
+  const size_t hex_length = Write(as_hex.writer(), as_hex.arena()).size();
+
+  ArenaWriter as_base64;
+  arnm_json_writer_add_base64(as_base64.writer(), "p", bytes.data(), (uint32_t)bytes.size());
+  const size_t base64_length = Write(as_base64.writer(), as_base64.arena()).size();
+
+  // 1200 characters against 800, the envelope the same in both
+  EXPECT_EQ(hex_length - base64_length, 400u);
+}
+
+// ---------------------------------------------------------------------------
+// uuids: the canonical form, formatted where it is written
+// ---------------------------------------------------------------------------
+
+TEST(JsonWriter, AUuidTakesTheCanonicalDashedForm) {
+  uint8_t uuid[ARNM_UUID_BINARY_SIZE];
+  for (uint8_t index = 0; index < ARNM_UUID_BINARY_SIZE; ++index) {
+    uuid[index] = (uint8_t)(0x10u + index * 0x11u);
+  }
+
+  std::string expected(ARNM_UUID_STRING_LENGTH + 1u, '\0');
+  arnm_uuid_to_string(expected.data(), uuid);
+  expected.resize(ARNM_UUID_STRING_LENGTH);
+
+  ArenaWriter owner;
+  arnm_json_writer_add_uuid(owner.writer(), "id", uuid);
+  // read where it is added and never again
+  std::memset(uuid, 0, sizeof(uuid));
+
+  EXPECT_EQ(Write(owner.writer(), owner.arena()), "{\"id\":\"" + expected + "\"}");
+}
+
+TEST(JsonWriter, AnAbsentUuidIsNullAndNotAnEmptyString) {
+  // unlike a block of no bytes, which add_hex writes as "": a uuid is sixteen bytes or it is
+  // not there, and there is no size here that could tell those apart
+  ArenaWriter owner;
+  arnm_json_writer_add_uuid(owner.writer(), "id", nullptr);
+
+  EXPECT_EQ(Write(owner.writer(), owner.arena()), "{\"id\":null}");
+}
+
+TEST(JsonWriter, UuidsTakeTheirPlaceInArraysAndUnderPretty) {
+  const uint8_t uuid[ARNM_UUID_BINARY_SIZE] = {0};
+
+  ArenaWriter owner(ARNM_JSON_WRITE_PRETTY_TWO_SPACES);
+  arnm_json_writer_open_array(owner.writer(), "ids");
+  arnm_json_writer_add_uuid(owner.writer(), nullptr, uuid);
+  arnm_json_writer_add_uuid(owner.writer(), nullptr, nullptr);
+  arnm_json_writer_close(owner.writer());
+
+  EXPECT_EQ(
+      Write(owner.writer(), owner.arena()),
+      "{\n  \"ids\": [\n    \"00000000-0000-0000-0000-000000000000\",\n    null\n  ]\n}"
+  );
+}
+
+// ---------------------------------------------------------------------------
+// the pool hint
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/** Build one small document and answer what the arena had to give up for it. */
+uint32_t DocumentCost(const arnm_json_writer_hint *hint) {
+  alignas(8) static uint8_t storage[8 * 1024];
+  arnm arena{};
+  EXPECT_EQ(arnm_init_arena_borrow(&arena, storage, sizeof(storage)), ARNM_SUCCESS);
+  const uint32_t before = arnm_arena_remaining(&arena);
+
+  arnm_json_writer writer{};
+  EXPECT_EQ(arnm_json_writer_init(&writer, &arena, ARNM_JSON_WRITE_DEFAULT, hint), ARNM_SUCCESS);
+  arnm_json_writer_begin_object(&writer);
+  for (uint32_t index = 0; index < 12; ++index) {
+    arnm_json_writer_add_string(&writer, "k", "0123456789abcdef");
+  }
+  // read while the document stands: the write itself would add the text and its working buffer
+  const uint32_t cost = before - arnm_arena_remaining(&arena);
+  EXPECT_EQ(arnm_json_writer_status(&writer), ARNM_SUCCESS);
+
+  arnm_json_writer_release(&writer);
+  arnm_release(&arena);
+  return cost;
+}
+
+} // namespace
+
+TEST(JsonWriter, AHintOpensThePoolsOnceInsteadOfDoubling) {
+  // 12 borrowed strings under one key each: 25 values, and not a byte of copied string
+  const arnm_json_writer_hint hint{25, 0};
+
+  const uint32_t hinted = DocumentCost(&hint);
+  const uint32_t grown = DocumentCost(nullptr);
+
+  // without the hint the value pool opens 16 slots, then 32, then 64, and keeps all three
+  EXPECT_LT(hinted, grown) << "the hint should replace the chunk series with one chunk";
+}
+
+TEST(JsonWriter, AHintThatIsWrongChangesNothingAboutTheDocument) {
+  const uint8_t bytes[] = {0xab, 0xcd};
+  const arnm_json_writer_hint far_too_small{1, 1};
+  const arnm_json_writer_hint far_too_large{4096, 8192};
+
+  for (const arnm_json_writer_hint *hint : {&far_too_small, &far_too_large}) {
+    ArenaWriter owner(ARNM_JSON_WRITE_DEFAULT, hint);
+    arnm_json_writer_add_string_copy(owner.writer(), "text", "value");
+    arnm_json_writer_add_hex(owner.writer(), "bytes", bytes, sizeof(bytes));
+    arnm_json_writer_add_int64(owner.writer(), "n", -7);
+
+    EXPECT_EQ(
+        Write(owner.writer(), owner.arena()), "{\"text\":\"value\",\"bytes\":\"abcd\",\"n\":-7}"
+    );
+  }
+}
+
+TEST(JsonWriter, AHintOfZerosIsTheSameAsNone) {
+  const arnm_json_writer_hint none{0, 0};
+  EXPECT_EQ(DocumentCost(&none), DocumentCost(nullptr));
+}
+
+TEST(JsonWriter, AHintYyjsonCannotServeLeavesTheDefaultGrowth) {
+  // past what a chunk can be counted in; refused where it is set and never reaches the write
+  const arnm_json_writer_hint absurd{UINT32_MAX, UINT32_MAX};
+
+  ArenaWriter owner(ARNM_JSON_WRITE_DEFAULT, &absurd);
+  arnm_json_writer_add_int64(owner.writer(), "n", 1);
+
+  EXPECT_EQ(Write(owner.writer(), owner.arena()), "{\"n\":1}");
+}
+
+// ---------------------------------------------------------------------------
 // the first error, kept
 // ---------------------------------------------------------------------------
 
@@ -471,7 +756,7 @@ TEST(JsonWriter, AnArenaWithNoRoomIsRecordedAsOutOfMemory) {
   ASSERT_EQ(arnm_init_arena_borrow(&arena, storage, sizeof(storage)), ARNM_SUCCESS);
 
   arnm_json_writer writer{};
-  ASSERT_EQ(arnm_json_writer_init(&writer, &arena, ARNM_JSON_WRITE_DEFAULT), ARNM_SUCCESS);
+  ASSERT_EQ(arnm_json_writer_init(&writer, &arena, ARNM_JSON_WRITE_DEFAULT, NULL), ARNM_SUCCESS);
   for (uint32_t index = 0; index < 64; ++index) {
     arnm_json_writer_add_uint64(&writer, "n", index);
   }
