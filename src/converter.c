@@ -1,6 +1,7 @@
 #include "arnm/converter.h"
 #include "arnm/memory.h"
 #include "arnm/result.h"
+#include <stdbool.h>
 #include <stdint.h>
 
 #include <assert.h>
@@ -197,6 +198,391 @@ arnm_result arnm_binary_to_hex(char *result_buffer, const arnm_memory_block *dat
   return ARNM_SUCCESS;
 }
 
+/**
+ * @brief The standard alphabet, indexed by the six bit group it encodes.
+ *
+ * A table and not the arithmetic, which was tried and measured and is the slower of the two.
+ * Written down because the arithmetic is the obvious idea and the reasoning for it is sound
+ * right up to the point where someone runs it:
+ *
+ * The five runs of the alphabet are not contiguous, so computing a character is four compares
+ * walking an offset -- and a compare chain is something a vectoriser can turn into blends,
+ * where a table load is where auto vectorisation stops. That argument predicts the arithmetic
+ * wins. It does not. Swapping only this function, same loop, same build:
+ *
+ *   CMake Release, one buffer converted over and over
+ *     64 bytes    33 ns table   61 ns arithmetic
+ *     512 bytes  241 ns table  479 ns arithmetic
+ *     4096 bytes 1.9 us table  5.4 us arithmetic
+ *
+ *   zig ReleaseFast, payloads cycled past the size of L1
+ *     1024 bytes 694 ns table  684 ns arithmetic
+ *
+ * So: two times slower where it is measured hot, and level where the loop is waiting on the
+ * payload anyway. The table is 64 bytes and stays in L1 across any loop that encodes more than
+ * one block, which is why removing it buys a caller less than it looks like it should.
+ *
+ * @see arnm_binary_from_base64(), whose table survived the same experiment by a wider margin.
+ */
+static const char BASE64_ALPHABET[64] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/**
+ * @brief The way back, indexed by the character: its six bit value, or 0xFF for anything else.
+ *
+ * Written out rather than searched, so a character is one load and one compare no matter where
+ * in the alphabet it sits, and everything outside answers with a value no group can hold.
+ */
+static const uint8_t BASE64_VALUE[256] = {
+    /* 0x00 */ 255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    /* 0x10 */ 255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    /* 0x20 */ 255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    62,
+    255,
+    255,
+    255,
+    63,
+    /* 0x30 */ 52,
+    53,
+    54,
+    55,
+    56,
+    57,
+    58,
+    59,
+    60,
+    61,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    /* 0x40 */ 255,
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    /* 0x50 */ 15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    255,
+    255,
+    255,
+    255,
+    255,
+    /* 0x60 */ 255,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38,
+    39,
+    40,
+    /* 0x70 */ 41,
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
+    49,
+    50,
+    51,
+    255,
+    255,
+    255,
+    255,
+    255,
+    /* 0x80 */ 255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    /* 0x90 */ 255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    /* 0xA0 */ 255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    /* 0xB0 */ 255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    /* 0xC0 */ 255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    /* 0xD0 */ 255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    /* 0xE0 */ 255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    /* 0xF0 */ 255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255,
+    255
+};
+
+/** @brief What BASE64_VALUE answers for a character the alphabet does not have. */
+#define BASE64_NO_VALUE 255u
+
+arnm_result arnm_binary_to_base64(char *result_buffer, const arnm_memory_block *data) {
+  if (!result_buffer || !data || !data->data) { return ARNM_ERROR_NULL_POINTER; }
+  if (!data->size) { return ARNM_ERROR_INVALID_PARAM; }
+
+  const uint8_t *bytes = data->data;
+  const uint32_t count = data->size;
+  const uint32_t groups = count / 3u;
+
+  // Driven by the group index rather than by two indices walking at 3 and at 4. It reads no
+  // worse and it is the form the arithmetic variant above needed to be halfway competitive --
+  // with induction variables that one measured 1.7 us against 0.68 here. The table does not
+  // care either way, but the shape is kept so a future attempt at the arithmetic starts from
+  // the loop that gives it its best showing rather than its worst.
+  for (uint32_t k = 0; k < groups; ++k) {
+    const uint8_t *in = bytes + (size_t)k * 3u;
+    const uint32_t group = ((uint32_t)in[0] << 16) | ((uint32_t)in[1] << 8) | (uint32_t)in[2];
+    char *out = result_buffer + (size_t)k * 4u;
+    out[0] = BASE64_ALPHABET[(group >> 18) & 0x3Fu];
+    out[1] = BASE64_ALPHABET[(group >> 12) & 0x3Fu];
+    out[2] = BASE64_ALPHABET[(group >> 6) & 0x3Fu];
+    out[3] = BASE64_ALPHABET[group & 0x3Fu];
+  }
+
+  uint32_t written = groups * 4u;
+  const uint32_t rest = count - groups * 3u;
+  if (rest) {
+    // the missing bytes are read as zeros, which is what makes the last characters land on the
+    // same bit boundaries the whole groups use
+    const uint8_t *in = bytes + (size_t)groups * 3u;
+    const uint32_t group = ((uint32_t)in[0] << 16) | (rest > 1u ? ((uint32_t)in[1] << 8) : 0u);
+    result_buffer[written] = BASE64_ALPHABET[(group >> 18) & 0x3Fu];
+    result_buffer[written + 1u] = BASE64_ALPHABET[(group >> 12) & 0x3Fu];
+    result_buffer[written + 2u] = (rest > 1u) ? BASE64_ALPHABET[(group >> 6) & 0x3Fu] : '=';
+    result_buffer[written + 3u] = '=';
+    written += 4u;
+  }
+
+  result_buffer[written] = '\0';
+  return ARNM_SUCCESS;
+}
+
+arnm_result arnm_binary_from_base64(
+    uint8_t *result_buffer, uint32_t *out_size, const char *base64
+) {
+  if (!result_buffer || !out_size || !base64) { return ARNM_ERROR_NULL_POINTER; }
+
+  const size_t length = strlen(base64);
+  if (0 == length) {
+    *out_size = 0;
+    return ARNM_SUCCESS;
+  }
+  // four characters make three bytes, so a length that is not a multiple of four cannot be
+  // base64 -- refused before anything is written, so the buffer is left as the caller had it
+  if (length % 4u) { return ARNM_ERROR_INVALID_PARAM; }
+
+  // how much the padding takes off, read before the loop so the output size is known up front
+  size_t padding = 0;
+  if ('=' == base64[length - 1u]) { padding = ('=' == base64[length - 2u]) ? 2u : 1u; }
+  const size_t binary_size = (length / 4u) * 3u - padding;
+
+  size_t out = 0;
+  for (size_t i = 0; i < length; i += 4u) {
+    uint32_t group = 0;
+    for (size_t k = 0; k < 4u; ++k) {
+      const uint8_t value = BASE64_VALUE[(unsigned char)base64[i + k]];
+      if (BASE64_NO_VALUE == value) {
+        // only the last group may be padded, and only in its last two places
+        const bool is_pad = '=' == base64[i + k] && i + 4u == length && k >= 2u &&
+                            (k == 3u || '=' == base64[i + 3u]);
+        if (!is_pad) {
+          memset(result_buffer, 0, binary_size);
+          return ARNM_ERROR_DECODE_FAILED;
+        }
+        continue; // the six bits it would have carried stay zero
+      }
+      group |= (uint32_t)value << (18u - 6u * k);
+    }
+    // written through the size rather than through the group count, so the bytes the padding
+    // stands for are never stored
+    if (out < binary_size) { result_buffer[out++] = (uint8_t)((group >> 16) & 0xFFu); }
+    if (out < binary_size) { result_buffer[out++] = (uint8_t)((group >> 8) & 0xFFu); }
+    if (out < binary_size) { result_buffer[out++] = (uint8_t)(group & 0xFFu); }
+  }
+
+  *out_size = (uint32_t)binary_size;
+  return ARNM_SUCCESS;
+}
+
 arnm_result arnm_binary_from_hex(uint8_t *result_buffer, const char *hex) {
   if (!result_buffer || !hex) { return ARNM_ERROR_NULL_POINTER; }
   size_t hex_size = strlen(hex);
@@ -240,9 +626,20 @@ arnm_result arnm_binary_from_hex(uint8_t *result_buffer, const char *hex) {
 /*
  * A uuid in its canonical 8-4-4-4-12 form.
  *
- * Sixteen bytes at fixed, scattered positions: not a run a vectoriser can help with, so both
- * directions read lookup tables where the bulk conversions above compute their digits. Neither
- * is constant time either -- the same warning on the group in converter.h covers them.
+ * Both directions go through the hex pair above and do nothing of their own but move the
+ * separators. That used to be three lookup tables here -- 512 bytes to write a byte pair, 256
+ * to read one and 16 for the scattered positions -- on the reasoning that a run broken by four
+ * dashes is not a run a vectoriser can help with.
+ *
+ * The dashes turn out to be the wrong thing to look at: the sixteen bytes are contiguous and
+ * only their text is not, so hexing them whole and then placing five stretches of it costs less
+ * than converting them one at a time ever did. Measured over bench_binaryToString, both builds
+ * agreeing: writing a uuid went from 6.0 ns to 3.7 in zig ReleaseFast and from 6.8 to 3.7 under
+ * CMake, and reading one came out level either way. What the tables were buying was nothing,
+ * and their 784 bytes of L1 are a caller's again.
+ *
+ * Neither direction is constant time -- the same warning on the group in converter.h covers
+ * them, and now covers them for the same reason it covers the hex pair itself.
  */
 
 static_assert(ARNM_UUID_BINARY_SIZE == 16, "uuid binary size does not match 16 bytes");
@@ -250,114 +647,38 @@ static_assert(
     ARNM_UUID_STRING_LENGTH == 36, "the 8-4-4-4-12 form is 36 characters, terminator aside"
 );
 
-static const uint8_t UUID_HEX_VALUE[256] = {
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-};
-
-/* Both characters of every byte value, so one two byte copy per byte replaces a pair of nibble
-   lookups and lands them at their final position in one go. */
-static const char UUID_HEX_PAIR[256][2] = {
-    {'0', '0'}, {'0', '1'}, {'0', '2'}, {'0', '3'}, {'0', '4'}, {'0', '5'}, {'0', '6'}, {'0', '7'},
-    {'0', '8'}, {'0', '9'}, {'0', 'a'}, {'0', 'b'}, {'0', 'c'}, {'0', 'd'}, {'0', 'e'}, {'0', 'f'},
-    {'1', '0'}, {'1', '1'}, {'1', '2'}, {'1', '3'}, {'1', '4'}, {'1', '5'}, {'1', '6'}, {'1', '7'},
-    {'1', '8'}, {'1', '9'}, {'1', 'a'}, {'1', 'b'}, {'1', 'c'}, {'1', 'd'}, {'1', 'e'}, {'1', 'f'},
-    {'2', '0'}, {'2', '1'}, {'2', '2'}, {'2', '3'}, {'2', '4'}, {'2', '5'}, {'2', '6'}, {'2', '7'},
-    {'2', '8'}, {'2', '9'}, {'2', 'a'}, {'2', 'b'}, {'2', 'c'}, {'2', 'd'}, {'2', 'e'}, {'2', 'f'},
-    {'3', '0'}, {'3', '1'}, {'3', '2'}, {'3', '3'}, {'3', '4'}, {'3', '5'}, {'3', '6'}, {'3', '7'},
-    {'3', '8'}, {'3', '9'}, {'3', 'a'}, {'3', 'b'}, {'3', 'c'}, {'3', 'd'}, {'3', 'e'}, {'3', 'f'},
-    {'4', '0'}, {'4', '1'}, {'4', '2'}, {'4', '3'}, {'4', '4'}, {'4', '5'}, {'4', '6'}, {'4', '7'},
-    {'4', '8'}, {'4', '9'}, {'4', 'a'}, {'4', 'b'}, {'4', 'c'}, {'4', 'd'}, {'4', 'e'}, {'4', 'f'},
-    {'5', '0'}, {'5', '1'}, {'5', '2'}, {'5', '3'}, {'5', '4'}, {'5', '5'}, {'5', '6'}, {'5', '7'},
-    {'5', '8'}, {'5', '9'}, {'5', 'a'}, {'5', 'b'}, {'5', 'c'}, {'5', 'd'}, {'5', 'e'}, {'5', 'f'},
-    {'6', '0'}, {'6', '1'}, {'6', '2'}, {'6', '3'}, {'6', '4'}, {'6', '5'}, {'6', '6'}, {'6', '7'},
-    {'6', '8'}, {'6', '9'}, {'6', 'a'}, {'6', 'b'}, {'6', 'c'}, {'6', 'd'}, {'6', 'e'}, {'6', 'f'},
-    {'7', '0'}, {'7', '1'}, {'7', '2'}, {'7', '3'}, {'7', '4'}, {'7', '5'}, {'7', '6'}, {'7', '7'},
-    {'7', '8'}, {'7', '9'}, {'7', 'a'}, {'7', 'b'}, {'7', 'c'}, {'7', 'd'}, {'7', 'e'}, {'7', 'f'},
-    {'8', '0'}, {'8', '1'}, {'8', '2'}, {'8', '3'}, {'8', '4'}, {'8', '5'}, {'8', '6'}, {'8', '7'},
-    {'8', '8'}, {'8', '9'}, {'8', 'a'}, {'8', 'b'}, {'8', 'c'}, {'8', 'd'}, {'8', 'e'}, {'8', 'f'},
-    {'9', '0'}, {'9', '1'}, {'9', '2'}, {'9', '3'}, {'9', '4'}, {'9', '5'}, {'9', '6'}, {'9', '7'},
-    {'9', '8'}, {'9', '9'}, {'9', 'a'}, {'9', 'b'}, {'9', 'c'}, {'9', 'd'}, {'9', 'e'}, {'9', 'f'},
-    {'a', '0'}, {'a', '1'}, {'a', '2'}, {'a', '3'}, {'a', '4'}, {'a', '5'}, {'a', '6'}, {'a', '7'},
-    {'a', '8'}, {'a', '9'}, {'a', 'a'}, {'a', 'b'}, {'a', 'c'}, {'a', 'd'}, {'a', 'e'}, {'a', 'f'},
-    {'b', '0'}, {'b', '1'}, {'b', '2'}, {'b', '3'}, {'b', '4'}, {'b', '5'}, {'b', '6'}, {'b', '7'},
-    {'b', '8'}, {'b', '9'}, {'b', 'a'}, {'b', 'b'}, {'b', 'c'}, {'b', 'd'}, {'b', 'e'}, {'b', 'f'},
-    {'c', '0'}, {'c', '1'}, {'c', '2'}, {'c', '3'}, {'c', '4'}, {'c', '5'}, {'c', '6'}, {'c', '7'},
-    {'c', '8'}, {'c', '9'}, {'c', 'a'}, {'c', 'b'}, {'c', 'c'}, {'c', 'd'}, {'c', 'e'}, {'c', 'f'},
-    {'d', '0'}, {'d', '1'}, {'d', '2'}, {'d', '3'}, {'d', '4'}, {'d', '5'}, {'d', '6'}, {'d', '7'},
-    {'d', '8'}, {'d', '9'}, {'d', 'a'}, {'d', 'b'}, {'d', 'c'}, {'d', 'd'}, {'d', 'e'}, {'d', 'f'},
-    {'e', '0'}, {'e', '1'}, {'e', '2'}, {'e', '3'}, {'e', '4'}, {'e', '5'}, {'e', '6'}, {'e', '7'},
-    {'e', '8'}, {'e', '9'}, {'e', 'a'}, {'e', 'b'}, {'e', 'c'}, {'e', 'd'}, {'e', 'e'}, {'e', 'f'},
-    {'f', '0'}, {'f', '1'}, {'f', '2'}, {'f', '3'}, {'f', '4'}, {'f', '5'}, {'f', '6'}, {'f', '7'},
-    {'f', '8'}, {'f', '9'}, {'f', 'a'}, {'f', 'b'}, {'f', 'c'}, {'f', 'd'}, {'f', 'e'}, {'f', 'f'},
-};
-
-/* Where each byte's first hex character sits in the 8-4-4-4-12 layout; the second follows
-   directly after it. The four separators sit at 8, 13, 18 and 23. Driving the loops from this
-   table is what removes the per-character branching a discovering parser needs: the format is
-   fixed, so the positions never have to be looked for while reading. */
-static const uint8_t UUID_HEX_POS[ARNM_UUID_BINARY_SIZE] = {0,  2,  4,  6,  9,  11, 14, 16,
-                                                            19, 21, 24, 26, 28, 30, 32, 34};
-
 arnm_result arnm_uuid_from_string(uint8_t *uuid, const char *uuid_string) {
   if (!uuid || !uuid_string) { return ARNM_ERROR_NULL_POINTER; }
   if (strlen(uuid_string) != ARNM_UUID_STRING_LENGTH) { return ARNM_ERROR_INVALID_PARAM; }
-
-  // The separators are checked by position, not merely counted. Skipping any dash wherever it
-  // appeared lets a 36 character string carry fewer than four of them, and every missing dash
-  // would turn two characters into an extra output byte: an all hex string of the right length
-  // then writes 18 bytes into these 16.
   if (uuid_string[8] != '-' || uuid_string[13] != '-' || uuid_string[18] != '-' ||
       uuid_string[23] != '-') {
     memset(uuid, 0, ARNM_UUID_BINARY_SIZE);
     return ARNM_ERROR_DECODE_FAILED;
   }
-
-  // Decoding writes straight into the caller's buffer and the verdict is settled once at the
-  // end: a bad digit shows up as 0xFF, whose high nibble survives the OR no matter what else
-  // the string held. Nothing branches on the data in between.
-  unsigned invalid = 0;
-  for (size_t k = 0; k < ARNM_UUID_BINARY_SIZE; ++k) {
-    unsigned high = UUID_HEX_VALUE[(unsigned char)uuid_string[UUID_HEX_POS[k]]];
-    unsigned low = UUID_HEX_VALUE[(unsigned char)uuid_string[UUID_HEX_POS[k] + 1]];
-    invalid |= high | low;
-    uuid[k] = (uint8_t)((high << 4) | low);
-  }
-
-  // Half decoded bytes are worth less than nothing to a caller who ignores the result code, so
-  // the failure path clears them. It costs nothing where it matters: this runs only when the
-  // string was already rejected.
-  if (invalid & 0xF0u) {
-    memset(uuid, 0, ARNM_UUID_BINARY_SIZE);
-    return ARNM_ERROR_DECODE_FAILED;
-  }
-  return ARNM_SUCCESS;
+  char hex[ARNM_UUID_BINARY_SIZE * 2u + 1u];
+  memcpy(hex, uuid_string, 8u);
+  memcpy(hex + 8, uuid_string + 9, 4u);
+  memcpy(hex + 12, uuid_string + 14, 4u);
+  memcpy(hex + 16, uuid_string + 19, 4u);
+  memcpy(hex + 20, uuid_string + 24, 12u);
+  hex[ARNM_UUID_BINARY_SIZE * 2u] = '\0';
+  return arnm_binary_from_hex(uuid, hex);
 }
 
 void arnm_uuid_to_string(char *result_buffer, const uint8_t uuid[ARNM_UUID_BINARY_SIZE]) {
-  // Writes each byte where it belongs immediately. Formatting all 32 characters into a scratch
-  // buffer and reassembling them around the separators afterwards walks the result twice for
-  // the same output.
-  for (size_t k = 0; k < ARNM_UUID_BINARY_SIZE; ++k) {
-    memcpy(result_buffer + UUID_HEX_POS[k], UUID_HEX_PAIR[uuid[k]], 2);
-  }
+  char hex[ARNM_UUID_BINARY_SIZE * 2u + 1u];
+  const arnm_memory_block block = {
+      (uint8_t *)(uintptr_t)(const void *)uuid, (uint32_t)ARNM_UUID_BINARY_SIZE
+  };
+  (void)arnm_binary_to_hex(hex, &block);
+  memcpy(result_buffer, hex, 8u);
   result_buffer[8] = '-';
+  memcpy(result_buffer + 9, hex + 8, 4u);
   result_buffer[13] = '-';
+  memcpy(result_buffer + 14, hex + 12, 4u);
   result_buffer[18] = '-';
+  memcpy(result_buffer + 19, hex + 16, 4u);
   result_buffer[23] = '-';
+  memcpy(result_buffer + 24, hex + 20, 12u);
   result_buffer[ARNM_UUID_STRING_LENGTH] = '\0';
 }

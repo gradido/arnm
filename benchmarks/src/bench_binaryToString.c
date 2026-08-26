@@ -11,10 +11,25 @@
 /*
  * What this benchmark measures
  *
- * Both directions of the byte-to-text conversions -- hex over a whole block, and a uuid in its
- * canonical 8-4-4-4-12 form -- on their own, no baseline beside them. arnm links no crypto
- * library, so the constant time conversions such a library ships are not here to compare
+ * Both directions of the byte-to-text conversions -- hex and base64 over a whole block, and a
+ * uuid in its canonical 8-4-4-4-12 form -- on their own, no baseline beside them. arnm links no
+ * crypto library, so the constant time conversions such a library ships are not here to compare
  * against, and a printf loop would answer a question nobody asks in a hot path.
+ *
+ * hex and base64 sit in the same section on purpose: same bytes, same length, two alphabets, so
+ * the rows read straight against each other. What they say is not what the character counts
+ * suggest -- base64 writes a third fewer characters and takes several times as long for
+ * them. The reason is in the shapes rather than in the work: hex maps one byte to two
+ * characters with no carry between them, which the compiler turns into a tight vector body,
+ * while base64 has to shuffle bits across a three byte group, and that regrouping is what an
+ * auto vectoriser handles badly. Computing the characters instead of reading the alphabet
+ * table was tried against exactly these rows and lost -- see the note at BASE64_ALPHABET in
+ * converter.c for the figures. Both directions are still a fraction of what the write around
+ * them costs, which is why the mapping in gradido-blockchain-core picks its alphabet by who
+ * reads the field and not by these rows.
+ *
+ * A comparison against libsodium's constant time pair -- a different question, and one that
+ * needs a crypto library -- lives in bench_base64 of gradido-blockchain-core.
  *
  * What the columns do say is how the cost grows. Each section fixes an input length and reports
  * the nanoseconds one whole conversion takes, so the per byte cost falls out of dividing by the
@@ -52,12 +67,14 @@
  */
 static uint8_t payloads[PAYLOAD_VARIANTS][MAX_PAYLOAD_SIZE];
 static char hexStrings[PAYLOAD_VARIANTS][MAX_PAYLOAD_SIZE * 2 + 1];
+static char base64Strings[PAYLOAD_VARIANTS][ARNM_BASE64_STRING_LENGTH(MAX_PAYLOAD_SIZE) + 1];
 
 /** The same payloads rendered as uuids, prepared once so the decoding step reads valid input. */
 static char uuidStrings[PAYLOAD_VARIANTS][ARNM_UUID_STRING_LENGTH + 1];
 
 /** Receives every conversion, so the compiler cannot drop the call. */
 static char benchHexBuffer[MAX_PAYLOAD_SIZE * 2 + 1];
+static char benchBase64Buffer[ARNM_BASE64_STRING_LENGTH(MAX_PAYLOAD_SIZE) + 1];
 static uint8_t benchBinaryBuffer[MAX_PAYLOAD_SIZE];
 static char benchUuidBuffer[ARNM_UUID_STRING_LENGTH + 1];
 
@@ -89,6 +106,24 @@ static void test_binary_from_hex(int stepCount) {
   }
 }
 
+static void test_binary_to_base64(int stepCount) {
+  for (int i = 0; i < stepCount; ++i) {
+    arnm_memory_block block = {payloads[nextVariant()], currentLength};
+    resultSink |= (unsigned)arnm_binary_to_base64(benchBase64Buffer, &block);
+  }
+}
+
+static void test_binary_from_base64(int stepCount) {
+  for (int i = 0; i < stepCount; ++i) {
+    uint32_t written = 0;
+    // the string was prepared at the current length, so only that much is read
+    resultSink |= (unsigned)arnm_binary_from_base64(
+        benchBinaryBuffer, &written, base64Strings[nextVariant()]
+    );
+    writtenSink |= written;
+  }
+}
+
 static void test_uuid_to_string(int stepCount) {
   for (int i = 0; i < stepCount; ++i) {
     arnm_uuid_to_string(benchUuidBuffer, payloads[nextVariant()]);
@@ -113,8 +148,8 @@ static void prepare_test_data(void) {
 }
 
 /*
- * Terminates every prepared string at twice the length about to be measured, so the decoding
- * step reads exactly as many characters as the encoding step wrote. Called once per section.
+ * Renders every prepared string at the length about to be measured, so each decoding step reads
+ * exactly as many characters as its encoding step wrote. Called once per section.
  */
 static void set_length(uint32_t length) {
   currentLength = length;
@@ -122,6 +157,10 @@ static void set_length(uint32_t length) {
     arnm_memory_block block = {payloads[v], length};
     if (ARNM_SUCCESS != arnm_binary_to_hex(hexStrings[v], &block)) {
       printf("could not prepare the hex strings\n");
+      exit(1);
+    }
+    if (ARNM_SUCCESS != arnm_binary_to_base64(base64Strings[v], &block)) {
+      printf("could not prepare the base64 strings\n");
       exit(1);
     }
   }
@@ -146,6 +185,8 @@ int main(void) {
     bench_section(heading);
     bench_step(test_binary_to_hex, BENCH_CONVERSIONS, "  binary to hex", "conversion");
     bench_step(test_binary_from_hex, BENCH_CONVERSIONS, "  binary from hex", "conversion");
+    bench_step(test_binary_to_base64, BENCH_CONVERSIONS, "  binary to base64", "conversion");
+    bench_step(test_binary_from_base64, BENCH_CONVERSIONS, "  binary from base64", "conversion");
   }
 
   {

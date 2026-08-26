@@ -21,16 +21,23 @@ extern "C" {
  * canonical 8-4-4-4-12 form. Both are built for hot paths: no allocation, no format string
  * parsing, every destination sized by the caller.
  *
- * @warning The hex pair does not run in constant time, so neither half belongs on secret
- * material. That is not a matter of how it is written: arnm_binary_to_hex() computes each
- * digit instead of looking it up, and in an optimised build its vectorised body really is
- * branchless -- but the scalar path beside it, which takes the remainder and takes short inputs
- * whole, compiles to a compare and a jump on the nibble. Rewriting the conditional as an
- * arithmetic mask does not move it; the compiler turns that back into a branch as well, and an
- * unoptimised build has no vector path at all. The uuid pair reads lookup tables on top of that.
- * Keys, seeds and passphrases belong in a crypto library's constant time conversion -- arnm
- * links none and offers none. Hashes, transaction ids, public keys, uuids and anything else
- * already public are exactly what these are for.
+ * @warning Neither the hex pair nor the base64 pair runs in constant time, so none of them
+ * belongs on secret material. The base64 pair reads a lookup table both ways, which is a measured
+ * choice and not a shortcut: computing the characters instead was tried in both directions and
+ * came out slower in both -- twice over for the encoder, and worse for the decoder, which has
+ * to answer "is this base64 at all" once per character. `converter.c` carries the figures at
+ * each table. libsodium's pair is the constant time one and is around eight times slower for
+ * it. Payloads that are already encrypted or already public are
+ * what this is for, and for those the timing carries nothing. That is not a matter of how it is
+ * written: arnm_binary_to_hex() computes each digit instead of looking it up, and in an optimised
+ * build its vectorised body really is branchless -- but the scalar path beside it, which takes the
+ * remainder and takes short inputs whole, compiles to a compare and a jump on the nibble. Rewriting
+ * the conditional as an arithmetic mask does not move it; the compiler turns that back into a
+ * branch as well, and an unoptimised build has no vector path at all. The base64 pair reads lookup
+ * tables on top of that; the uuid pair is this same hex pair with the separators moved, and
+ * inherits exactly this. Keys, seeds and passphrases belong in a crypto library's constant time
+ * conversion -- arnm links none and offers none. Hashes, transaction ids, public keys, uuids and
+ * anything else already public are exactly what these are for.
  * @{
  */
 
@@ -162,6 +169,67 @@ arnm_result arnm_binary_to_hex(char *result_buffer, const arnm_memory_block *dat
  * @whisper Two characters settle back into the one byte they came from
  */
 arnm_result arnm_binary_from_hex(uint8_t *result_buffer, const char *hex);
+
+/**
+ * @brief Characters the base64 of @p size bytes takes, terminator not counted.
+ *
+ * Three bytes become four characters, and a last group of one or two is padded out to four with
+ * `=`. The figure is therefore exact and not a bound, which is what lets a caller size a buffer
+ * from it and a writer count a field before it exists.
+ */
+#define ARNM_BASE64_STRING_LENGTH(size) ((((size) + 2u) / 3u) * 4u)
+
+/** @brief Bytes the base64 string of @p length characters can decode to, at most. */
+#define ARNM_BASE64_BINARY_SIZE(length) (((length) / 4u) * 3u)
+
+/**
+ * @brief Write @p data as base64 into a buffer the caller sized.
+ *
+ * The standard alphabet -- `A-Z`, `a-z`, `0-9`, `+`, `/` -- padded to a multiple of four with
+ * `=`. That is what `atob()` in a browser reads and what every base64 tool means when it says
+ * base64 with no further word; the URL safe alphabet is a different one and is not written here.
+ *
+ * Four characters where hex needs six, so a payload that travels as text costs a third less.
+ * Reach for hex instead where a person will compare the value against another tool's output --
+ * a key, a hash, a transaction id.
+ *
+ * @param[out] result_buffer Expected to hold ARNM_BASE64_STRING_LENGTH(data->size) + 1 bytes.
+ *                           Not checkable from here -- sizing it is the caller's part of the
+ *                           contract.
+ * @param[in]  data          Block to encode; not NULL and not empty.
+ * @retval ARNM_SUCCESS             Base64 written, terminator included.
+ * @retval ARNM_ERROR_NULL_POINTER  @p result_buffer, @p data or its data pointer is NULL.
+ * @retval ARNM_ERROR_INVALID_PARAM @p data holds no bytes.
+ * @note Not constant time; see the warning on this group.
+ * @whisper Three bytes fold into four letters, and the last group is made whole
+ */
+arnm_result arnm_binary_to_base64(char *result_buffer, const arnm_memory_block *data);
+
+/**
+ * @brief Read a base64 string back into the bytes it spells.
+ *
+ * The standard alphabet and nothing beside it: whitespace, a newline or a character from the
+ * URL safe alphabet makes the string undecodable rather than being skipped. Padding is required
+ * and is checked -- a string whose length is not a multiple of four is refused, and so is a `=`
+ * anywhere but in the last group.
+ *
+ * @param[out] result_buffer Expected to hold ARNM_BASE64_BINARY_SIZE(strlen(base64)) bytes.
+ *                           Those bytes are set to all zeros when the string turns out not to
+ *                           be base64, so a caller that overlooks the result code never reads
+ *                           half converted bytes.
+ * @param[out] out_size      Receives the bytes actually written, which the padding decides;
+ *                           not NULL. Untouched unless the call succeeds.
+ * @param[in]  base64        Null terminated string. Empty is allowed and writes nothing.
+ * @retval ARNM_SUCCESS             @p out_size bytes written.
+ * @retval ARNM_ERROR_NULL_POINTER  @p result_buffer, @p out_size or @p base64 is NULL.
+ * @retval ARNM_ERROR_INVALID_PARAM @p base64 has a length that is not a multiple of four.
+ *                                     Refused before anything is written.
+ * @retval ARNM_ERROR_DECODE_FAILED @p base64 holds a character the alphabet does not have, or
+ *                                     padding where none belongs. The output is zeroed.
+ * @note Not constant time; see the warning on this group.
+ * @whisper Four letters settle back into the three bytes they came from
+ */
+arnm_result arnm_binary_from_base64(uint8_t *result_buffer, uint32_t *out_size, const char *base64);
 
 /** @brief Bytes a uuid occupies in binary form. */
 #define ARNM_UUID_BINARY_SIZE 16

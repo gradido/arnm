@@ -37,6 +37,17 @@
 /** @brief What a field without a name is called in a record: an element of an array. */
 #define JSON_ELEMENT_FIELD_NAME "[]"
 
+/**
+ * @brief Largest pool hints that can still be served, in the units the hint is written in.
+ *
+ * yyjson turns a hint into a chunk -- `(values + 1) * sizeof(yyjson_mut_val)` for the one,
+ * `string_bytes + sizeof(yyjson_str_chunk)` for the other -- and that chunk is asked of the
+ * allocator through the headered hooks, so what fits is JSON_BLOCK_MAX_PAYLOAD minus the
+ * chunk's own head.
+ */
+#define JSON_HINT_MAX_VALUES ((uint32_t)(JSON_BLOCK_MAX_PAYLOAD / sizeof(yyjson_mut_val)) - 1u)
+#define JSON_HINT_MAX_STRING_BYTES (JSON_BLOCK_MAX_PAYLOAD - (uint32_t)sizeof(yyjson_str_chunk))
+
 /** @brief Marks a writer as initialized. A zeroed writer cannot hold it by accident. */
 #define JSON_WRITER_MAGIC 0x61727377u /* "arsw" */
 
@@ -66,6 +77,8 @@ typedef struct json_writer_state {
   arnm_result status;            /**< First error since the document began, or ARNM_SUCCESS. */
   uint32_t magic;                /**< JSON_WRITER_MAGIC once initialized. */
   const uint8_t *cost_table;     /**< What one byte of a string costs, chosen at init. */
+  uint32_t hint_values;          /**< Values a document is expected to hold, or 0 for none. */
+  uint32_t hint_string_bytes;    /**< Copied string bytes expected, or 0 for none. */
   char error_field[ARNM_JSON_WRITER_FIELD_NAME_SIZE]; /**< Field name of @c status, or empty. */
   yyjson_mut_val *stack[ARNM_JSON_WRITER_MAX_DEPTH];  /**< Open containers, root first. */
 } json_writer_state;
@@ -289,6 +302,22 @@ static arnm_result begin_document(json_writer_state *state, bool is_array) {
     return ARNM_ERROR_OUT_OF_MEMORY;
   }
 
+  // Between the document and its root, which is the first value there is and so the first thing
+  // to open a chunk.
+  //
+  // Both figures are bounded against what the allocator behind them could ever hand out, and a
+  // hint past that is dropped rather than passed on. yyjson takes a chunk size in a size_t and
+  // checks it against SIZE_MAX, so on a 64 bit host it accepts a figure no arnm allocator can
+  // serve and then fails on the first allocation -- which would turn a hint that is only meant
+  // to be a hint into a write that does not happen. What is dropped here leaves the default
+  // growth, which is exactly the state a caller who said nothing is in.
+  if (state->hint_values && state->hint_values <= JSON_HINT_MAX_VALUES) {
+    (void)yyjson_mut_doc_set_val_pool_size(state->doc, state->hint_values);
+  }
+  if (state->hint_string_bytes && state->hint_string_bytes <= JSON_HINT_MAX_STRING_BYTES) {
+    (void)yyjson_mut_doc_set_str_pool_size(state->doc, state->hint_string_bytes);
+  }
+
   yyjson_mut_val *root = is_array ? yyjson_mut_arr(state->doc) : yyjson_mut_obj(state->doc);
   if (!root) {
     (void)dispose_document(state);
@@ -397,7 +426,10 @@ static bool attach(
 // ********** manage the writer itself *******************
 
 arnm_result arnm_json_writer_init(
-    arnm_json_writer *writer, arnm *allocator, arnm_json_write_flags flags
+    arnm_json_writer *writer,
+    arnm *allocator,
+    arnm_json_write_flags flags,
+    const arnm_json_writer_hint *hint
 ) {
   if (!writer) { return ARNM_ERROR_NULL_POINTER; }
 
@@ -429,20 +461,24 @@ arnm_result arnm_json_writer_init(
   state->cost_table = escape_unicode
                           ? (escape_slashes ? json_cost_slash_unicode : json_cost_unicode)
                           : (escape_slashes ? json_cost_slash : json_cost_plain);
+  state->hint_values = hint ? hint->values : 0u;
+  state->hint_string_bytes = hint ? hint->string_bytes : 0u;
   state->error_field[0] = '\0';
   memset(state->stack, 0, sizeof(state->stack));
   state->magic = JSON_WRITER_MAGIC;
   return ARNM_SUCCESS;
 }
 
-arnm_json_writer *arnm_json_writer_create(arnm *allocator, arnm_json_write_flags flags) {
+arnm_json_writer *arnm_json_writer_create(
+    arnm *allocator, arnm_json_write_flags flags, const arnm_json_writer_hint *hint
+) {
   uint8_t *storage = NULL;
   if (ARNM_SUCCESS != arnm_alloc(&storage, (uint32_t)sizeof(arnm_json_writer), allocator)) {
     return NULL;
   }
 
   arnm_json_writer *writer = (arnm_json_writer *)(void *)storage;
-  if (ARNM_SUCCESS != arnm_json_writer_init(writer, allocator, flags)) {
+  if (ARNM_SUCCESS != arnm_json_writer_init(writer, allocator, flags, hint)) {
     (void)arnm_free(storage, (uint32_t)sizeof(arnm_json_writer), allocator);
     return NULL;
   }
@@ -597,6 +633,139 @@ void arnm_json_writer_add_string_copy_length(
     arnm_json_writer *writer, const char *key, const char *value, uint32_t length
 ) {
   add_string(writer, key, value, length, true);
+}
+
+/**
+ * @brief Largest block whose hex, its two quotes and a terminator still fit a uint32_t.
+ *
+ * Two characters per byte, plus the quotes this writes around them, plus the NUL the string
+ * pool wants behind every entry.
+ */
+#define JSON_HEX_MAX_BYTES ((ARNM_MAX_ALLOC_SIZE - 3u) / 2u)
+
+void arnm_json_writer_add_hex(
+    arnm_json_writer *writer, const char *key, const uint8_t *data, uint32_t size
+) {
+  json_writer_state *state = state_of(writer);
+  if (!state || ARNM_SUCCESS != state->status) { return; }
+  if (!container_for(state, key)) { return; }
+
+  // an empty block is the empty string and not `null`: it says the field was there and held
+  // nothing, which is what the block itself said
+  if (!data || 0 == size) {
+    (void)attach(state, key, yyjson_mut_rawn(state->doc, "\"\"", 2u), 2u);
+    return;
+  }
+  if (size > JSON_HEX_MAX_BYTES) {
+    record_error(state, ARNM_ERROR_RESOURCE_SIZE_EXCEED, field_name(key));
+    return;
+  }
+
+  // The text is written straight into the document's string pool -- no buffer of the caller's
+  // to format in and no copy out of it afterwards. The quotes are part of what is written,
+  // because this goes in as a raw value: see the note above the declaration for why.
+  const uint32_t text_length = size * 2u + 2u;
+  char *text = unsafe_yyjson_mut_str_alc(state->doc, text_length);
+  if (!text) {
+    record_error(state, ARNM_ERROR_OUT_OF_MEMORY, field_name(key));
+    return;
+  }
+
+  const arnm_memory_block block = {(uint8_t *)(uintptr_t)(const void *)data, size};
+  text[0] = '"';
+  // arnm_binary_to_hex() closes its run with a terminator, which lands exactly where the
+  // closing quote goes and is overwritten by it a line later
+  const arnm_result hexed = arnm_binary_to_hex(text + 1, &block);
+  if (ARNM_SUCCESS != hexed) {
+    record_error(state, hexed, field_name(key));
+    return;
+  }
+  text[text_length - 1u] = '"';
+  text[text_length] = '\0';
+
+  // The length is exact rather than a bound: hex holds no character any flag escapes, so what
+  // is measured here is what the serializer will lay down.
+  (void)attach(state, key, yyjson_mut_rawn(state->doc, text, text_length), text_length);
+}
+
+/**
+ * @brief Largest block whose base64, its two quotes and a terminator still fit a uint32_t.
+ *
+ * Four characters per three bytes, rounded up to a whole group, plus the quotes and the NUL.
+ */
+#define JSON_BASE64_MAX_BYTES (((ARNM_MAX_ALLOC_SIZE - 3u) / 4u) * 3u)
+
+void arnm_json_writer_add_base64(
+    arnm_json_writer *writer, const char *key, const uint8_t *data, uint32_t size
+) {
+  json_writer_state *state = state_of(writer);
+  if (!state || ARNM_SUCCESS != state->status) { return; }
+  if (!container_for(state, key)) { return; }
+
+  if (!data || 0 == size) {
+    (void)attach(state, key, yyjson_mut_rawn(state->doc, "\"\"", 2u), 2u);
+    return;
+  }
+  if (size > JSON_BASE64_MAX_BYTES) {
+    record_error(state, ARNM_ERROR_RESOURCE_SIZE_EXCEED, field_name(key));
+    return;
+  }
+
+  const uint32_t text_length = ARNM_BASE64_STRING_LENGTH(size) + 2u;
+  char *text = unsafe_yyjson_mut_str_alc(state->doc, text_length);
+  if (!text) {
+    record_error(state, ARNM_ERROR_OUT_OF_MEMORY, field_name(key));
+    return;
+  }
+
+  const arnm_memory_block block = {(uint8_t *)(uintptr_t)(const void *)data, size};
+  text[0] = '"';
+  // as in arnm_json_writer_add_hex(): the terminator the converter leaves behind lands exactly
+  // where the closing quote goes
+  const arnm_result encoded = arnm_binary_to_base64(text + 1, &block);
+  if (ARNM_SUCCESS != encoded) {
+    record_error(state, encoded, field_name(key));
+    return;
+  }
+  text[text_length - 1u] = '"';
+  text[text_length] = '\0';
+
+  // exact, not a bound: no character of the standard alphabet, padding included, is one any
+  // write flag escapes
+  (void)attach(state, key, yyjson_mut_rawn(state->doc, text, text_length), text_length);
+}
+
+/** @brief What a uuid renders as: the canonical form and the two quotes around it. */
+#define JSON_UUID_TEXT_LENGTH (ARNM_UUID_STRING_LENGTH + 2u)
+
+void arnm_json_writer_add_uuid(arnm_json_writer *writer, const char *key, const uint8_t *uuid) {
+  json_writer_state *state = state_of(writer);
+  if (!state || ARNM_SUCCESS != state->status) { return; }
+  if (!container_for(state, key)) { return; }
+
+  // sixteen bytes or nothing at all -- there is no size here that could make an absent uuid an
+  // empty one, so NULL is the member that is not there
+  if (!uuid) {
+    (void)attach(state, key, yyjson_mut_null(state->doc), 4u);
+    return;
+  }
+
+  char *text = unsafe_yyjson_mut_str_alc(state->doc, JSON_UUID_TEXT_LENGTH);
+  if (!text) {
+    record_error(state, ARNM_ERROR_OUT_OF_MEMORY, field_name(key));
+    return;
+  }
+
+  text[0] = '"';
+  // as in arnm_json_writer_add_hex(): the terminator arnm_uuid_to_string() leaves behind lands
+  // where the closing quote goes
+  arnm_uuid_to_string(text + 1, uuid);
+  text[JSON_UUID_TEXT_LENGTH - 1u] = '"';
+  text[JSON_UUID_TEXT_LENGTH] = '\0';
+
+  (void)attach(
+      state, key, yyjson_mut_rawn(state->doc, text, JSON_UUID_TEXT_LENGTH), JSON_UUID_TEXT_LENGTH
+  );
 }
 
 // ********** nesting *******************
