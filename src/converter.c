@@ -583,6 +583,21 @@ arnm_result arnm_binary_from_base64(
   return ARNM_SUCCESS;
 }
 
+arnm_result arnm_base64_binary_size(const char *base64, uint32_t length, uint32_t *out_size) {
+  if (!base64 || !out_size) { return ARNM_ERROR_NULL_POINTER; }
+  // four characters make three bytes, so anything else was never base64
+  if (length % 4u) { return ARNM_ERROR_DECODE_FAILED; }
+  if (0 == length) {
+    *out_size = 0;
+    return ARNM_SUCCESS;
+  }
+
+  uint32_t padding = 0;
+  if ('=' == base64[length - 1u]) { padding = ('=' == base64[length - 2u]) ? 2u : 1u; }
+  *out_size = ARNM_BASE64_BINARY_SIZE(length) - padding;
+  return ARNM_SUCCESS;
+}
+
 arnm_result arnm_binary_from_hex(uint8_t *result_buffer, const char *hex) {
   if (!result_buffer || !hex) { return ARNM_ERROR_NULL_POINTER; }
   size_t hex_size = strlen(hex);

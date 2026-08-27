@@ -700,3 +700,43 @@ TEST(Base64, PaddingIsOnlyAllowedWhereItBelongs) {
   EXPECT_EQ(written, 1u);
   EXPECT_EQ(out[0], 'f');
 }
+
+// ---------------------------------------------------------------------------
+// base64: what a string really decodes to, before anything is allocated for it
+// ---------------------------------------------------------------------------
+
+TEST(Converter, Base64BinarySizeReadsThePaddingRatherThanAssumingIt) {
+  uint32_t size = 0;
+  // the same four characters carry three bytes, two, or one, and only the '=' says which
+  EXPECT_EQ(arnm_base64_binary_size("aGVs", 4, &size), ARNM_SUCCESS);
+  EXPECT_EQ(size, 3u);
+  EXPECT_EQ(arnm_base64_binary_size("aGU=", 4, &size), ARNM_SUCCESS);
+  EXPECT_EQ(size, 2u);
+  EXPECT_EQ(arnm_base64_binary_size("aA==", 4, &size), ARNM_SUCCESS);
+  EXPECT_EQ(size, 1u);
+  EXPECT_EQ(arnm_base64_binary_size("", 0, &size), ARNM_SUCCESS);
+  EXPECT_EQ(size, 0u);
+}
+
+TEST(Converter, Base64BinarySizeAgreesWithWhatTheDecodeWrites) {
+  const char *strings[] = {"aGVsbG8=", "aGVsbG9v", "aA==", "aGVsbG8gd29ybGQh"};
+  for (const char *base64 : strings) {
+    uint32_t expected = 0;
+    ASSERT_EQ(
+        arnm_base64_binary_size(base64, static_cast<uint32_t>(strlen(base64)), &expected),
+        ARNM_SUCCESS
+    ) << base64;
+    uint8_t buffer[64] = {0};
+    uint32_t written = 0;
+    ASSERT_EQ(arnm_binary_from_base64(buffer, &written, base64), ARNM_SUCCESS) << base64;
+    EXPECT_EQ(written, expected) << base64;
+  }
+}
+
+TEST(Converter, Base64BinarySizeRefusesALengthThatIsNoBase64) {
+  uint32_t size = 0xffffffffu;
+  EXPECT_EQ(arnm_base64_binary_size("aGVsb", 5, &size), ARNM_ERROR_DECODE_FAILED);
+  EXPECT_EQ(size, 0xffffffffu); // untouched, as every failing call here leaves its output
+  EXPECT_EQ(arnm_base64_binary_size(nullptr, 4, &size), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_base64_binary_size("aGVs", 4, nullptr), ARNM_ERROR_NULL_POINTER);
+}

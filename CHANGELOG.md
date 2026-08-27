@@ -20,6 +20,37 @@ next build.
 Entries before 0.4.0 were reconstructed from the git history after the fact, so they summarise
 what the commits show rather than what was noted at the time.
 
+## 0.7.4 -- 2026-08-27
+
+The reading side of what 0.7.3 gave the writer. A document has no type for bytes, so it spells
+them -- hex, base64, the canonical 8-4-4-4-12 -- and until now every consumer wrote the same
+three lines per field to read one back: borrow the string, check its length, convert it. The
+length check is the part that is easy to leave out, and leaving it out is not visible: a field
+reads as shorter than it is, or a string that merely starts like the right one passes.
+
+`arnm_json_read_hex()`, `arnm_json_read_hex_fixed()`, `arnm_json_read_uuid()` and
+`arnm_json_read_base64_block()` are those three lines, once. The fixed one is for a field whose
+type says its length -- a key, a hash, a signature -- and refuses every other length before it
+converts anything; the other reads whatever the document spells, into a buffer whose capacity it
+respects. A string carrying a NUL of its own is refused by both: the converter underneath reads
+to the terminator and would otherwise stop early and leave the rest of the field as the caller
+had it. The base64 one takes its block from the allocator it is handed, at exactly the size the
+string decodes to.
+
+`arnm_base64_binary_size()` is that size on its own, for a caller that has to reserve before it
+reads: `ARNM_BASE64_BINARY_SIZE()` answers what a length of characters can hold at most, this
+answers what one particular string will write, which is up to two bytes less. An arena charged
+for bytes it is never given back ends short of the read that follows it.
+
+`arnm_json_read_null()` is gone. It never had anything to hand back -- the whole answer was in
+the result code -- which made it a predicate wearing a read function's shape, and
+`arnm_json_value_type()` was already that predicate. Every call site answers the compile error
+with `ARNM_JSON_TYPE_NULL == arnm_json_value_type(value)`, which is the kind of removal this
+file's opening says the patch number carries.
+
+`arnm/json_reader.h` now includes `arnm/converter.h` and `arnm/memory_block.h`, which it needs
+for the sizes and the block the four new calls speak in.
+
 ## 0.7.3 -- 2026-08-26
 
 Four ways for a document to cost less. Three calls for the field types that cost the writer the

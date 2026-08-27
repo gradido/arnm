@@ -1,7 +1,9 @@
 #ifndef ARNM_JSON_READER_H
 #define ARNM_JSON_READER_H
 
+#include "arnm/converter.h"
 #include "arnm/memory.h"
+#include "arnm/memory_block.h"
 #include "arnm/result.h"
 
 #include <stdbool.h>
@@ -845,6 +847,116 @@ uint32_t arnm_json_reader_get_uint32(arnm_json_reader *reader, const char *key);
  */
 double arnm_json_reader_get_double(arnm_json_reader *reader, const char *key);
 
+// ********** reader functions for the shapes a string carries *******************
+
+/*
+ * JSON has no type for bytes, so a document that carries them spells them: hex where a person
+ * will compare the value against another tool's output, base64 where a payload only has to
+ * survive the trip, and the canonical 8-4-4-4-12 for a uuid. The writer puts all three into the
+ * document with a call of its own -- @ref arnm_json_writer_add_hex(),
+ * @ref arnm_json_writer_add_base64(), @ref arnm_json_writer_add_uuid() -- and these are what
+ * reads them back.
+ *
+ * Each is the string read and the conversion in one call, which is what saves the caller the
+ * length: the document knows how long the string is, and every one of these has to check that
+ * length before it converts anything. Spelled out at the call site instead, that check is three
+ * lines that every field repeats and any field can forget.
+ *
+ * A string that does not spell what it should is answered with @ref ARNM_ERROR_DECODE_FAILED
+ * throughout, including where the converter these sit on calls the same condition
+ * @ref ARNM_ERROR_INVALID_PARAM: what arrives here is a document, and a document that is wrong
+ * is a decode that failed, not a parameter a caller passed by mistake.
+ */
+
+/**
+ * @brief Read a hex string into bytes, however many it spells.
+ *
+ * @param[in]  value    Value to read; not NULL.
+ * @param[out] out      Receives the bytes; not NULL. Untouched unless the call succeeds.
+ * @param[in]  capacity Bytes @p out holds. A string that spells more is refused rather than
+ *                      truncated.
+ * @param[out] out_size Receives the bytes written; may be NULL to skip it.
+ * @retval ARNM_SUCCESS                 The bytes are in @p out.
+ * @retval ARNM_ERROR_NULL_POINTER      @p value or @p out is NULL.
+ * @retval ARNM_ERROR_INVALID_ENUM_TYPE The value is not a string.
+ * @retval ARNM_ERROR_DECODE_FAILED     The string has an odd number of characters, spells more
+ *                                      bytes than @p capacity holds, holds a character that is
+ *                                      no hex digit, or carries a NUL of its own and so ends
+ *                                      before the document says it does.
+ * @whisper However long it runs, it says the same thing twice over
+ */
+arnm_result arnm_json_read_hex(
+    const arnm_json_value *value, uint8_t *out, uint32_t capacity, uint32_t *out_size
+);
+
+/**
+ * @brief Read a hex string into a field whose length is fixed.
+ *
+ * The length is the check: a public key, a hash, a signature is as long as its type says, and a
+ * string of any other length is refused before a byte of it is converted. @ref
+ * arnm_json_read_hex() is the one to reach for where the field's length is the document's to
+ * decide.
+ *
+ * @param[in]  value Value to read; not NULL.
+ * @param[out] out   @p size bytes; not NULL. Untouched unless the call succeeds.
+ * @param[in]  size  Bytes the field holds; the string has to be exactly twice as long.
+ * @retval ARNM_SUCCESS                 The bytes are in @p out.
+ * @retval ARNM_ERROR_NULL_POINTER      @p value or @p out is NULL.
+ * @retval ARNM_ERROR_INVALID_ENUM_TYPE The value is not a string.
+ * @retval ARNM_ERROR_DECODE_FAILED     The string is not exactly @p size * 2 hex digits, or
+ *                                      carries a NUL of its own and so ends before the document
+ *                                      says it does.
+ * @whisper A field that knows its own length asks the string to prove it
+ */
+arnm_result arnm_json_read_hex_fixed(const arnm_json_value *value, uint8_t *out, uint32_t size);
+
+/**
+ * @brief Read a uuid in the canonical 8-4-4-4-12 form into @ref ARNM_UUID_BINARY_SIZE bytes.
+ *
+ * The version and variant fields are not looked at, exactly as @ref arnm_uuid_from_string()
+ * does not look at them: what is checked is the shape, because that is what the document could
+ * get wrong.
+ *
+ * @param[in]  value Value to read; not NULL.
+ * @param[out] out   @ref ARNM_UUID_BINARY_SIZE bytes; not NULL. Untouched unless the call
+ *                   succeeds.
+ * @retval ARNM_SUCCESS                 The 16 bytes are in @p out.
+ * @retval ARNM_ERROR_NULL_POINTER      @p value or @p out is NULL.
+ * @retval ARNM_ERROR_INVALID_ENUM_TYPE The value is not a string.
+ * @retval ARNM_ERROR_DECODE_FAILED     The string is not @ref ARNM_UUID_STRING_LENGTH
+ *                                      characters, or not that shape.
+ */
+arnm_result arnm_json_read_uuid(const arnm_json_value *value, uint8_t *out);
+
+/**
+ * @brief Read a base64 string of any length into a block drawn from @p memory.
+ *
+ * The one of these that does not know its size in advance, so the string is measured first --
+ * by @ref arnm_base64_binary_size(), which reads the padding rather than assuming it -- and the
+ * block is taken at exactly what the decode then writes. An arena charged two bytes it never
+ * gives back is an arena that ends short of the read that follows it.
+ *
+ * @p out is cleared first, so a string of no characters leaves the empty block it came from and
+ * costs no allocation at all.
+ *
+ * @param[out]    out    Block to fill; not NULL. Written in full, read not at all.
+ * @param[in]     value  Value to read; not NULL.
+ * @param[in,out] memory Where the bytes come from; NULL for the host allocator.
+ * @retval ARNM_SUCCESS                 The bytes are in @p out, or there were none to take.
+ * @retval ARNM_ERROR_NULL_POINTER      @p value or @p out is NULL.
+ * @retval ARNM_ERROR_INVALID_ENUM_TYPE The value is not a string.
+ * @retval ARNM_ERROR_DECODE_FAILED     The string is not a whole number of four character
+ *                                      groups, or holds a character outside the standard
+ *                                      alphabet.
+ * @return Otherwise what @ref arnm_memory_block_alloc() answers.
+ * @warning The block outlives the document and belongs to @p memory, not to the reader:
+ *          releasing the reader does not release it.
+ * @whisper The characters are counted, and only then is the ground asked for
+ */
+arnm_result arnm_json_read_base64_block(
+    arnm_memory_block *out, const arnm_json_value *value, arnm *memory
+);
+
 // ********** what a value is *******************
 
 /**
@@ -875,20 +987,19 @@ arnm_json_number_type arnm_json_value_number_type(const arnm_json_value *value);
  */
 const char *arnm_json_type_to_string(arnm_json_type type);
 
-// ********** read functions, one per JSON standard type *******************
+// ********** read functions for the value level *******************
 
-/**
- * @brief Confirm a value is the literal `null`.
+/*
+ * A value handed over by a walk -- @ref arnm_json_object_iter_next(), @ref
+ * arnm_json_array_iter_next(), @ref arnm_json_reader_current() -- is read by one of these, and
+ * the walk is what found it: nothing here searches a document for a key, which is what makes
+ * these the calls a mapping over a whole object reaches for. Where a field is looked up by name
+ * instead, the reader level getters above say the same thing in one line.
  *
- * There is nothing to hand back, so the result carries the whole answer. Kept as a read
- * function rather than a predicate so that every JSON type is reached the same way.
- *
- * @param[in] value Value to read; not NULL.
- * @retval ARNM_SUCCESS                  The value is `null`.
- * @retval ARNM_ERROR_NULL_POINTER       @p value is NULL.
- * @retval ARNM_ERROR_INVALID_ENUM_TYPE  The value is of another JSON type.
+ * `null` has no reading of its own. It never carried anything a reading could hand back -- the
+ * whole answer was in the result code -- so it was a predicate wearing a read function's shape,
+ * and @ref arnm_json_value_type() was already the predicate.
  */
-arnm_result arnm_json_read_null(const arnm_json_value *value);
 
 /**
  * @brief Read `true` or `false`.

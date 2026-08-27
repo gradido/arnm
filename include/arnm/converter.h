@@ -231,6 +231,32 @@ arnm_result arnm_binary_to_base64(char *result_buffer, const arnm_memory_block *
  */
 arnm_result arnm_binary_from_base64(uint8_t *result_buffer, uint32_t *out_size, const char *base64);
 
+/**
+ * @brief Bytes @p base64 really decodes to, padding read rather than assumed.
+ *
+ * @ref ARNM_BASE64_BINARY_SIZE() answers what a length of characters can hold at most, which is
+ * what a buffer is sized by. This answers what this particular string will write, which is what
+ * an allocation is measured by: the last group carries one, two or three bytes, and only the
+ * `=` at the end of it says which. The two differ by at most two bytes -- and an arena handed
+ * two bytes it is never given back is an arena that ends short of the read that follows it.
+ *
+ * Nothing is decoded and nothing is written; only the last two characters are looked at.
+ *
+ * @param[in]  base64   The string; not NULL. Need not be NUL terminated.
+ * @param[in]  length   Characters in @p base64, terminator not counted. Zero is allowed and
+ *                      answers zero.
+ * @param[out] out_size Receives the byte count; not NULL. Untouched unless the call succeeds.
+ * @retval ARNM_SUCCESS             @p out_size holds what a decode would write.
+ * @retval ARNM_ERROR_NULL_POINTER  @p base64 or @p out_size is NULL.
+ * @retval ARNM_ERROR_DECODE_FAILED @p length is not a multiple of four, so the string is not
+ *                                  base64 at all. @ref arnm_binary_from_base64() calls the same
+ *                                  condition @ref ARNM_ERROR_INVALID_PARAM, because there it is
+ *                                  a caller writing through a buffer; here a string is only
+ *                                  being asked what it is.
+ * @whisper Counted before a single byte is lifted
+ */
+arnm_result arnm_base64_binary_size(const char *base64, uint32_t length, uint32_t *out_size);
+
 /** @brief Bytes a uuid occupies in binary form. */
 #define ARNM_UUID_BINARY_SIZE 16
 

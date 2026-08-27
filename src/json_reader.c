@@ -1,6 +1,7 @@
 #include "arnm/json_reader.h"
 
 #include "arnm/converter.h"
+#include "arnm/memory_block.h"
 
 #include "json_memory.h"
 
@@ -686,6 +687,121 @@ uint32_t arnm_json_reader_output_size_for_keys(
   return narrow_reserve(total);
 }
 
+// ********** read functions, one per JSON standard type *******************
+
+/*
+ * The two bounds below are exact powers of two and therefore exact as doubles, which is what
+ * makes them safe to compare against. INT64_MAX is not: 2^63 - 1 rounds up to 2^63 on the way
+ * into a double, so a test written with it would let 2^63 itself through and overflow on the
+ * cast. The upper bounds are exclusive for that reason.
+ */
+static const double json_int64_lower_bound = -9223372036854775808.0;  /* -2^63, inclusive */
+static const double json_int64_upper_bound = 9223372036854775808.0;   /*  2^63, exclusive */
+static const double json_uint64_upper_bound = 18446744073709551616.0; /* 2^64, exclusive */
+
+arnm_result arnm_json_read_bool(const arnm_json_value *value, bool *out) {
+  if (!value || !out) { return ARNM_ERROR_NULL_POINTER; }
+  yyjson_val *val = to_yyjson(value);
+  if (!yyjson_is_bool(val)) { return ARNM_ERROR_INVALID_ENUM_TYPE; }
+  *out = yyjson_get_bool(val);
+  return ARNM_SUCCESS;
+}
+
+arnm_result arnm_json_read_int64(const arnm_json_value *value, int64_t *out) {
+  if (!value || !out) { return ARNM_ERROR_NULL_POINTER; }
+  yyjson_val *val = to_yyjson(value);
+
+  if (yyjson_is_sint(val)) {
+    *out = yyjson_get_sint(val);
+    return ARNM_SUCCESS;
+  }
+  if (yyjson_is_uint(val)) {
+    const uint64_t raw = yyjson_get_uint(val);
+    if (raw > (uint64_t)INT64_MAX) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
+    *out = (int64_t)raw;
+    return ARNM_SUCCESS;
+  }
+  if (yyjson_is_real(val)) {
+    const double raw = yyjson_get_real(val);
+    // A NaN fails both comparisons and leaves through the same door as a value out of range,
+    // which is the right answer: neither can be carried whole.
+    if (!(raw >= json_int64_lower_bound && raw < json_int64_upper_bound)) {
+      return ARNM_ERROR_ARITHMETIC_OVERFLOW;
+    }
+    const int64_t truncated = (int64_t)raw;
+    if ((double)truncated != raw) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
+    *out = truncated;
+    return ARNM_SUCCESS;
+  }
+  return ARNM_ERROR_INVALID_ENUM_TYPE;
+}
+
+arnm_result arnm_json_read_uint64(const arnm_json_value *value, uint64_t *out) {
+  if (!value || !out) { return ARNM_ERROR_NULL_POINTER; }
+  yyjson_val *val = to_yyjson(value);
+
+  if (yyjson_is_uint(val)) {
+    *out = yyjson_get_uint(val);
+    return ARNM_SUCCESS;
+  }
+  if (yyjson_is_sint(val)) {
+    const int64_t raw = yyjson_get_sint(val);
+    if (raw < 0) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
+    *out = (uint64_t)raw;
+    return ARNM_SUCCESS;
+  }
+  if (yyjson_is_real(val)) {
+    const double raw = yyjson_get_real(val);
+    if (!(raw >= 0.0 && raw < json_uint64_upper_bound)) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
+    const uint64_t truncated = (uint64_t)raw;
+    if ((double)truncated != raw) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
+    *out = truncated;
+    return ARNM_SUCCESS;
+  }
+  return ARNM_ERROR_INVALID_ENUM_TYPE;
+}
+
+arnm_result arnm_json_read_int32(const arnm_json_value *value, int32_t *out) {
+  if (!out) { return ARNM_ERROR_NULL_POINTER; }
+  int64_t wide = 0;
+  const arnm_result result = arnm_json_read_int64(value, &wide);
+  if (ARNM_SUCCESS != result) { return result; }
+  if (wide < (int64_t)INT32_MIN || wide > (int64_t)INT32_MAX) {
+    return ARNM_ERROR_ARITHMETIC_OVERFLOW;
+  }
+  *out = (int32_t)wide;
+  return ARNM_SUCCESS;
+}
+
+arnm_result arnm_json_read_uint32(const arnm_json_value *value, uint32_t *out) {
+  if (!out) { return ARNM_ERROR_NULL_POINTER; }
+  uint64_t wide = 0;
+  const arnm_result result = arnm_json_read_uint64(value, &wide);
+  if (ARNM_SUCCESS != result) { return result; }
+  if (wide > (uint64_t)UINT32_MAX) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
+  *out = (uint32_t)wide;
+  return ARNM_SUCCESS;
+}
+
+arnm_result arnm_json_read_double(const arnm_json_value *value, double *out) {
+  if (!value || !out) { return ARNM_ERROR_NULL_POINTER; }
+  yyjson_val *val = to_yyjson(value);
+  if (!yyjson_is_num(val)) { return ARNM_ERROR_INVALID_ENUM_TYPE; }
+  *out = yyjson_get_num(val);
+  return ARNM_SUCCESS;
+}
+
+arnm_result arnm_json_read_string(
+    const arnm_json_value *value, const char **out, uint32_t *out_length
+) {
+  if (!value || !out) { return ARNM_ERROR_NULL_POINTER; }
+  yyjson_val *val = to_yyjson(value);
+  if (!yyjson_is_str(val)) { return ARNM_ERROR_INVALID_ENUM_TYPE; }
+  *out = yyjson_get_str(val);
+  if (out_length) { *out_length = narrow_count(yyjson_get_len(val)); }
+  return ARNM_SUCCESS;
+}
+
 // ********** reading a field, one line per struct member *******************
 
 /**
@@ -890,124 +1006,76 @@ const char *arnm_json_type_to_string(arnm_json_type type) {
   }
 }
 
-// ********** read functions, one per JSON standard type *******************
-
-/*
- * The two bounds below are exact powers of two and therefore exact as doubles, which is what
- * makes them safe to compare against. INT64_MAX is not: 2^63 - 1 rounds up to 2^63 on the way
- * into a double, so a test written with it would let 2^63 itself through and overflow on the
- * cast. The upper bounds are exclusive for that reason.
- */
-static const double json_int64_lower_bound = -9223372036854775808.0;  /* -2^63, inclusive */
-static const double json_int64_upper_bound = 9223372036854775808.0;   /*  2^63, exclusive */
-static const double json_uint64_upper_bound = 18446744073709551616.0; /* 2^64, exclusive */
-
-arnm_result arnm_json_read_null(const arnm_json_value *value) {
-  if (!value) { return ARNM_ERROR_NULL_POINTER; }
-  return yyjson_is_null(to_yyjson(value)) ? ARNM_SUCCESS : ARNM_ERROR_INVALID_ENUM_TYPE;
-}
-
-arnm_result arnm_json_read_bool(const arnm_json_value *value, bool *out) {
-  if (!value || !out) { return ARNM_ERROR_NULL_POINTER; }
-  yyjson_val *val = to_yyjson(value);
-  if (!yyjson_is_bool(val)) { return ARNM_ERROR_INVALID_ENUM_TYPE; }
-  *out = yyjson_get_bool(val);
-  return ARNM_SUCCESS;
-}
-
-arnm_result arnm_json_read_int64(const arnm_json_value *value, int64_t *out) {
-  if (!value || !out) { return ARNM_ERROR_NULL_POINTER; }
-  yyjson_val *val = to_yyjson(value);
-
-  if (yyjson_is_sint(val)) {
-    *out = yyjson_get_sint(val);
-    return ARNM_SUCCESS;
-  }
-  if (yyjson_is_uint(val)) {
-    const uint64_t raw = yyjson_get_uint(val);
-    if (raw > (uint64_t)INT64_MAX) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
-    *out = (int64_t)raw;
-    return ARNM_SUCCESS;
-  }
-  if (yyjson_is_real(val)) {
-    const double raw = yyjson_get_real(val);
-    // A NaN fails both comparisons and leaves through the same door as a value out of range,
-    // which is the right answer: neither can be carried whole.
-    if (!(raw >= json_int64_lower_bound && raw < json_int64_upper_bound)) {
-      return ARNM_ERROR_ARITHMETIC_OVERFLOW;
-    }
-    const int64_t truncated = (int64_t)raw;
-    if ((double)truncated != raw) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
-    *out = truncated;
-    return ARNM_SUCCESS;
-  }
-  return ARNM_ERROR_INVALID_ENUM_TYPE;
-}
-
-arnm_result arnm_json_read_uint64(const arnm_json_value *value, uint64_t *out) {
-  if (!value || !out) { return ARNM_ERROR_NULL_POINTER; }
-  yyjson_val *val = to_yyjson(value);
-
-  if (yyjson_is_uint(val)) {
-    *out = yyjson_get_uint(val);
-    return ARNM_SUCCESS;
-  }
-  if (yyjson_is_sint(val)) {
-    const int64_t raw = yyjson_get_sint(val);
-    if (raw < 0) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
-    *out = (uint64_t)raw;
-    return ARNM_SUCCESS;
-  }
-  if (yyjson_is_real(val)) {
-    const double raw = yyjson_get_real(val);
-    if (!(raw >= 0.0 && raw < json_uint64_upper_bound)) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
-    const uint64_t truncated = (uint64_t)raw;
-    if ((double)truncated != raw) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
-    *out = truncated;
-    return ARNM_SUCCESS;
-  }
-  return ARNM_ERROR_INVALID_ENUM_TYPE;
-}
-
-arnm_result arnm_json_read_int32(const arnm_json_value *value, int32_t *out) {
-  if (!out) { return ARNM_ERROR_NULL_POINTER; }
-  int64_t wide = 0;
-  const arnm_result result = arnm_json_read_int64(value, &wide);
-  if (ARNM_SUCCESS != result) { return result; }
-  if (wide < (int64_t)INT32_MIN || wide > (int64_t)INT32_MAX) {
-    return ARNM_ERROR_ARITHMETIC_OVERFLOW;
-  }
-  *out = (int32_t)wide;
-  return ARNM_SUCCESS;
-}
-
-arnm_result arnm_json_read_uint32(const arnm_json_value *value, uint32_t *out) {
-  if (!out) { return ARNM_ERROR_NULL_POINTER; }
-  uint64_t wide = 0;
-  const arnm_result result = arnm_json_read_uint64(value, &wide);
-  if (ARNM_SUCCESS != result) { return result; }
-  if (wide > (uint64_t)UINT32_MAX) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
-  *out = (uint32_t)wide;
-  return ARNM_SUCCESS;
-}
-
-arnm_result arnm_json_read_double(const arnm_json_value *value, double *out) {
-  if (!value || !out) { return ARNM_ERROR_NULL_POINTER; }
-  yyjson_val *val = to_yyjson(value);
-  if (!yyjson_is_num(val)) { return ARNM_ERROR_INVALID_ENUM_TYPE; }
-  *out = yyjson_get_num(val);
-  return ARNM_SUCCESS;
-}
-
-arnm_result arnm_json_read_string(
-    const arnm_json_value *value, const char **out, uint32_t *out_length
+arnm_result arnm_json_read_hex(
+    const arnm_json_value *value, uint8_t *out, uint32_t capacity, uint32_t *out_size
 ) {
   if (!value || !out) { return ARNM_ERROR_NULL_POINTER; }
-  yyjson_val *val = to_yyjson(value);
-  if (!yyjson_is_str(val)) { return ARNM_ERROR_INVALID_ENUM_TYPE; }
-  *out = yyjson_get_str(val);
-  if (out_length) { *out_length = narrow_count(yyjson_get_len(val)); }
+  const char *hex = NULL;
+  uint32_t length = 0;
+  const arnm_result result = arnm_json_read_string(value, &hex, &length);
+  if (ARNM_SUCCESS != result) { return result; }
+  // two characters make one byte, so anything else was never hex -- and the buffer is asked
+  // before the converter writes into it, not after. The converter reads to the terminator, so
+  // an embedded NUL would stop it early and leave the rest of the field as the caller had it:
+  // a string that ends before the document says it does is refused instead.
+  if (length % 2u || length / 2u > capacity || strlen(hex) != length) {
+    return ARNM_ERROR_DECODE_FAILED;
+  }
+  if (ARNM_SUCCESS != arnm_binary_from_hex(out, hex)) { return ARNM_ERROR_DECODE_FAILED; }
+  if (out_size) { *out_size = length / 2u; }
   return ARNM_SUCCESS;
+}
+
+arnm_result arnm_json_read_hex_fixed(const arnm_json_value *value, uint8_t *out, uint32_t size) {
+  if (!value || !out) { return ARNM_ERROR_NULL_POINTER; }
+  const char *hex = NULL;
+  uint32_t length = 0;
+  const arnm_result result = arnm_json_read_string(value, &hex, &length);
+  if (ARNM_SUCCESS != result) { return result; }
+  // as arnm_json_read_hex(): the converter reads to the terminator, so a string carrying one
+  // of its own is not the length the document claims and is no hex string either
+  if (length != size * 2u || strlen(hex) != length) { return ARNM_ERROR_DECODE_FAILED; }
+  return (ARNM_SUCCESS == arnm_binary_from_hex(out, hex)) ? ARNM_SUCCESS : ARNM_ERROR_DECODE_FAILED;
+}
+
+arnm_result arnm_json_read_uuid(const arnm_json_value *value, uint8_t *out) {
+  if (!value || !out) { return ARNM_ERROR_NULL_POINTER; }
+  const char *text = NULL;
+  uint32_t length = 0;
+  const arnm_result result = arnm_json_read_string(value, &text, &length);
+  if (ARNM_SUCCESS != result) { return result; }
+  if (ARNM_UUID_STRING_LENGTH != length) { return ARNM_ERROR_DECODE_FAILED; }
+  return (ARNM_SUCCESS == arnm_uuid_from_string(out, text)) ? ARNM_SUCCESS
+                                                            : ARNM_ERROR_DECODE_FAILED;
+}
+
+arnm_result arnm_json_read_base64_block(
+    arnm_memory_block *out, const arnm_json_value *value, arnm *memory
+) {
+  if (!value || !out) { return ARNM_ERROR_NULL_POINTER; }
+  out->data = NULL;
+  out->size = 0;
+
+  const char *text = NULL;
+  uint32_t length = 0;
+  arnm_result result = arnm_json_read_string(value, &text, &length);
+  if (ARNM_SUCCESS != result) { return result; }
+
+  uint32_t size = 0;
+  result = arnm_base64_binary_size(text, length, &size);
+  if (ARNM_SUCCESS != result) { return result; }
+  if (0 == size) { return ARNM_SUCCESS; }
+
+  result = arnm_memory_block_alloc(out, size, memory);
+  if (ARNM_SUCCESS != result) { return result; }
+
+  uint32_t written = 0;
+  if (ARNM_SUCCESS != arnm_binary_from_base64(out->data, &written, text)) {
+    return ARNM_ERROR_DECODE_FAILED;
+  }
+  // the block was reserved from the same answer, so a disagreement is this file contradicting
+  // itself rather than a document being wrong
+  return (written == size) ? ARNM_SUCCESS : ARNM_ERROR_DECODE_FAILED;
 }
 
 // ********** arrays *******************

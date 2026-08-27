@@ -523,7 +523,8 @@ TEST(JsonReader, ReadsTheValueOfEveryStandardType) {
   ASSERT_EQ(Parse(owner.reader(), kDocument), ARNM_SUCCESS);
   arnm_json_reader *r = owner.reader();
 
-  EXPECT_EQ(arnm_json_read_null(Field(r, "nothing")), ARNM_SUCCESS);
+  // `null` has no read of its own: there was never anything for one to hand back
+  EXPECT_EQ(arnm_json_value_type(Field(r, "nothing")), ARNM_JSON_TYPE_NULL);
 
   bool flag = false;
   EXPECT_EQ(arnm_json_read_bool(Field(r, "ok"), &flag), ARNM_SUCCESS);
@@ -565,7 +566,7 @@ TEST(JsonReader, AReadOfTheWrongTypeIsRefusedAndLeavesTheOutputAlone) {
   EXPECT_EQ(arnm_json_read_string(Field(r, "count"), &text, nullptr), ARNM_ERROR_INVALID_ENUM_TYPE);
   EXPECT_EQ(text, reinterpret_cast<const char *>(0x1));
 
-  EXPECT_EQ(arnm_json_read_null(Field(r, "ok")), ARNM_ERROR_INVALID_ENUM_TYPE);
+  EXPECT_NE(arnm_json_value_type(Field(r, "ok")), ARNM_JSON_TYPE_NULL);
 }
 
 TEST(JsonReader, EveryReadRefusesANullArgument) {
@@ -581,7 +582,6 @@ TEST(JsonReader, EveryReadRefusesANullArgument) {
   double real = 0.0;
   const char *text = nullptr;
 
-  EXPECT_EQ(arnm_json_read_null(nullptr), ARNM_ERROR_NULL_POINTER);
   EXPECT_EQ(arnm_json_read_bool(nullptr, &flag), ARNM_ERROR_NULL_POINTER);
   EXPECT_EQ(arnm_json_read_bool(value, nullptr), ARNM_ERROR_NULL_POINTER);
   EXPECT_EQ(arnm_json_read_int64(nullptr, &wide), ARNM_ERROR_NULL_POINTER);
@@ -934,7 +934,7 @@ TEST(JsonReader, ABareValueIsADocumentToo) {
   EXPECT_EQ(std::string(text, length), "text");
 
   ASSERT_EQ(Parse(owner.reader(), "null"), ARNM_SUCCESS);
-  EXPECT_EQ(arnm_json_read_null(arnm_json_reader_root(owner.reader())), ARNM_SUCCESS);
+  EXPECT_EQ(arnm_json_value_type(arnm_json_reader_root(owner.reader())), ARNM_JSON_TYPE_NULL);
 
   ASSERT_EQ(Parse(owner.reader(), "true"), ARNM_SUCCESS);
   bool flag = false;
@@ -1732,4 +1732,190 @@ TEST(JsonReader, TheSameNameTwiceIsCountedTwice) {
   EXPECT_EQ(arnm_json_reader_output_size_for_keys(owner.reader(), once, 1), ARNM_ALIGN8(2u + 1u));
   EXPECT_EQ(arnm_json_reader_output_size_for_keys(owner.reader(), twice, 2), ARNM_ALIGN8(2u + 1u))
       << "a name that matches stops the comparison; the list is read as given, not summed twice";
+}
+
+// ---------------------------------------------------------------------------
+// the shapes a string carries: hex, base64, uuid
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/** The value of the single member `v` of a document, parsed through @p reader. */
+arnm_json_value *SingleValue(ArenaReader &owner, const std::string &spelled) {
+  const std::string json = "{\"v\":" + spelled + "}";
+  EXPECT_EQ(Parse(owner.reader(), json), ARNM_SUCCESS) << json;
+  arnm_json_value *member = nullptr;
+  EXPECT_EQ(
+      arnm_json_object_get(arnm_json_reader_root(owner.reader()), "v", &member), ARNM_SUCCESS
+  );
+  return member;
+}
+
+} // namespace
+
+TEST(JsonReader, HexFixedReadsExactlyTheFieldItWasGiven) {
+  ArenaReader owner;
+  uint8_t out[4] = {0, 0, 0, 0};
+  EXPECT_EQ(arnm_json_read_hex_fixed(SingleValue(owner, "\"deadbeef\""), out, 4), ARNM_SUCCESS);
+  EXPECT_EQ(out[0], 0xdeu);
+  EXPECT_EQ(out[1], 0xadu);
+  EXPECT_EQ(out[2], 0xbeu);
+  EXPECT_EQ(out[3], 0xefu);
+}
+
+TEST(JsonReader, HexFixedRefusesEveryLengthButItsOwn) {
+  ArenaReader owner;
+  uint8_t out[4] = {0};
+  // one byte short, one byte long, and the odd number that is no hex string at all
+  EXPECT_EQ(
+      arnm_json_read_hex_fixed(SingleValue(owner, "\"deadbe\""), out, 4), ARNM_ERROR_DECODE_FAILED
+  );
+  EXPECT_EQ(
+      arnm_json_read_hex_fixed(SingleValue(owner, "\"deadbeef00\""), out, 4),
+      ARNM_ERROR_DECODE_FAILED
+  );
+  EXPECT_EQ(
+      arnm_json_read_hex_fixed(SingleValue(owner, "\"deadbeefa\""), out, 4),
+      ARNM_ERROR_DECODE_FAILED
+  );
+  EXPECT_EQ(
+      arnm_json_read_hex_fixed(SingleValue(owner, "\"deadbeez\""), out, 4), ARNM_ERROR_DECODE_FAILED
+  );
+}
+
+TEST(JsonReader, HexReadsWhateverLengthTheDocumentSpells) {
+  ArenaReader owner;
+  uint8_t out[8] = {0};
+  uint32_t size = 0;
+  EXPECT_EQ(
+      arnm_json_read_hex(SingleValue(owner, "\"0a0b0c\""), out, sizeof(out), &size), ARNM_SUCCESS
+  );
+  EXPECT_EQ(size, 3u);
+  EXPECT_EQ(out[0], 0x0au);
+  EXPECT_EQ(out[2], 0x0cu);
+
+  // an empty string spells no bytes, which is a length like any other
+  EXPECT_EQ(arnm_json_read_hex(SingleValue(owner, "\"\""), out, sizeof(out), &size), ARNM_SUCCESS);
+  EXPECT_EQ(size, 0u);
+}
+
+TEST(JsonReader, HexRefusesMoreBytesThanTheBufferHolds) {
+  ArenaReader owner;
+  uint8_t out[2] = {0xaa, 0xaa};
+  EXPECT_EQ(
+      arnm_json_read_hex(SingleValue(owner, "\"00112233\""), out, sizeof(out), nullptr),
+      ARNM_ERROR_DECODE_FAILED
+  );
+  // refused before the converter ran, so the buffer is as the caller had it
+  EXPECT_EQ(out[0], 0xaau);
+  EXPECT_EQ(out[1], 0xaau);
+}
+
+TEST(JsonReader, AStringThatEndsBeforeTheDocumentSaysIsNoHex) {
+  // the converter reads to the terminator; a NUL of the string's own would stop it early and
+  // leave the rest of the field untouched, so the string is refused instead
+  ArenaReader owner;
+  uint8_t out[4] = {0};
+  EXPECT_EQ(
+      arnm_json_read_hex_fixed(SingleValue(owner, "\"dead\\u0000beef\""), out, 4),
+      ARNM_ERROR_DECODE_FAILED
+  );
+  uint32_t size = 0;
+  EXPECT_EQ(
+      arnm_json_read_hex(SingleValue(owner, "\"dead\\u0000beef\""), out, sizeof(out), &size),
+      ARNM_ERROR_DECODE_FAILED
+  );
+}
+
+TEST(JsonReader, UuidReadsTheCanonicalFormAndNothingElse) {
+  ArenaReader owner;
+  uint8_t out[ARNM_UUID_BINARY_SIZE] = {0};
+  EXPECT_EQ(
+      arnm_json_read_uuid(SingleValue(owner, "\"019e2c31-a303-75c0-941e-f35c59e4f978\""), out),
+      ARNM_SUCCESS
+  );
+  EXPECT_EQ(out[0], 0x01u);
+  EXPECT_EQ(out[15], 0x78u);
+
+  EXPECT_EQ(
+      arnm_json_read_uuid(SingleValue(owner, "\"019e2c31a30375c0941ef35c59e4f978\""), out),
+      ARNM_ERROR_DECODE_FAILED
+  );
+  EXPECT_EQ(
+      arnm_json_read_uuid(SingleValue(owner, "\"not-a-uuid\""), out), ARNM_ERROR_DECODE_FAILED
+  );
+}
+
+TEST(JsonReader, Base64BlockTakesExactlyWhatTheStringDecodesTo) {
+  ArenaReader owner;
+  arnm_memory_block block{};
+  // "hello" is five bytes, which the padded eight characters would over-measure by one
+  EXPECT_EQ(
+      arnm_json_read_base64_block(&block, SingleValue(owner, "\"aGVsbG8=\""), owner.arena()),
+      ARNM_SUCCESS
+  );
+  ASSERT_NE(block.data, nullptr);
+  EXPECT_EQ(block.size, 5u);
+  EXPECT_EQ(0, memcmp(block.data, "hello", 5));
+  EXPECT_EQ(arnm_memory_block_free(&block, owner.arena()), ARNM_SUCCESS);
+}
+
+TEST(JsonReader, AnEmptyBase64StringCostsNoAllocation) {
+  ArenaReader owner;
+  const uint32_t before = owner.used();
+  arnm_memory_block block{};
+  EXPECT_EQ(
+      arnm_json_read_base64_block(&block, SingleValue(owner, "\"\""), owner.arena()), ARNM_SUCCESS
+  );
+  EXPECT_EQ(block.data, nullptr);
+  EXPECT_EQ(block.size, 0u);
+  EXPECT_GE(owner.used(), before); // the document itself is what grew, if anything did
+}
+
+TEST(JsonReader, Base64BlockRefusesWhatIsNotBase64) {
+  ArenaReader owner;
+  arnm_memory_block block{};
+  // five characters are not a whole number of four character groups
+  EXPECT_EQ(
+      arnm_json_read_base64_block(&block, SingleValue(owner, "\"aGVsb\""), owner.arena()),
+      ARNM_ERROR_DECODE_FAILED
+  );
+  EXPECT_EQ(block.data, nullptr);
+  // and this one is the right length with a character the alphabet does not have
+  EXPECT_EQ(
+      arnm_json_read_base64_block(&block, SingleValue(owner, "\"aGVs*G8=\""), owner.arena()),
+      ARNM_ERROR_DECODE_FAILED
+  );
+}
+
+TEST(JsonReader, TheShapeReadsRefuseAValueThatIsNoString) {
+  ArenaReader owner;
+  uint8_t out[4] = {0};
+  arnm_memory_block block{};
+  EXPECT_EQ(
+      arnm_json_read_hex_fixed(SingleValue(owner, "42"), out, 4), ARNM_ERROR_INVALID_ENUM_TYPE
+  );
+  EXPECT_EQ(
+      arnm_json_read_hex(SingleValue(owner, "42"), out, sizeof(out), nullptr),
+      ARNM_ERROR_INVALID_ENUM_TYPE
+  );
+  EXPECT_EQ(arnm_json_read_uuid(SingleValue(owner, "42"), out), ARNM_ERROR_INVALID_ENUM_TYPE);
+  EXPECT_EQ(
+      arnm_json_read_base64_block(&block, SingleValue(owner, "42"), owner.arena()),
+      ARNM_ERROR_INVALID_ENUM_TYPE
+  );
+}
+
+TEST(JsonReader, TheShapeReadsRefuseNullArguments) {
+  ArenaReader owner;
+  uint8_t out[4] = {0};
+  arnm_memory_block block{};
+  EXPECT_EQ(arnm_json_read_hex_fixed(nullptr, out, 4), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_json_read_hex(nullptr, out, 4, nullptr), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_json_read_uuid(nullptr, out), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_json_read_base64_block(&block, nullptr, owner.arena()), ARNM_ERROR_NULL_POINTER);
+  arnm_json_value *value = SingleValue(owner, "\"00\"");
+  EXPECT_EQ(arnm_json_read_hex_fixed(value, nullptr, 1), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_json_read_uuid(value, nullptr), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_json_read_base64_block(nullptr, value, owner.arena()), ARNM_ERROR_NULL_POINTER);
 }
