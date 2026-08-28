@@ -133,6 +133,17 @@ TEST(JsonWriter, AnUnknownFlagBitIsRefusedBeforeAnythingIsWritten) {
   std::memset(&writer, 0, sizeof(writer));
   EXPECT_EQ(arnm_json_writer_init(&writer, nullptr, 1u << 20, nullptr), ARNM_ERROR_INVALID_PARAM);
   EXPECT_EQ(arnm_json_writer_status(&writer), ARNM_ERROR_NOT_INITIALIZED);
+
+  // bits 4 and 6 carried ALLOW_INF_AND_NAN and ALLOW_INVALID_UNICODE, which this build cannot
+  // honour. They were left empty rather than closed up, so a caller still passing one is told
+  // so here instead of landing on whatever a renumbering would have moved into their place.
+  for (unsigned bit : {4u, 6u}) {
+    EXPECT_EQ(arnm_json_writer_init(&writer, nullptr, 1u << bit, nullptr), ARNM_ERROR_INVALID_PARAM)
+        << "bit " << bit;
+  }
+  // and the neighbours that survived still mean exactly what they did
+  EXPECT_EQ(ARNM_JSON_WRITE_INF_AND_NAN_AS_NULL, 1u << 5);
+  EXPECT_EQ(ARNM_JSON_WRITE_NEWLINE_AT_END, 1u << 7);
   EXPECT_EQ(arnm_json_writer_create(nullptr, 1u << 20, nullptr), nullptr);
   EXPECT_EQ(
       arnm_json_writer_init(nullptr, nullptr, ARNM_JSON_WRITE_DEFAULT, nullptr),
@@ -766,7 +777,10 @@ TEST(JsonWriter, AnArenaWithNoRoomIsRecordedAsOutOfMemory) {
   arnm_release(&arena);
 }
 
-TEST(JsonWriter, ANonFiniteNumberNeedsAFlagOrTheWholeWriteIsRefused) {
+TEST(JsonWriter, ANonFiniteNumberIsRefusedOrWrittenAsNull) {
+  // yyjson is built here with YYJSON_DISABLE_NON_STANDARD, which takes out the code behind
+  // YYJSON_WRITE_ALLOW_INF_AND_NAN -- there is no longer a way to spell `Infinity` in the
+  // output, so the two answers left are a refusal and a null.
   const double infinity = 1e308 * 10.0;
 
   ArenaWriter strict;
@@ -776,15 +790,18 @@ TEST(JsonWriter, ANonFiniteNumberNeedsAFlagOrTheWholeWriteIsRefused) {
       arnm_json_writer_write(strict.writer(), strict.arena(), &block, nullptr),
       ARNM_ERROR_ENCODE_FAILED
   );
-  EXPECT_EQ(block.data, nullptr);
+  EXPECT_EQ(block.data, nullptr) << "a refused write hands back nothing to release";
 
-  ArenaWriter allowed(ARNM_JSON_WRITE_ALLOW_INF_AND_NAN);
-  arnm_json_writer_add_double(allowed.writer(), "n", infinity);
-  EXPECT_EQ(Write(allowed.writer(), allowed.arena(), /*size_is_exact=*/false), "{\"n\":Infinity}");
-
+  // standard JSON has a spelling for this one, so it survives the build that removed the other
   ArenaWriter as_null(ARNM_JSON_WRITE_INF_AND_NAN_AS_NULL);
   arnm_json_writer_add_double(as_null.writer(), "n", infinity);
   EXPECT_EQ(Write(as_null.writer(), as_null.arena(), /*size_is_exact=*/false), "{\"n\":null}");
+
+  ArenaWriter nan_as_null(ARNM_JSON_WRITE_INF_AND_NAN_AS_NULL);
+  arnm_json_writer_add_double(nan_as_null.writer(), "n", infinity - infinity);
+  EXPECT_EQ(
+      Write(nan_as_null.writer(), nan_as_null.arena(), /*size_is_exact=*/false), "{\"n\":null}"
+  );
 }
 
 // ---------------------------------------------------------------------------

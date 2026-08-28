@@ -146,26 +146,33 @@ uint8_t arnm_int64_to_string_size(int64_t value);
 arnm_result arnm_binary_to_hex(char *result_buffer, const arnm_memory_block *data);
 
 /**
- * @brief Read a hex string back into the bytes it spells.
+ * @brief Read a hex string back into the bytes it spells, over a length the caller already has.
  *
  * Both digit cases are accepted. Nothing is skipped: a separator between the bytes makes the
  * string undecodable rather than being ignored.
  *
- * @param[out] result_buffer Expected to hold strlen(hex) / 2 bytes. Those bytes are set to all
+ * The length is passed rather than measured, which is what lets this decode a run of characters
+ * that is not a C string -- a slice of a larger buffer, or a JSON member whose bytes the parser
+ * already counted. Exactly @p hex_size characters are read and a NUL among them is a character
+ * like any other, and not a hex digit, so it is refused rather than treated as an early end.
+ *
+ * @param[out] result_buffer Expected to hold @p hex_size / 2 bytes. Those bytes are set to all
  *                           zeros when the string turns out not to be hex, so a caller that
  *                           overlooks the result code never reads half converted bytes. Only
  *                           what this call decoded is cleared; whatever the buffer held before
  *                           belongs to the caller and is left alone.
- * @param[in]  hex           Null terminated string of an even number of hex digits.
- * @param[in]  hex_size      length of hex string
- * @retval ARNM_SUCCESS             hex_size / 2 bytes written.
+ * @param[in]  hex           Characters to read; not NULL. No terminator is required and none is
+ *                           looked for.
+ * @param[in]  hex_size      Characters in @p hex: even, and not 0.
+ * @retval ARNM_SUCCESS             @p hex_size / 2 bytes written.
  * @retval ARNM_ERROR_NULL_POINTER  @p result_buffer or @p hex is NULL.
- * @retval ARNM_ERROR_INVALID_PARAM @p hex has an odd or zero number of characters. Refused before
- *                                     anything is written, so @p result_buffer is left exactly
- *                                     as the caller had it -- there is nothing of this call's
- *                                     making in it to clear.
+ * @retval ARNM_ERROR_INVALID_PARAM @p hex_size is odd or 0. Refused before anything is written,
+ *                                     so @p result_buffer is left exactly as the caller had it
+ *                                     -- there is nothing of this call's making in it to clear.
+ *                                     An empty run spells no bytes and is a refusal here, the
+ *                                     same way @ref arnm_binary_to_hex() refuses an empty block.
  * @retval ARNM_ERROR_DECODE_FAILED @p hex holds a character that is not a hex digit. The
- *                                     strlen(hex) / 2 bytes are zeroed.
+ *                                     @p hex_size / 2 bytes are zeroed.
  * @note Not constant time; see the warning on this group.
  * @whisper Two characters settle back into the one byte they came from
  */
@@ -173,7 +180,21 @@ arnm_result arnm_binary_from_hex_with_known_hex_size(
     uint8_t *result_buffer, const char *hex, size_t hex_size
 );
 
+/**
+ * @brief Read a NUL terminated hex string back into the bytes it spells.
+ *
+ * @ref arnm_binary_from_hex_with_known_hex_size() over the length `strlen()` reports, which is
+ * the shape a caller holding a plain C string wants. Everything that call promises holds here,
+ * the refusal of an empty string included: `""` measures 0 and is answered with
+ * @ref ARNM_ERROR_INVALID_PARAM, not with a success that wrote nothing.
+ *
+ * @param[out] result_buffer Expected to hold `strlen(hex) / 2` bytes; see the sized call.
+ * @param[in]  hex           Null terminated string of an even, non zero number of hex digits.
+ * @return What @ref arnm_binary_from_hex_with_known_hex_size() answers.
+ * @whisper The string measures itself before it settles back into bytes
+ */
 static inline arnm_result arnm_binary_from_hex(uint8_t *result_buffer, const char *hex) {
+  if (!hex) { return ARNM_ERROR_NULL_POINTER; }
   return arnm_binary_from_hex_with_known_hex_size(result_buffer, hex, strlen(hex));
 }
 

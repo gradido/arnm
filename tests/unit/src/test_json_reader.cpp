@@ -447,24 +447,51 @@ TEST(JsonReader, AFailedParseDropsTheDocumentItReplaced) {
   EXPECT_EQ(arnm_json_reader_root(owner.reader()), nullptr);
 }
 
-TEST(JsonReader, StrictByDefaultAndLenientOnRequest) {
+TEST(JsonReader, StrictAboutTheGrammarAndNotAskableOtherwise) {
+  // yyjson is built here with YYJSON_DISABLE_NON_STANDARD, so the extensions are gone from the
+  // parser rather than defaulted off and there is no flag left that could ask for them back.
+  // What the reader refuses, it refuses whatever it was initialised with.
   ArenaReader strict;
-  EXPECT_EQ(Parse(strict.reader(), "[1,2,3,]"), ARNM_ERROR_DECODE_FAILED);
-  EXPECT_EQ(Parse(strict.reader(), "[1] // tail"), ARNM_ERROR_DECODE_FAILED);
+  EXPECT_EQ(Parse(strict.reader(), "[1,2,3,]"), ARNM_ERROR_DECODE_FAILED) << "trailing comma";
+  EXPECT_EQ(Parse(strict.reader(), "[1] // tail"), ARNM_ERROR_DECODE_FAILED) << "comment";
+  EXPECT_EQ(Parse(strict.reader(), "[NaN]"), ARNM_ERROR_DECODE_FAILED) << "nan";
+  EXPECT_EQ(Parse(strict.reader(), "[Infinity]"), ARNM_ERROR_DECODE_FAILED) << "infinity";
+  EXPECT_EQ(Parse(strict.reader(), "\xEF\xBB\xBF[1]"), ARNM_ERROR_DECODE_FAILED)
+      << "byte order mark";
   EXPECT_EQ(Parse(strict.reader(), "{} trailing"), ARNM_ERROR_DECODE_FAILED);
 
-  ArenaReader commas(ARNM_JSON_READ_ALLOW_TRAILING_COMMAS);
-  EXPECT_EQ(Parse(commas.reader(), "[1,2,3,]"), ARNM_SUCCESS);
+  ArenaReader stops(ARNM_JSON_READ_STOP_WHEN_DONE);
+  EXPECT_EQ(Parse(stops.reader(), "[1,2,3,]"), ARNM_ERROR_DECODE_FAILED)
+      << "the one surviving flag is about where a document ends, not about its grammar";
+}
 
-  ArenaReader comments(ARNM_JSON_READ_ALLOW_COMMENTS);
-  EXPECT_EQ(Parse(comments.reader(), "[1] // tail"), ARNM_SUCCESS);
+// promise: the one flag left still does what it says, and it belongs to the reader rather than
+// to a single parse
+TEST(JsonReader, StopWhenDoneEndsTheDocumentAtItsLastByte) {
+  ArenaReader strict;
+  EXPECT_EQ(Parse(strict.reader(), "{} trailing"), ARNM_ERROR_DECODE_FAILED);
 
-  // a flag belongs to the reader now, so it holds for every parse that reader ever runs
   ArenaReader stops(ARNM_JSON_READ_STOP_WHEN_DONE);
   EXPECT_EQ(Parse(stops.reader(), "{} trailing"), ARNM_SUCCESS);
   EXPECT_EQ(arnm_json_reader_bytes_read(stops.reader()), 2u);
   EXPECT_EQ(Parse(stops.reader(), "[1] and more"), ARNM_SUCCESS);
   EXPECT_EQ(arnm_json_reader_bytes_read(stops.reader()), 3u);
+}
+
+// promise: a bit the header does not define is refused at init rather than carried into a parse
+// that would ignore it -- which is the whole reason the removed flags are not still sitting here
+TEST(JsonReader, InitRefusesAFlagThisReaderDoesNotHave) {
+  arnm arena{};
+  ASSERT_EQ(arnm_init_arena(&arena, 4096), ARNM_SUCCESS);
+  arnm_json_reader reader{};
+  for (unsigned bit = 1; bit < 8u; ++bit) {
+    EXPECT_EQ(
+        arnm_json_reader_init(&reader, &arena, static_cast<arnm_json_read_flags>(1u << bit)),
+        ARNM_ERROR_INVALID_PARAM
+    ) << "bit "
+      << bit << " was one of the flags this build cannot honour";
+  }
+  arnm_release(&arena);
 }
 
 TEST(JsonReader, ValueCountAndBytesReadDescribeTheDocument) {
@@ -724,22 +751,6 @@ TEST(JsonReader, EveryNumberConvertsToADouble) {
   ASSERT_EQ(arnm_json_array_get(root, 2, &element), ARNM_SUCCESS);
   EXPECT_EQ(arnm_json_read_double(element, &real), ARNM_SUCCESS);
   EXPECT_DOUBLE_EQ(real, 7.25);
-}
-
-TEST(JsonReader, NaNNeedsItsFlagAndStillDoesNotBecomeAnInteger) {
-  ArenaReader strict;
-  EXPECT_EQ(Parse(strict.reader(), "[NaN]"), ARNM_ERROR_DECODE_FAILED);
-
-  ArenaReader owner(ARNM_JSON_READ_ALLOW_INF_AND_NAN);
-  ASSERT_EQ(Parse(owner.reader(), "[NaN]"), ARNM_SUCCESS);
-
-  arnm_json_value *element = nullptr;
-  ASSERT_EQ(arnm_json_array_get(arnm_json_reader_root(owner.reader()), 0, &element), ARNM_SUCCESS);
-  int64_t whole = 0;
-  EXPECT_EQ(arnm_json_read_int64(element, &whole), ARNM_ERROR_ARITHMETIC_OVERFLOW)
-      << "a NaN fails both bound tests and leaves by the same door as a value out of range";
-  uint64_t unsigned_whole = 0;
-  EXPECT_EQ(arnm_json_read_uint64(element, &unsigned_whole), ARNM_ERROR_ARITHMETIC_OVERFLOW);
 }
 
 // ---------------------------------------------------------------------------
@@ -1794,9 +1805,14 @@ TEST(JsonReader, HexReadsWhateverLengthTheDocumentSpells) {
   EXPECT_EQ(out[0], 0x0au);
   EXPECT_EQ(out[2], 0x0cu);
 
-  // an empty string spells no bytes, which is a length like any other
-  EXPECT_EQ(arnm_json_read_hex(SingleValue(owner, "\"\""), out, sizeof(out), &size), ARNM_SUCCESS);
-  EXPECT_EQ(size, 0u);
+  // an empty string spells no bytes, and no bytes is not a length this reads -- the converter
+  // underneath refuses it and a document that carries one is a document that is wrong
+  size = 99u;
+  EXPECT_EQ(
+      arnm_json_read_hex(SingleValue(owner, "\"\""), out, sizeof(out), &size),
+      ARNM_ERROR_DECODE_FAILED
+  );
+  EXPECT_EQ(size, 99u) << "a refusal leaves the size as the caller had it";
 }
 
 TEST(JsonReader, HexRefusesMoreBytesThanTheBufferHolds) {
@@ -1918,4 +1934,400 @@ TEST(JsonReader, TheShapeReadsRefuseNullArguments) {
   EXPECT_EQ(arnm_json_read_hex_fixed(value, nullptr, 1), ARNM_ERROR_NULL_POINTER);
   EXPECT_EQ(arnm_json_read_uuid(value, nullptr), ARNM_ERROR_NULL_POINTER);
   EXPECT_EQ(arnm_json_read_base64_block(nullptr, value, owner.arena()), ARNM_ERROR_NULL_POINTER);
+}
+
+// ---------------------------------------------------------------------------
+// reading a whole object in one walk
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/** Every target one walk can fill, together in the shape a consumer would hold them. */
+struct Shape {
+  bool flag = false;
+  int64_t wide = 0;
+  uint32_t narrow = 0;
+  double real = 0.0;
+  arnm_memory_block text{};
+  uint8_t key_bytes[4] = {0, 0, 0, 0};
+  arnm_memory_block key = ARNM_JSON_BLOCK_OF(key_bytes);
+  uint8_t uuid_bytes[ARNM_UUID_BINARY_SIZE] = {0};
+  arnm_memory_block uuid = ARNM_JSON_BLOCK_OF(uuid_bytes);
+  arnm_json_value *nested = nullptr;
+};
+
+const char kShapeDocument[] =
+    "{\"flag\":true,\"wide\":-9,\"narrow\":7,\"real\":0.25,\"text\":\"here\","
+    "\"key\":\"deadbeef\",\"uuid\":\"019e2c31-a303-75c0-941e-f35c59e4f978\","
+    "\"nested\":{\"deep\":1}}";
+
+/** The one line every walk below reads the same way. */
+arnm_result Walk(ArenaReader &owner, arnm_json_field *fields, uint32_t count, uint64_t *found) {
+  return arnm_json_read_object(arnm_json_reader_root(owner.reader()), fields, count, found);
+}
+
+} // namespace
+
+TEST(JsonReader, AWalkFillsEveryTargetItsTableNames) {
+  ArenaReader owner;
+  ASSERT_EQ(Parse(owner.reader(), kShapeDocument), ARNM_SUCCESS);
+  Shape shape;
+  arnm_json_field fields[] = {ARNM_JSON_FIELD_BOOL("flag", &shape.flag),
+                              ARNM_JSON_FIELD_INT64("wide", &shape.wide),
+                              ARNM_JSON_FIELD_UINT32("narrow", &shape.narrow),
+                              ARNM_JSON_FIELD_DOUBLE("real", &shape.real),
+                              ARNM_JSON_FIELD_STRING("text", &shape.text),
+                              ARNM_JSON_FIELD_HEX_FIXED("key", &shape.key),
+                              ARNM_JSON_FIELD_UUID("uuid", &shape.uuid),
+                              ARNM_JSON_FIELD_VALUE("nested", &shape.nested)};
+  uint64_t found = 0;
+  ASSERT_EQ(Walk(owner, fields, 8, &found), ARNM_SUCCESS);
+
+  EXPECT_EQ(found, 0xffull) << "every one of the eight was there";
+  EXPECT_TRUE(shape.flag);
+  EXPECT_EQ(shape.wide, -9);
+  EXPECT_EQ(shape.narrow, 7u);
+  EXPECT_DOUBLE_EQ(shape.real, 0.25);
+  ASSERT_NE(shape.text.data, nullptr);
+  EXPECT_EQ(std::string(reinterpret_cast<const char *>(shape.text.data), shape.text.size), "here");
+  EXPECT_EQ(shape.key_bytes[0], 0xdeu);
+  EXPECT_EQ(shape.key_bytes[3], 0xefu);
+  EXPECT_EQ(shape.uuid_bytes[0], 0x01u);
+  EXPECT_EQ(shape.uuid_bytes[15], 0x78u);
+  ASSERT_NE(shape.nested, nullptr);
+  EXPECT_EQ(arnm_json_value_type(shape.nested), ARNM_JSON_TYPE_OBJECT)
+      << "a nested member is handed over, not walked";
+}
+
+TEST(JsonReader, AWalkBorrowsAStringRatherThanCopyingIt) {
+  // the block points into the document itself, which is what makes a string field cost nothing
+  // and what makes it illegal to free
+  ArenaReader owner;
+  const std::string json = "{\"text\":\"here\"}";
+  ASSERT_EQ(Parse(owner.reader(), json), ARNM_SUCCESS);
+  arnm_memory_block text{};
+  arnm_json_field fields[] = {ARNM_JSON_FIELD_STRING("text", &text)};
+  const uint32_t before = owner.used();
+  ASSERT_EQ(Walk(owner, fields, 1, nullptr), ARNM_SUCCESS);
+
+  EXPECT_EQ(text.size, 4u) << "size is the string's length, not an allocation";
+  EXPECT_EQ(std::string(reinterpret_cast<const char *>(text.data), text.size), "here");
+  EXPECT_EQ(owner.used(), before) << "a walk that only borrows takes no arena byte";
+}
+
+TEST(JsonReader, AWalkReadsTheSameDocumentInAnyOrder) {
+  // the table starts each key at its lowest unfilled entry; a document in another order costs
+  // the entries above it and answers the same
+  ArenaReader owner;
+  ASSERT_EQ(Parse(owner.reader(), "{\"third\":3,\"first\":1,\"second\":2}"), ARNM_SUCCESS);
+  int64_t first = 0, second = 0, third = 0;
+  arnm_json_field fields[] = {
+      ARNM_JSON_FIELD_INT64("first", &first), ARNM_JSON_FIELD_INT64("second", &second),
+      ARNM_JSON_FIELD_INT64("third", &third)
+  };
+  uint64_t found = 0;
+  ASSERT_EQ(Walk(owner, fields, 3, &found), ARNM_SUCCESS);
+  EXPECT_EQ(found, 0x7ull);
+  EXPECT_EQ(first, 1);
+  EXPECT_EQ(second, 2);
+  EXPECT_EQ(third, 3);
+}
+
+TEST(JsonReader, AWalkKeepsTheFirstOfADuplicateWhereverItSits) {
+  // an entry is skipped once filled, so the second of a pair never reaches its target. The two
+  // positions are asked separately: the field the walk is already past, and the field it would
+  // still be scanning towards
+  ArenaReader owner;
+  {
+    ASSERT_EQ(Parse(owner.reader(), "{\"a\":1,\"a\":2,\"b\":3}"), ARNM_SUCCESS);
+    int64_t a = 0, b = 0;
+    arnm_json_field fields[] = {ARNM_JSON_FIELD_INT64("a", &a), ARNM_JSON_FIELD_INT64("b", &b)};
+    uint64_t found = 0;
+    ASSERT_EQ(Walk(owner, fields, 2, &found), ARNM_SUCCESS);
+    EXPECT_EQ(found, 0x3ull);
+    EXPECT_EQ(a, 1) << "the duplicate below the lowest open entry is passed over";
+    EXPECT_EQ(b, 3);
+  }
+  {
+    ASSERT_EQ(Parse(owner.reader(), "{\"b\":1,\"b\":2}"), ARNM_SUCCESS);
+    int64_t a = -1, b = 0;
+    arnm_json_field fields[] = {ARNM_JSON_FIELD_INT64("a", &a), ARNM_JSON_FIELD_INT64("b", &b)};
+    uint64_t found = 0;
+    ASSERT_EQ(Walk(owner, fields, 2, &found), ARNM_SUCCESS);
+    EXPECT_EQ(found, 0x2ull);
+    EXPECT_EQ(b, 1) << "the duplicate the scan still passes over is skipped by its filled bit";
+    EXPECT_EQ(a, -1);
+  }
+  {
+    ASSERT_EQ(Parse(owner.reader(), "{\"w\":1,\"w\":2}"), ARNM_SUCCESS);
+    int64_t w = 0;
+    arnm_json_field fields[] = {ARNM_JSON_FIELD_INT64("w", &w)};
+    uint64_t found = 0;
+    ASSERT_EQ(Walk(owner, fields, 1, &found), ARNM_SUCCESS);
+    EXPECT_EQ(w, 1) << "a table with nothing left open stops looking at all";
+  }
+}
+
+TEST(JsonReader, AWalkStopsLookingOnceEveryEntryIsFilled) {
+  // the members after the last one it wanted are never read, so a value that would be refused
+  // costs nothing as long as it comes after
+  ArenaReader owner;
+  ASSERT_EQ(Parse(owner.reader(), "{\"a\":1,\"a\":\"not a number\"}"), ARNM_SUCCESS);
+  int64_t a = 0;
+  arnm_json_field fields[] = {ARNM_JSON_FIELD_INT64("a", &a)};
+  uint64_t found = 0;
+  EXPECT_EQ(Walk(owner, fields, 1, &found), ARNM_SUCCESS)
+      << "the second a was never read, so its type was never asked";
+  EXPECT_EQ(found, 0x1ull);
+  EXPECT_EQ(a, 1);
+}
+
+TEST(JsonReader, AWalkSkipsWhatItDoesNotKnow) {
+  ArenaReader owner;
+  ASSERT_EQ(Parse(owner.reader(), "{\"other\":1,\"wanted\":2,\"more\":3}"), ARNM_SUCCESS);
+  int64_t wanted = 0;
+  arnm_json_field fields[] = {ARNM_JSON_FIELD_INT64("wanted", &wanted)};
+  uint64_t found = 0;
+  ASSERT_EQ(Walk(owner, fields, 1, &found), ARNM_SUCCESS);
+  EXPECT_EQ(found, 0x1ull);
+  EXPECT_EQ(wanted, 2) << "a document may carry more than this reader wants";
+}
+
+TEST(JsonReader, AWalkNamesWhatWasThereAndNotWhatIsRequired) {
+  ArenaReader owner;
+  ASSERT_EQ(Parse(owner.reader(), "{\"b\":2}"), ARNM_SUCCESS);
+  int64_t a = -1, b = -1, c = -1;
+  arnm_json_field fields[] = {
+      ARNM_JSON_FIELD_INT64("a", &a), ARNM_JSON_FIELD_INT64("b", &b), ARNM_JSON_FIELD_INT64("c", &c)
+  };
+  uint64_t found = 0;
+  ASSERT_EQ(Walk(owner, fields, 3, &found), ARNM_SUCCESS);
+  EXPECT_EQ(found, 0x2ull) << "only the middle one was carried";
+  EXPECT_EQ(a, -1) << "an absent member leaves its target alone";
+  EXPECT_EQ(b, 2);
+  EXPECT_EQ(c, -1);
+}
+
+TEST(JsonReader, AWalkStopsAtTheMemberItCannotReadAndSaysHowFarItCame) {
+  ArenaReader owner;
+  ASSERT_EQ(Parse(owner.reader(), "{\"a\":1,\"b\":\"two\",\"c\":3}"), ARNM_SUCCESS);
+  int64_t a = 0, b = 0, c = 0;
+  arnm_json_field fields[] = {
+      ARNM_JSON_FIELD_INT64("a", &a), ARNM_JSON_FIELD_INT64("b", &b), ARNM_JSON_FIELD_INT64("c", &c)
+  };
+  uint64_t found = 0;
+  EXPECT_EQ(Walk(owner, fields, 3, &found), ARNM_ERROR_INVALID_ENUM_TYPE);
+  EXPECT_EQ(found, 0x1ull) << "the first was read, the second refused, the third never reached";
+  EXPECT_EQ(a, 1);
+  EXPECT_EQ(c, 0);
+}
+
+TEST(JsonReader, AWalkCarriesANegativeNumberIntoAnInt32) {
+  // the narrow signed types are the ones a range check is easiest to get backwards on, so both
+  // ends of both of them are asked here
+  ArenaReader owner;
+  ASSERT_EQ(
+      Parse(owner.reader(), "{\"low\":-2147483648,\"high\":2147483647,\"small\":-1}"), ARNM_SUCCESS
+  );
+  int32_t low = 0, high = 0, small = 0;
+  arnm_json_field fields[] = {
+      ARNM_JSON_FIELD_INT32("low", &low), ARNM_JSON_FIELD_INT32("high", &high),
+      ARNM_JSON_FIELD_INT32("small", &small)
+  };
+  uint64_t found = 0;
+  ASSERT_EQ(Walk(owner, fields, 3, &found), ARNM_SUCCESS);
+  EXPECT_EQ(found, 0x7ull);
+  EXPECT_EQ(low, INT32_MIN);
+  EXPECT_EQ(high, INT32_MAX);
+  EXPECT_EQ(small, -1);
+}
+
+TEST(JsonReader, AWalkCarriesTheWidestNumbersWhole) {
+  ArenaReader owner;
+  ASSERT_EQ(
+      Parse(owner.reader(), "{\"u\":18446744073709551615,\"i\":-9223372036854775808}"), ARNM_SUCCESS
+  );
+  uint64_t u = 0;
+  int64_t i = 0;
+  arnm_json_field fields[] = {ARNM_JSON_FIELD_UINT64("u", &u), ARNM_JSON_FIELD_INT64("i", &i)};
+  uint64_t found = 0;
+  ASSERT_EQ(Walk(owner, fields, 2, &found), ARNM_SUCCESS);
+  EXPECT_EQ(found, 0x3ull);
+  EXPECT_EQ(u, UINT64_MAX);
+  EXPECT_EQ(i, INT64_MIN);
+}
+
+TEST(JsonReader, AWalkRefusesANumberThatWillNotFitItsTarget) {
+  ArenaReader owner;
+  ASSERT_EQ(Parse(owner.reader(), "{\"n\":2147483648}"), ARNM_SUCCESS);
+  int32_t narrow = 0;
+  arnm_json_field over[] = {ARNM_JSON_FIELD_INT32("n", &narrow)};
+  EXPECT_EQ(Walk(owner, over, 1, nullptr), ARNM_ERROR_ARITHMETIC_OVERFLOW);
+  EXPECT_EQ(narrow, 0) << "a refused member leaves its target alone";
+
+  ASSERT_EQ(Parse(owner.reader(), "{\"n\":-1}"), ARNM_SUCCESS);
+  uint32_t unsigned_narrow = 0;
+  uint64_t unsigned_wide = 0xdeadbeefull;
+  arnm_json_field negative_u32[] = {ARNM_JSON_FIELD_UINT32("n", &unsigned_narrow)};
+  arnm_json_field negative_u64[] = {ARNM_JSON_FIELD_UINT64("n", &unsigned_wide)};
+  EXPECT_EQ(Walk(owner, negative_u32, 1, nullptr), ARNM_ERROR_ARITHMETIC_OVERFLOW);
+  EXPECT_EQ(Walk(owner, negative_u64, 1, nullptr), ARNM_ERROR_ARITHMETIC_OVERFLOW);
+  EXPECT_EQ(unsigned_wide, 0xdeadbeefull);
+
+  // 2^63 is one past what an int64_t holds, and carrying it across would wrap it negative
+  ASSERT_EQ(Parse(owner.reader(), "{\"n\":9223372036854775808}"), ARNM_SUCCESS);
+  int64_t wide = 0;
+  arnm_json_field past_int64[] = {ARNM_JSON_FIELD_INT64("n", &wide)};
+  EXPECT_EQ(Walk(owner, past_int64, 1, nullptr), ARNM_ERROR_ARITHMETIC_OVERFLOW);
+  EXPECT_EQ(wide, 0);
+
+  ASSERT_EQ(Parse(owner.reader(), "{\"n\":4294967296}"), ARNM_SUCCESS);
+  uint32_t past_u32 = 0;
+  arnm_json_field over_u32[] = {ARNM_JSON_FIELD_UINT32("n", &past_u32)};
+  EXPECT_EQ(Walk(owner, over_u32, 1, nullptr), ARNM_ERROR_ARITHMETIC_OVERFLOW);
+}
+
+TEST(JsonReader, AWalkRefusesAStringThatIsNotTheShapeItsEntryNames) {
+  ArenaReader owner;
+  ASSERT_EQ(
+      Parse(owner.reader(), "{\"short\":\"01\",\"nothex\":\"zzzzzzzz\",\"empty\":\"\"}"),
+      ARNM_SUCCESS
+  );
+  uint8_t four[4] = {0, 0, 0, 0};
+
+  arnm_memory_block too_short = ARNM_JSON_BLOCK_OF(four);
+  arnm_json_field short_hex[] = {ARNM_JSON_FIELD_HEX_FIXED("short", &too_short)};
+  EXPECT_EQ(Walk(owner, short_hex, 1, nullptr), ARNM_ERROR_DECODE_FAILED)
+      << "four bytes want eight characters";
+
+  arnm_memory_block bad = ARNM_JSON_BLOCK_OF(four);
+  arnm_json_field not_hex[] = {ARNM_JSON_FIELD_HEX_FIXED("nothex", &bad)};
+  EXPECT_EQ(Walk(owner, not_hex, 1, nullptr), ARNM_ERROR_DECODE_FAILED);
+
+  arnm_memory_block empty_target = ARNM_JSON_BLOCK_OF(four);
+  arnm_json_field empty_hex[] = {ARNM_JSON_FIELD_HEX_FIXED("empty", &empty_target)};
+  EXPECT_EQ(Walk(owner, empty_hex, 1, nullptr), ARNM_ERROR_DECODE_FAILED);
+
+  uint8_t uuid[ARNM_UUID_BINARY_SIZE] = {0};
+  arnm_memory_block uuid_block = ARNM_JSON_BLOCK_OF(uuid);
+  arnm_json_field not_a_uuid[] = {ARNM_JSON_FIELD_UUID("short", &uuid_block)};
+  EXPECT_EQ(Walk(owner, not_a_uuid, 1, nullptr), ARNM_ERROR_DECODE_FAILED);
+
+  // a uuid decodes into exactly ARNM_UUID_BINARY_SIZE bytes, so a block of any other size is
+  // the caller's mistake rather than the document's
+  ASSERT_EQ(
+      Parse(owner.reader(), "{\"u\":\"019e2c31-a303-75c0-941e-f35c59e4f978\"}"), ARNM_SUCCESS
+  );
+  uint8_t too_few[8] = {0};
+  arnm_memory_block wrong_size = ARNM_JSON_BLOCK_OF(too_few);
+  arnm_json_field bad_uuid_target[] = {ARNM_JSON_FIELD_UUID("u", &wrong_size)};
+  EXPECT_EQ(Walk(owner, bad_uuid_target, 1, nullptr), ARNM_ERROR_DECODE_FAILED);
+}
+
+TEST(JsonReader, AWalkRefusesAMemberOfAnotherJsonType) {
+  ArenaReader owner;
+  ASSERT_EQ(Parse(owner.reader(), "{\"n\":true,\"s\":5,\"b\":\"yes\"}"), ARNM_SUCCESS);
+  int64_t number = 0;
+  arnm_json_field wrong_number[] = {ARNM_JSON_FIELD_INT64("n", &number)};
+  EXPECT_EQ(Walk(owner, wrong_number, 1, nullptr), ARNM_ERROR_INVALID_ENUM_TYPE);
+
+  arnm_memory_block text{};
+  arnm_json_field wrong_string[] = {ARNM_JSON_FIELD_STRING("s", &text)};
+  EXPECT_EQ(Walk(owner, wrong_string, 1, nullptr), ARNM_ERROR_INVALID_ENUM_TYPE);
+
+  bool flag = false;
+  arnm_json_field wrong_bool[] = {ARNM_JSON_FIELD_BOOL("b", &flag)};
+  EXPECT_EQ(Walk(owner, wrong_bool, 1, nullptr), ARNM_ERROR_INVALID_ENUM_TYPE);
+}
+
+TEST(JsonReader, AWalkRefusesAnEntryThatCarriesNoType) {
+  // there is no placeholder tag: a field nobody set is a mistake and is named as one, rather
+  // than being stepped over where a caller believed it was being read
+  ArenaReader owner;
+  ASSERT_EQ(Parse(owner.reader(), "{\"a\":1}"), ARNM_SUCCESS);
+  int64_t a = 0;
+  arnm_json_field fields[] = {ARNM_JSON_FIELD_INT64("a", &a)};
+  fields[0].type = ARNM_JSON_FIELD_TYPE_NONE;
+  uint64_t found = 0;
+  EXPECT_EQ(Walk(owner, fields, 1, &found), ARNM_ERROR_INVALID_PARAM);
+  EXPECT_EQ(found, 0ull);
+  EXPECT_EQ(a, 0);
+}
+
+TEST(JsonReader, AWalkRefusesAMatchedEntryWithoutATarget) {
+  ArenaReader owner;
+  ASSERT_EQ(Parse(owner.reader(), "{\"a\":1}"), ARNM_SUCCESS);
+  int64_t a = 0;
+  arnm_json_field fields[] = {ARNM_JSON_FIELD_INT64("a", &a)};
+  fields[0].target = nullptr;
+  EXPECT_EQ(Walk(owner, fields, 1, nullptr), ARNM_ERROR_NULL_POINTER);
+}
+
+TEST(JsonReader, AWalkRefusesWhatIsNoObjectAndWhatIsNoTable) {
+  ArenaReader owner;
+  ASSERT_EQ(Parse(owner.reader(), "[1,2]"), ARNM_SUCCESS);
+  int64_t value = 0;
+  arnm_json_field fields[] = {ARNM_JSON_FIELD_INT64("a", &value)};
+  arnm_json_value *root = arnm_json_reader_root(owner.reader());
+  uint64_t found = 0xffull;
+
+  EXPECT_EQ(arnm_json_read_object(root, fields, 1, &found), ARNM_ERROR_INVALID_ENUM_TYPE);
+  EXPECT_EQ(found, 0ull) << "the mask is cleared before anything else is asked";
+  EXPECT_EQ(arnm_json_read_object(nullptr, fields, 1, nullptr), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_json_read_object(root, nullptr, 1, nullptr), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_json_read_object(root, fields, 0, nullptr), ARNM_ERROR_INVALID_PARAM);
+  EXPECT_EQ(
+      arnm_json_read_object(root, fields, ARNM_JSON_FIELDS_MAX + 1u, nullptr),
+      ARNM_ERROR_INVALID_PARAM
+  );
+}
+
+TEST(JsonReader, AWalkFillsTheWidestTableItAccepts) {
+  // the mask is a bit per entry, so the last entry of a full table is what says whether the
+  // shift that sets it still fits the word, and whether valid_mask survives a count of 64
+  ArenaReader owner;
+  std::string json = "{";
+  for (uint32_t index = 0; index < ARNM_JSON_FIELDS_MAX; ++index) {
+    if (index) { json += ","; }
+    json += "\"k" + std::to_string(index) + "\":" + std::to_string(index);
+  }
+  json += "}";
+  ASSERT_EQ(Parse(owner.reader(), json), ARNM_SUCCESS);
+
+  std::vector<std::string> keys;
+  std::vector<int64_t> values(ARNM_JSON_FIELDS_MAX, -1);
+  std::vector<arnm_json_field> fields;
+  keys.reserve(ARNM_JSON_FIELDS_MAX);
+  for (uint32_t index = 0; index < ARNM_JSON_FIELDS_MAX; ++index) {
+    keys.push_back("k" + std::to_string(index));
+    arnm_json_field field{};
+    field.key = keys.back().c_str();
+    field.key_length = static_cast<uint32_t>(keys.back().size());
+    field.type = ARNM_JSON_FIELD_TYPE_INT64;
+    field.target = &values[index];
+    fields.push_back(field);
+  }
+
+  uint64_t found = 0;
+  ASSERT_EQ(Walk(owner, fields.data(), ARNM_JSON_FIELDS_MAX, &found), ARNM_SUCCESS);
+  EXPECT_EQ(found, UINT64_MAX) << "every bit of the mask, the topmost one included";
+  for (uint32_t index = 0; index < ARNM_JSON_FIELDS_MAX; ++index) {
+    EXPECT_EQ(values[index], static_cast<int64_t>(index)) << "entry " << index;
+  }
+}
+
+TEST(JsonReader, AWalkComparesKeysOverTheirLengthAndNotToATerminator) {
+  // the key of an entry is compared over key_length, so a prefix of a longer key is not a match
+  // and a key carrying a NUL is compared whole
+  ArenaReader owner;
+  ASSERT_EQ(Parse(owner.reader(), "{\"abc\":1,\"ab\":2}"), ARNM_SUCCESS);
+  int64_t two = 0, three = 0;
+  arnm_json_field fields[] = {
+      ARNM_JSON_FIELD_INT64("ab", &two), ARNM_JSON_FIELD_INT64("abc", &three)
+  };
+  uint64_t found = 0;
+  ASSERT_EQ(Walk(owner, fields, 2, &found), ARNM_SUCCESS);
+  EXPECT_EQ(found, 0x3ull);
+  EXPECT_EQ(two, 2);
+  EXPECT_EQ(three, 1);
 }

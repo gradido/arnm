@@ -243,6 +243,7 @@ pub fn build(b: *std.Build) void {
 
     if (enable_tests) {
         const path = "tests/unit/src";
+        processBuildTarget(&context, .{ .link_googletest = true, .name = "test_bitmap", .srcs = &.{"test_bitmap.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_bucket_vector", .srcs = &.{"test_bucket_vector.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_converter", .srcs = &.{"test_converter.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_duration", .srcs = &.{"test_duration.cpp"} }, path);

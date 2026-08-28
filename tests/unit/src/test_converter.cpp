@@ -203,9 +203,9 @@ TEST(HexTest, WritesTheTerminatorAndNothingBeyondIt) {
   }
 }
 
-// promise: upper case digits decode to the same bytes, and an empty string is a conversion of
-// nothing rather than an error
-TEST(HexTest, AcceptsBothDigitCasesAndTheEmptyString) {
+// promise: upper case digits decode to the same bytes, and an empty string spells no bytes and
+// is refused rather than answered -- the same way arnm_binary_to_hex() refuses an empty block
+TEST(HexTest, AcceptsBothDigitCasesAndRefusesTheEmptyString) {
   uint8_t payload[8] = {0x00, 0x0f, 0xa5, 0xff, 0x10, 0xde, 0xad, 0xbe};
   arnm_memory_block block{payload, sizeof(payload)};
 
@@ -231,8 +231,54 @@ TEST(HexTest, AcceptsBothDigitCasesAndTheEmptyString) {
 
   uint8_t untouched[4];
   memset(untouched, 0x77, sizeof(untouched));
-  EXPECT_EQ(arnm_binary_from_hex(untouched, ""), ARNM_SUCCESS);
-  for (unsigned char byte : untouched) { EXPECT_EQ(byte, 0x77); }
+  EXPECT_EQ(arnm_binary_from_hex(untouched, ""), ARNM_ERROR_INVALID_PARAM);
+  for (unsigned char byte : untouched) {
+    EXPECT_EQ(byte, 0x77) << "a refusal writes nothing, not even the zeros a failed decode clears";
+  }
+  EXPECT_EQ(arnm_binary_from_hex_with_known_hex_size(untouched, "00", 0), ARNM_ERROR_INVALID_PARAM)
+      << "the length decides, not what the buffer happens to carry after it";
+}
+
+// promise: the sized call reads exactly the characters it is given, so a run that is not a C
+// string decodes and a NUL inside one is a character like any other rather than an early end
+TEST(HexTest, TheSizedCallReadsTheLengthItIsGivenAndNotToATerminator) {
+  uint8_t out[2] = {0, 0};
+
+  // a slice of a longer buffer, with no terminator anywhere near the end of it
+  const char embedded[] = "dead__beef";
+  ASSERT_EQ(arnm_binary_from_hex_with_known_hex_size(out, embedded, 4), ARNM_SUCCESS);
+  EXPECT_EQ(out[0], 0xdeu);
+  EXPECT_EQ(out[1], 0xadu);
+
+  // a NUL among the characters is not a hex digit, so the run is refused rather than cut short
+  const char with_nul[] = {'0', '1', '\0', '2', '3'};
+  uint8_t four[2] = {0x55, 0x55};
+  EXPECT_EQ(
+      arnm_binary_from_hex_with_known_hex_size(four, with_nul, sizeof(with_nul)),
+      ARNM_ERROR_INVALID_PARAM
+  ) << "five characters is an odd run, refused before a byte is written";
+  EXPECT_EQ(four[0], 0x55u);
+
+  uint8_t two[2] = {0x55, 0x55};
+  EXPECT_EQ(arnm_binary_from_hex_with_known_hex_size(two, with_nul, 4), ARNM_ERROR_DECODE_FAILED)
+      << "an even run holding a NUL is decodable in length and not in content";
+  EXPECT_EQ(two[0], 0x00u) << "a failed decode clears what it wrote";
+  EXPECT_EQ(two[1], 0x00u);
+
+  // the wrapper measures the same string and stops at the NUL, which is the one difference
+  uint8_t wrapped[1] = {0x55};
+  EXPECT_EQ(arnm_binary_from_hex(wrapped, with_nul), ARNM_SUCCESS);
+  EXPECT_EQ(wrapped[0], 0x01u);
+}
+
+// promise: neither entry point reaches into a NULL string, the wrapper included -- it measures
+// before it forwards, so the check has to sit in front of the measuring
+TEST(HexTest, BothDecodeEntryPointsRefuseANullString) {
+  uint8_t out[2] = {0, 0};
+  EXPECT_EQ(arnm_binary_from_hex(out, nullptr), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_binary_from_hex(nullptr, "0a"), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_binary_from_hex_with_known_hex_size(out, nullptr, 2), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_binary_from_hex_with_known_hex_size(nullptr, "0a", 2), ARNM_ERROR_NULL_POINTER);
 }
 
 // promise: anything that is not an even run of hex digits is refused, the output is cleared

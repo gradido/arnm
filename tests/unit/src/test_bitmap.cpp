@@ -1,0 +1,57 @@
+#include "arnm/bitmap.h"
+
+#include "memory_limit.h"
+#include <cstdint>
+#include <gtest/gtest.h>
+
+// What these check is the seam, not the arithmetic: the builtins underneath are the compiler's
+// to get right. What is this header's own is that both spellings answer the same index for the
+// same mask, whichever toolchain built them. The empty mask is deliberately not tested -- it is
+// documented as undefined and the builtins underneath leave it that way, so a test could only
+// pin down whatever this machine happens to do.
+
+// promise: the answer is the index of the lowest set bit, counted from the least significant
+// end, for every single bit mask a word can hold
+TEST(Bitmap, NamesThePositionOfTheOnlyBitThatIsSet) {
+  for (unsigned position = 0; position < 32u; ++position) {
+    EXPECT_EQ(arnm_ctz(1u << position), static_cast<int>(position)) << "at " << position;
+  }
+  for (unsigned position = 0; position < 64u; ++position) {
+    EXPECT_EQ(arnm_ctzll(1ull << position), static_cast<int>(position)) << "at " << position;
+  }
+}
+
+// promise: bits above the lowest one do not move the answer, which is what lets a caller clear
+// one bit at a time and walk a mask down to nothing
+TEST(Bitmap, IgnoresEverythingAboveTheLowestSetBit) {
+  EXPECT_EQ(arnm_ctz(0xfffffff0u), 4);
+  EXPECT_EQ(arnm_ctz(UINT32_MAX), 0);
+  EXPECT_EQ(arnm_ctz(1u << 31), 31);
+
+  EXPECT_EQ(arnm_ctzll(UINT64_MAX), 0);
+  EXPECT_EQ(arnm_ctzll(1ull << 63), 63);
+  EXPECT_EQ(arnm_ctzll(0xffffffff00000000ull), 32)
+      << "a mask whose whole low word is empty is where a 32 bit scan would answer wrongly";
+}
+
+// promise: walking a mask down by clearing its lowest bit visits every set bit once, in order.
+// This is what the callers of this header actually do with it.
+TEST(Bitmap, WalksAMaskDownOneBitAtATime) {
+  uint64_t mask = 0b1001000100ull;
+  const int expected[] = {2, 6, 9};
+  for (unsigned step = 0; step < 3u; ++step) {
+    ASSERT_NE(mask, 0ull) << "step " << step;
+    EXPECT_EQ(arnm_ctzll(mask), expected[step]) << "step " << step;
+    mask &= mask - 1u;
+  }
+  EXPECT_EQ(mask, 0ull) << "three bits, three steps";
+}
+
+// promise: the two widths agree wherever both can answer, so a caller that widens a mask does
+// not have to re-check what the answer means
+TEST(Bitmap, TheTwoWidthsAgreeOnEveryMaskBothCanHold) {
+  const uint32_t masks[] = {1u, 2u, 3u, 0x80u, 0xff00u, 0x12345678u, 0x80000000u, UINT32_MAX};
+  for (uint32_t mask : masks) {
+    EXPECT_EQ(arnm_ctz(mask), arnm_ctzll(mask)) << "mask 0x" << std::hex << mask;
+  }
+}

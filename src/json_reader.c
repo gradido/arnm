@@ -118,10 +118,7 @@ static uint32_t narrow_count(size_t count) {
 // ********** flags *******************
 
 /** @brief Every bit arnm/json_reader.h defines; anything else is refused. */
-#define JSON_READ_KNOWN_FLAGS                                                                      \
-  (ARNM_JSON_READ_STOP_WHEN_DONE | ARNM_JSON_READ_ALLOW_TRAILING_COMMAS |                          \
-   ARNM_JSON_READ_ALLOW_COMMENTS | ARNM_JSON_READ_ALLOW_INF_AND_NAN |                              \
-   ARNM_JSON_READ_ALLOW_INVALID_UNICODE | ARNM_JSON_READ_ALLOW_BOM)
+#define JSON_READ_KNOWN_FLAGS (ARNM_JSON_READ_STOP_WHEN_DONE)
 
 /**
  * @brief Translate our flags into yyjson's, refusing a bit we do not know.
@@ -136,19 +133,12 @@ static arnm_result translate_read_flags(arnm_json_read_flags flags, yyjson_read_
     return ARNM_ERROR_INVALID_PARAM;
   }
 
+  // Only one switch survives the build's YYJSON_DISABLE_NON_STANDARD, which takes the code
+  // behind every YYJSON_READ_ALLOW_* out rather than defaulting it off. Translating a bit into a
+  // parser that no longer reads it would be a flag accepted here and ignored there, so the
+  // public header carries no such bit to translate. See the flags section of arnm/json_reader.h.
   yyjson_read_flag translated = YYJSON_READ_NOFLAG;
   if (0 != (flags & ARNM_JSON_READ_STOP_WHEN_DONE)) { translated |= YYJSON_READ_STOP_WHEN_DONE; }
-  if (0 != (flags & ARNM_JSON_READ_ALLOW_TRAILING_COMMAS)) {
-    translated |= YYJSON_READ_ALLOW_TRAILING_COMMAS;
-  }
-  if (0 != (flags & ARNM_JSON_READ_ALLOW_COMMENTS)) { translated |= YYJSON_READ_ALLOW_COMMENTS; }
-  if (0 != (flags & ARNM_JSON_READ_ALLOW_INF_AND_NAN)) {
-    translated |= YYJSON_READ_ALLOW_INF_AND_NAN;
-  }
-  if (0 != (flags & ARNM_JSON_READ_ALLOW_INVALID_UNICODE)) {
-    translated |= YYJSON_READ_ALLOW_INVALID_UNICODE;
-  }
-  if (0 != (flags & ARNM_JSON_READ_ALLOW_BOM)) { translated |= YYJSON_READ_ALLOW_BOM; }
 
   *out = translated;
   return ARNM_SUCCESS;

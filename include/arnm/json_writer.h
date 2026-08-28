@@ -144,6 +144,34 @@ extern "C" {
 
 // ********** flags *******************
 
+/*
+ * Two switches are missing from this list, and their bits are missing with them.
+ *
+ * yyjson is compiled here with YYJSON_DISABLE_NON_STANDARD, which removes the code behind every
+ * one of its YYJSON_WRITE_ALLOW_* switches rather than merely defaulting them off. A flag for
+ * `Infinity`/`NaN` or for malformed UTF-8 would therefore be a bit this writer could accept,
+ * translate and hand to a serializer that no longer has anything to do with it -- accepted at
+ * init, and then quietly without effect at every write. Both were removed for that reason: a
+ * switch that cannot be honoured is worse than an absent one, because the caller has no way to
+ * find out.
+ *
+ * What that leaves is a writer that refuses a non-finite number outright, unless
+ * @ref ARNM_JSON_WRITE_INF_AND_NAN_AS_NULL is asked for -- `null` is standard JSON, so that one
+ * survives the build and is the only way to get such a value into the output at all.
+ *
+ * The other one moved the other way. The same build also sets YYJSON_DISABLE_UTF8_VALIDATION,
+ * so a string is never checked and malformed bytes are always written through. That is what the
+ * removed ALLOW_INVALID_UNICODE used to ask for, and it is now simply how this writer behaves;
+ * a caller that must emit well formed text has to check its own input.
+ *
+ * Bits 4 and 6 stay empty rather than being closed up. A caller that still passes one of the
+ * removed values is answered with ARNM_ERROR_INVALID_PARAM at init, which is what a renumbering
+ * would have turned into a different flag being silently applied instead.
+ *
+ * Turning either back on is a build change and not a call site one -- drop the macro in
+ * build.zig and CMakeLists.txt, and the flag that belongs to it can come back here.
+ */
+
 /** @brief Bit set of `ARNM_JSON_WRITE_*`, handed to @ref arnm_json_writer_init(). */
 typedef uint32_t arnm_json_write_flags;
 
@@ -157,12 +185,10 @@ typedef uint32_t arnm_json_write_flags;
 #define ARNM_JSON_WRITE_ESCAPE_UNICODE ((arnm_json_write_flags)(1u << 2))
 /** @brief Escape `/` as `\\/`, which some embedders of JSON in HTML ask for. */
 #define ARNM_JSON_WRITE_ESCAPE_SLASHES ((arnm_json_write_flags)(1u << 3))
-/** @brief Write `Infinity` and `NaN` rather than refusing them. Non-standard. */
-#define ARNM_JSON_WRITE_ALLOW_INF_AND_NAN ((arnm_json_write_flags)(1u << 4))
+/* bit 4 was ALLOW_INF_AND_NAN, which this build cannot honour; left empty on purpose */
 /** @brief Write a non-finite number as `null`. Standard JSON, lost information. */
 #define ARNM_JSON_WRITE_INF_AND_NAN_AS_NULL ((arnm_json_write_flags)(1u << 5))
-/** @brief Carry malformed UTF-8 through instead of refusing to write it. Non-standard. */
-#define ARNM_JSON_WRITE_ALLOW_INVALID_UNICODE ((arnm_json_write_flags)(1u << 6))
+/* bit 6 was ALLOW_INVALID_UNICODE, which this build does unconditionally; left empty on purpose */
 /** @brief End the text with a newline, ahead of the terminator. */
 #define ARNM_JSON_WRITE_NEWLINE_AT_END ((arnm_json_write_flags)(1u << 7))
 
@@ -425,9 +451,10 @@ void arnm_json_writer_add_uint64(arnm_json_writer *writer, const char *key, uint
  * @param[in,out] writer Writer to add to; may be NULL.
  * @param[in]     key    Field name, or NULL for an element of the current array.
  * @param[in]     value  What to write.
- * @note A non-finite value needs @ref ARNM_JSON_WRITE_ALLOW_INF_AND_NAN or
- *       @ref ARNM_JSON_WRITE_INF_AND_NAN_AS_NULL; without either, the write refuses the whole
- *       document rather than this one field.
+ * @note A non-finite value needs @ref ARNM_JSON_WRITE_INF_AND_NAN_AS_NULL, which writes it as
+ *       `null`; without it the write refuses the whole document rather than this one field.
+ *       This build has no way to spell `Infinity` or `NaN` in the output at all, so `null` or a
+ *       refusal are the only two answers -- see the flags section.
  * @note This is the one value @ref arnm_json_writer_size() cannot measure exactly beforehand.
  */
 void arnm_json_writer_add_double(arnm_json_writer *writer, const char *key, double value);
@@ -666,9 +693,10 @@ uint32_t arnm_json_writer_size(const arnm_json_writer *writer);
  * @retval ARNM_ERROR_NOT_INITIALIZED     @p writer was never initialized.
  * @retval ARNM_ERROR_INVALID_STATE       No document was ever begun.
  * @retval ARNM_ERROR_OUT_OF_MEMORY       @p allocator had nothing left.
- * @retval ARNM_ERROR_ENCODE_FAILED       A non-finite number without a flag that allows one, or
- *                                        malformed UTF-8 without
- *                                        @ref ARNM_JSON_WRITE_ALLOW_INVALID_UNICODE.
+ * @retval ARNM_ERROR_ENCODE_FAILED       A non-finite number without
+ *                                        @ref ARNM_JSON_WRITE_INF_AND_NAN_AS_NULL. Malformed
+ *                                        UTF-8 does not reach this: it is written through
+ *                                        unchecked, see the flags section.
  * @return Otherwise the error the writer was already carrying, unwritten.
  * @note The document is not consumed. Ask again for the same text, or begin the next payload.
  * @whisper Everything set down at once, in the order it was gathered
