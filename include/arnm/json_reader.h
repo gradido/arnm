@@ -957,6 +957,168 @@ arnm_result arnm_json_read_base64_block(
     arnm_memory_block *out, const arnm_json_value *value, arnm *memory
 );
 
+// ********** reading a whole object in one walk *******************
+
+/*
+ * A mapping that wants most of an object's members has a choice of two shapes, and only one of
+ * them is linear. Asking for members by name walks the member chain once per question; walking
+ * the object once and answering each key where it is met costs the chain a single time.
+ *
+ * The walk is easy to write by hand and easy to write differently every time: the length check
+ * before the comparison, the type check before the conversion, the record of what was actually
+ * there. @ref arnm_json_read_object() is that walk once, driven by a table the caller writes as
+ * a list of fields -- what a key is called, what it should become, and where it goes.
+ *
+ * What the table does not do is nest. A member that is itself an object or an array is asked for
+ * as @ref ARNM_JSON_FIELD_TYPE_VALUE, which hands the value over untouched; the caller walks
+ * that one with a table of its own. A shape described all the way down would have to be built
+ * before it could be used, and the two lines it saves are not worth what it costs to read.
+ *
+ * Nor does it decide what is required. Every field the walk filled is named in the mask it hands
+ * back, and the caller reads that mask once for the whole object -- which is where the answer
+ * belongs, because it is the same answer whichever way the object was read.
+ */
+
+/** @brief What a field of a walk should become, and therefore what its target points at. */
+// use bit magic for grouping all integer based types with 2 (0010) and all string based with 16 (0000 0100)
+#define ARNM_JSON_FIELD_TYPE_INTEGER_GROUP 2u
+#define ARNM_JSON_FIELD_TYPE_STRING_GROUP  16u
+typedef enum arnm_json_field_type {
+  ARNM_JSON_FIELD_TYPE_NONE = 0,     /**< An entry that is never matched. */
+  ARNM_JSON_FIELD_TYPE_BOOL = 1,         /**< `bool *` */
+  ARNM_JSON_FIELD_TYPE_INT64 = ARNM_JSON_FIELD_TYPE_INTEGER_GROUP,        /**< `int64_t *` */
+  ARNM_JSON_FIELD_TYPE_UINT64 = ARNM_JSON_FIELD_TYPE_INTEGER_GROUP + 1,       /**< `uint64_t *` */
+  ARNM_JSON_FIELD_TYPE_DOUBLE = 5,       /**< `double *` */
+  ARNM_JSON_FIELD_TYPE_INT32 = ARNM_JSON_FIELD_TYPE_INTEGER_GROUP + 4,        /**< `int32_t *` */
+  ARNM_JSON_FIELD_TYPE_UINT32 = ARNM_JSON_FIELD_TYPE_INTEGER_GROUP + 8,       /**< `uint32_t *` */
+  ARNM_JSON_FIELD_TYPE_STRING = ARNM_JSON_FIELD_TYPE_STRING_GROUP,       /**< `arnm_memory_block (will receive ptr to string and size) * */
+  ARNM_JSON_FIELD_TYPE_HEX = ARNM_JSON_FIELD_TYPE_STRING_GROUP + 1,          /**< `arnm_memory_block (will receive allocated ptr with hex and size) drawn from the walk's memory. * */
+  ARNM_JSON_FIELD_TYPE_HEX_FIXED = ARNM_JSON_FIELD_TYPE_STRING_GROUP + 4,    /**< `arnm_memory_block * (will be filled with hex, if size is identical) */
+  ARNM_JSON_FIELD_TYPE_UUID = ARNM_JSON_FIELD_TYPE_STRING_GROUP + 8,         /**< `arnm_memory_block * of @ref ARNM_UUID_BINARY_SIZE bytes. */
+  ARNM_JSON_FIELD_TYPE_VALUE = 32,        /**< `arnm_json_value **`, handed over untouched. */
+  ARNM_JSON_FIELD_TYPE_BASE64_BLOCK = ARNM_JSON_FIELD_TYPE_STRING_GROUP + 32, /**< `arnm_memory_block *`, (will receive allocated ptr with hex and size) drawn from the walk's memory. */
+} arnm_json_field_type;
+
+/**
+ * @brief One member of an object: what it is called, what it becomes, and where it goes.
+ *
+ * Written by the macros below rather than by hand -- they take the length from the key literal
+ * and check the target against the type, neither of which a hand written entry can be made to
+ * do.
+ */
+typedef struct arnm_json_field {
+  const char *key;     /**< The member name; not NUL terminated by requirement. */
+  uint32_t key_length; /**< Characters in @ref key. */
+  uint32_t type;       /**< An @ref arnm_json_field_type. */
+  void *target;        /**< Where the value goes; not NULL. */
+} arnm_json_field;
+
+/** @brief Length of a key literal, terminator excluded, worked out by the compiler. */
+#define ARNM_JSON_KEY_LENGTH(key) ((uint32_t)(sizeof(key) - 1u))
+
+/**
+ * @brief The target of a field entry, checked against the type the entry declares.
+ *
+ * A `void *` and a type tag beside it is a contract the compiler cannot see: a field that says
+ * INT64 over a pointer to an `int32_t` writes four bytes into whatever follows it, and says
+ * nothing. `_Generic` puts the check back -- a target of any other type matches no association
+ * and the translation unit does not compile.
+ *
+ * Where the compiler has no `_Generic` -- C99, or a C11 that does not carry it -- the check
+ * falls away and the cast is all that is left. The contract is the same either way; only the
+ * moment it is caught moves from the build to the run.
+ */
+#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+#define ARNM_JSON_TARGET(want, ptr) _Generic((ptr), want: (void *)(ptr))
+#else
+#define ARNM_JSON_TARGET(want, ptr) ((void *)(ptr))
+#endif
+
+/** @cond */
+#define ARNM_JSON_FIELD_MAKE(key, type_tag, want, ptr)                            \
+  {(key), ARNM_JSON_KEY_LENGTH(key), (type_tag), ARNM_JSON_TARGET(want, (ptr))}
+/** @endcond */
+
+/** @brief A `true`/`false` member into a `bool`. */
+#define ARNM_JSON_FIELD_BOOL(key, ptr)                                                             \
+  ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_BOOL, bool *, ptr)
+/** @brief A number into an `int64_t`. */
+#define ARNM_JSON_FIELD_INT64(key, ptr)                                                            \
+  ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_INT64, int64_t *, ptr)
+/** @brief A number into a `uint64_t`. */
+#define ARNM_JSON_FIELD_UINT64(key, ptr)                                                           \
+  ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_UINT64, uint64_t *, ptr)
+/** @brief A number into an `int32_t`, refusing what will not fit. */
+#define ARNM_JSON_FIELD_INT32(key, ptr)                                                            \
+  ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_INT32, int32_t *, ptr)
+/** @brief A number into a `uint32_t`, refusing what will not fit. */
+#define ARNM_JSON_FIELD_UINT32(key, ptr)                                                           \
+  ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_UINT32, uint32_t *, ptr)
+/** @brief A number into a `double`. */
+#define ARNM_JSON_FIELD_DOUBLE(key, ptr)                                                           \
+  ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_DOUBLE, double *, ptr)
+/** @brief A string borrowed from the document, with its length into @p length_ptr or NULL. */
+#define ARNM_JSON_FIELD_STRING(key, ptr)                                               \
+  ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_STRING, const char **, ptr)
+/** @brief A hex string of any length into @p bytes, which holds @p capacity. */
+#define ARNM_JSON_FIELD_HEX(key, ptr)                                          \
+  ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_HEX, uint8_t *, ptr)
+/** @brief A hex string into a field of exactly @p bytes bytes. */
+#define ARNM_JSON_FIELD_HEX_FIXED(key, ptr)                                                 \
+  ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_HEX_FIXED, uint8_t *, ptr)
+/** @brief A uuid into @ref ARNM_UUID_BINARY_SIZE bytes. */
+#define ARNM_JSON_FIELD_UUID(key, ptr)                                                             \
+  ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_UUID, uint8_t *, ptr)
+/** @brief A base64 string into a block drawn from the walk's allocator. */
+#define ARNM_JSON_FIELD_BASE64_BLOCK(key, ptr)                                                     \
+  ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_BASE64_BLOCK, arnm_memory_block *, ptr)
+/** @brief The member itself, for an object or an array the caller walks in turn. */
+#define ARNM_JSON_FIELD_VALUE(key, ptr)                                                            \
+  ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_VALUE, arnm_json_value **, ptr)
+
+/** @brief Fields one walk can carry, which is what a bit per field in a mask leaves room for. */
+#define ARNM_JSON_FIELDS_MAX 64u
+
+/**
+ * @brief Walk @p object once and read every member @p fields names into where it points.
+ *
+ * The member chain is walked a single time. Each key is compared against the table starting at
+ * the entry after the one that matched last, because a document written by the same mapping
+ * carries its members in the table's order and that guess is then right every time; a key that
+ * is somewhere else costs the rest of the table, and one that is nowhere in it is skipped.
+ * Because of optimizations, by multiple same keys, the first one will take, deviating from most other json implementations.
+ *
+ * A member the table does not name is not an error -- a document is allowed to carry more than
+ * this reader wants. A member named twice is read twice, so the last one written is the one
+ * kept, which is what a second assignment to the same target does and what JSON leaves open.
+ *
+ * @param[in]     object    Object to walk; not NULL.
+ * @param[in]     fields    The table; not NULL. Targets are written, never read.
+ * @param[in]     count     Entries in @p fields, at most @ref ARNM_JSON_FIELDS_MAX.
+ * @param[out]    out_found Bit @c i is set where entry @c i was read; may be NULL. Written even
+ *                          when the walk is refused, so a caller can see how far it came.
+ * @param[in,out] memory    Where @ref ARNM_JSON_FIELD_TYPE_BASE64_BLOCK and ARNM_JSON_FIELD_TYPE_HEX draws from; NULL for the
+ *                          host allocator, and unused where the table has no such field.
+ * @retval ARNM_SUCCESS                 Walked; @p out_found says what was there.
+ * @retval ARNM_ERROR_NULL_POINTER      @p object or @p fields is NULL, or an entry's target is.
+ * @retval ARNM_ERROR_INVALID_PARAM     @p count is 0 or past @ref ARNM_JSON_FIELDS_MAX, or an
+ *                                      entry carries no type this reader knows.
+ * @retval ARNM_ERROR_INVALID_ENUM_TYPE @p object is no object, or a member is of another JSON
+ *                                      type than its entry names.
+ * @return Otherwise what the read of the offending member answers -- the walk stops at the
+ *         first member it cannot read, and the targets before it keep what they were given.
+ * @note Which members are required is not asked here. The mask says what was there and the
+ *       caller decides once, for the whole object, what that means.
+ * @whisper Every name asked once what it is, in the order it expects to meet them
+ */
+arnm_result arnm_json_read_object(
+    arnm_json_value *object,
+    arnm_json_field *fields,
+    uint32_t count,
+    uint64_t *out_found,
+    arnm *memory
+);
+
 // ********** what a value is *******************
 
 /**
