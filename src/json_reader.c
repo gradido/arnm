@@ -23,13 +23,16 @@
 /**
  * @brief The layout behind the opaque @ref arnm_json_reader.
  *
+ * Six fields, and every one of them is about the document rather than about a place inside it.
+ * There is no cursor here because the public shape has none: a caller holds its own
+ * @ref arnm_json_value pointers and the reader never has to know which one it is looking at.
+ *
  * @c alc carries a pointer to @c alc_context as its context, which is why a reader may not be
  * moved once it has been initialized: the document keeps its own copy of @c alc and calls back
  * through it when it is released.
  *
- * @c walk is the memory of the last array walked, and the reason a loop over an array costs one
- * step per element instead of one walk per element. It is a hint and nothing more: it is
- * checked against @c walk_array before it is trusted, and dropped whenever the document goes.
+ * @c error_message is the parser's own static text and is never copied. It doubles as the flag
+ * @ref arnm_json_reader_status() reads, which is why every parse clears it before it starts.
  */
 typedef struct json_reader_state {
   json_alc_context alc_context; /**< Where documents come from, and what an arena kept back. */
@@ -83,9 +86,13 @@ static uint32_t narrow_count(size_t count) {
   return (uint32_t)count;
 }
 
-// ********** flags *******************
-
-/** @brief What a refusal from yyjson means in arnm's vocabulary. */
+/**
+ * @brief What a refusal from yyjson means in arnm's vocabulary.
+ *
+ * Translated rather than passed through, so yyjson's numbering stays its own to change. The
+ * two it distinguishes are the ones a caller can act on -- an allocator that ran out, and a
+ * call it made wrongly; everything else is the document being wrong, which is one answer.
+ */
 static arnm_result translate_read_error(uint32_t code) {
   if (YYJSON_READ_ERROR_MEMORY_ALLOCATION == code) { return ARNM_ERROR_OUT_OF_MEMORY; }
   if (YYJSON_READ_ERROR_INVALID_PARAMETER == code) { return ARNM_ERROR_INVALID_PARAM; }
@@ -108,8 +115,9 @@ static arnm_result dispose_document(json_reader_state *state) {
 arnm_result arnm_json_reader_init(arnm_json_reader *reader, arnm *allocator) {
   if (!reader) { return ARNM_ERROR_NULL_POINTER; }
 
-  // Translated before a byte is written, so a flag nobody defined leaves the storage as it was
-  // found rather than half prepared.
+  // Every field is written and none is read, so uninitialized storage is a valid input. The
+  // magic goes last, so a reader that was interrupted mid preparation still reads as one that
+  // was never prepared at all.
   json_reader_state *state = (json_reader_state *)(void *)reader;
   state->alc_context.allocator = allocator;
   state->alc_context.arena_kept_bytes = false;
@@ -161,6 +169,20 @@ arnm_result arnm_json_reader_destroy(arnm_json_reader *reader, arnm *allocator) 
   return given_back;
 }
 
+/**
+ * @brief Hand the bytes to yyjson and keep whatever comes back.
+ *
+ * The one place a document is born. Both public parses meet here having already checked what
+ * they can check on their own, so what is left is the parser's verdict and where to put it.
+ *
+ * @param[in,out] state        Reader state with no document standing.
+ * @param[in,out] bytes        What to read; written through only under YYJSON_READ_INSITU.
+ * @param[in]     length       Bytes in @p bytes.
+ * @param[in]     flags        yyjson's own spelling, assembled by the caller.
+ * @param[out]    doc_root_out Receives the root; may be NULL. Written only on success.
+ * @return ARNM_SUCCESS, or what translate_read_error() makes of the refusal. On a refusal the
+ *         message and position are kept and no document is held.
+ */
 static arnm_result run_parse(
     json_reader_state *state,
     char *bytes,
@@ -181,6 +203,19 @@ static arnm_result run_parse(
   return ARNM_SUCCESS;
 }
 
+/**
+ * @brief Clear the way for a parse, and refuse a length no parse could carry.
+ *
+ * The previous document goes first, whether the parse that follows holds or not. That is what
+ * keeps a refused parse from leaving the reader answering for the document before it -- a state
+ * nobody checks for and everybody would misread.
+ *
+ * @param[in,out] state  Reader state; the document it held is released here.
+ * @param[in]     length Bytes the caller means to hand over.
+ * @retval ARNM_SUCCESS                   Clear; the parse may run.
+ * @retval ARNM_ERROR_INVALID_PARAM       @p length is 0.
+ * @retval ARNM_ERROR_ARITHMETIC_OVERFLOW @p length is past ARNM_JSON_READER_MAX_INPUT_SIZE.
+ */
 static arnm_result begin_parse(json_reader_state *state, uint32_t length) {
   (void)dispose_document(state);
   state->error_message = NULL;
@@ -273,8 +308,24 @@ uint32_t arnm_json_reader_bytes_read(const arnm_json_reader *reader) {
   return narrow_count(yyjson_doc_get_read_size(state->doc));
 }
 
+// ********** reading a shape in one walk *******************
 
-/** @brief Read one member into the target its entry names, once the key has matched. */
+/**
+ * @brief Read one member into the target its entry names, once the key has matched.
+ *
+ * Sorted into a family by two range tests before anything is converted, which is what the
+ * enum's order exists for: the four integer types are one contiguous run and the three string
+ * types another, so a tag lands in its branch without a table lookup. Everything the two runs
+ * do not cover falls through to the switch at the end.
+ *
+ * The integer branch reads the number once, in both signednesses where both fit, and lets each
+ * target say what it cannot carry -- a negative into an unsigned, a magnitude past a narrow
+ * width. Nothing is written where the answer is a refusal.
+ *
+ * @param[in]  field Entry whose key matched; its target is not NULL.
+ * @param[in]  value The member; not NULL.
+ * @return ARNM_SUCCESS, or the refusal named at arnm_json_read_object().
+ */
 // hand written by human, for highly optimized hot-path
 static arnm_result read_field(const arnm_json_field *field, yyjson_val *value) {
   if (!field || !field->target || !value) return ARNM_ERROR_NULL_POINTER;

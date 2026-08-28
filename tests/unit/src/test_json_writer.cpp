@@ -1093,24 +1093,42 @@ TEST(JsonWriter, WhatWasWrittenReadsBackAsWhatWentIn) {
   arnm reading{};
   ASSERT_EQ(arnm_init_arena(&reading, kArenaCapacity), ARNM_SUCCESS);
   arnm_json_reader reader{};
-  ASSERT_EQ(arnm_json_reader_init(&reader, &reading, ARNM_JSON_READ_DEFAULT), ARNM_SUCCESS);
+  ASSERT_EQ(arnm_json_reader_init(&reader, &reading), ARNM_SUCCESS);
+  arnm_json_value *root = nullptr;
   ASSERT_EQ(
-      arnm_json_reader_parse(&reader, reinterpret_cast<const char *>(block.data), length),
+      arnm_json_reader_parse(
+          &reader, reinterpret_cast<const char *>(block.data), length, false, &root
+      ),
       ARNM_SUCCESS
   );
+  ASSERT_NE(root, nullptr);
 
-  EXPECT_STREQ(arnm_json_reader_get_string(&reader, "name"), "arnm");
-  EXPECT_EQ(arnm_json_reader_get_uint64(&reader, "port"), 8443u);
-  EXPECT_EQ(arnm_json_reader_get_int64(&reader, "offset"), -7);
-  EXPECT_TRUE(arnm_json_reader_get_bool(&reader, "debug"));
-  EXPECT_DOUBLE_EQ(arnm_json_reader_get_double(&reader, "ratio"), 0.25);
+  arnm_memory_block name{};
+  uint64_t port = 0;
+  int64_t offset = 0;
+  bool debug = false;
+  double ratio = 0.0;
+  arnm_json_value *tags = nullptr;
+  arnm_json_field fields[] = {
+      ARNM_JSON_FIELD_STRING("name", &name),    ARNM_JSON_FIELD_UINT64("port", &port),
+      ARNM_JSON_FIELD_INT64("offset", &offset), ARNM_JSON_FIELD_BOOL("debug", &debug),
+      ARNM_JSON_FIELD_DOUBLE("ratio", &ratio),  ARNM_JSON_FIELD_VALUE("tags", &tags)
+  };
+  uint64_t found = 0;
+  ASSERT_EQ(arnm_json_read_object(root, fields, 6, &found), ARNM_SUCCESS);
+  EXPECT_EQ(found, 0x3full) << "every member the writer put there came back";
 
-  arnm_json_value *tags = arnm_json_reader_enter(&reader, "tags");
-  ASSERT_EQ(arnm_json_reader_count(&reader), 2u);
-  arnm_json_value *first = arnm_json_reader_enter_at(&reader, 0);
-  EXPECT_STREQ(arnm_json_reader_get_string(&reader, nullptr), "one");
-  arnm_json_reader_leave(&reader, first);
-  arnm_json_reader_leave(&reader, tags);
+  EXPECT_EQ(std::string(reinterpret_cast<const char *>(name.data), name.size), "arnm");
+  EXPECT_EQ(port, 8443u);
+  EXPECT_EQ(offset, -7);
+  EXPECT_TRUE(debug);
+  EXPECT_DOUBLE_EQ(ratio, 0.25);
+
+  ASSERT_NE(tags, nullptr);
+  arnm_json_value *tag[2] = {nullptr, nullptr};
+  uint32_t tag_count = 0;
+  ASSERT_EQ(arnm_json_read_array(tags, tag, 2, &tag_count), ARNM_SUCCESS);
+  EXPECT_EQ(tag_count, 2u);
   EXPECT_EQ(arnm_json_reader_status(&reader), ARNM_SUCCESS);
 
   arnm_json_reader_release(&reader);
