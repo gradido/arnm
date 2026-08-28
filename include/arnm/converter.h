@@ -6,6 +6,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -157,6 +158,7 @@ arnm_result arnm_binary_to_hex(char *result_buffer, const arnm_memory_block *dat
  *                           belongs to the caller and is left alone.
  * @param[in]  hex           Null terminated string of an even number of hex digits. Empty is
  *                           allowed and writes nothing.
+ * @param[in]  hex_size      length of hex string
  * @retval ARNM_SUCCESS             strlen(hex) / 2 bytes written.
  * @retval ARNM_ERROR_NULL_POINTER  @p result_buffer or @p hex is NULL.
  * @retval ARNM_ERROR_INVALID_PARAM @p hex has an odd number of characters. Refused before
@@ -168,7 +170,11 @@ arnm_result arnm_binary_to_hex(char *result_buffer, const arnm_memory_block *dat
  * @note Not constant time; see the warning on this group.
  * @whisper Two characters settle back into the one byte they came from
  */
-arnm_result arnm_binary_from_hex(uint8_t *result_buffer, const char *hex);
+arnm_result arnm_binary_from_hex_with_known_hex_size(uint8_t *result_buffer, const char *hex, size_t hex_size);
+
+static inline arnm_result arnm_binary_from_hex(uint8_t *result_buffer, const char *hex) {
+  return arnm_binary_from_hex_with_known_hex_size(result_buffer, hex, strlen(hex));
+}
 
 /**
  * @brief Characters the base64 of @p size bytes takes, terminator not counted.

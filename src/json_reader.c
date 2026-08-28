@@ -1083,6 +1083,7 @@ arnm_result arnm_json_read_base64_block(
 }
 
 /** @brief Read one member into the target its entry names, once the key has matched. */
+// hand written by human, for highly optimized hot-path
 static arnm_result read_field(
     const arnm_json_field *field, yyjson_val *value, arnm *memory
 ) {
@@ -1134,14 +1135,13 @@ static arnm_result read_field(
       return ARNM_SUCCESS;
     }
     else if (ARNM_JSON_FIELD_TYPE_HEX_FIXED == type) {
-      if ((uint64_t)out->size * 2u != (uint64_t)str_size|| strlen(str) != str_size) return ARNM_ERROR_DECODE_FAILED;
-      return (ARNM_SUCCESS == arnm_binary_from_hex(out->data, str)) ? ARNM_SUCCESS : ARNM_ERROR_DECODE_FAILED;
+      if ((uint64_t)out->size * 2u != (uint64_t)str_size) return ARNM_ERROR_DECODE_FAILED;
+      return (ARNM_SUCCESS == arnm_binary_from_hex_with_known_hex_size(out->data, str, str_size)) ? ARNM_SUCCESS : ARNM_ERROR_DECODE_FAILED;
     }
     else if (ARNM_JSON_FIELD_TYPE_HEX == type) {
-      if (strlen(str) != str_size) return ARNM_ERROR_DECODE_FAILED;
       arnm_result result = arnm_memory_block_alloc(out, str_size / 2, memory);
       if (ARNM_SUCCESS != result) { return result; }
-      return (ARNM_SUCCESS == arnm_binary_from_hex(out->data, str)) ? ARNM_SUCCESS : ARNM_ERROR_DECODE_FAILED;
+      return (ARNM_SUCCESS == arnm_binary_from_hex_with_known_hex_size(out->data, str, str_size)) ? ARNM_SUCCESS : ARNM_ERROR_DECODE_FAILED;
     } else if (ARNM_JSON_FIELD_TYPE_UUID == type) {
       if (ARNM_UUID_STRING_LENGTH != str_size || out->size != ARNM_UUID_BINARY_SIZE) return ARNM_ERROR_DECODE_FAILED;
       return (ARNM_SUCCESS == arnm_uuid_from_string(out->data, str)) ? ARNM_SUCCESS
@@ -1181,7 +1181,7 @@ static arnm_result read_field(
     return ARNM_ERROR_INVALID_PARAM;
   }
 }
-
+// hand written by human, for highly optimized hot-path
 arnm_result arnm_json_read_object(
     arnm_json_value *object,
     arnm_json_field *fields,
