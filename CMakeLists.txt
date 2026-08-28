@@ -107,6 +107,12 @@ set(YYJSON_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/yyjson/src/yyjson.c)
 
 add_library(${PROJECT_NAME} STATIC ${ARNM_SRC} ${ARNM_HEADERS} ${YYJSON_SOURCE})
 
+# disable features we don't use
+add_compile_definitions(YYJSON_DISABLE_INCR_READER=1)
+add_compile_definitions(YYJSON_DISABLE_UTILS=1)
+add_compile_definitions(YYJSON_DISABLE_NON_STANDARD=1)
+add_compile_definitions(YYJSON_DISABLE_UTF8_VALIDATION=1)
+
 target_include_directories(${PROJECT_NAME} PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>

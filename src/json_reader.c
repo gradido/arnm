@@ -5,12 +5,11 @@
 #include "arnm/memory_block.h"
 
 #include "arnm/result.h"
+// includes also yyjson
 #include "json_memory.h"
-#include "yyjson.h"
 
 #include <stdint.h>
 #include <string.h>
-
 
 /*
  * The whole of yyjson lives behind this file. Nothing above -- not a type, not a constant, not
@@ -1085,20 +1084,32 @@ arnm_result arnm_json_read_base64_block(
 /** @brief Read one member into the target its entry names, once the key has matched. */
 // hand written by human, for highly optimized hot-path
 static arnm_result read_field(
-    const arnm_json_field *field, yyjson_val *value, arnm *memory
+    const arnm_json_field *field, yyjson_val *value
 ) {
-  if (!field || !field->type || !field->target || !value) { return ARNM_ERROR_NULL_POINTER; }
+  if (!field || !field->target || !value) return ARNM_ERROR_NULL_POINTER;
   arnm_json_field_type type = (arnm_json_field_type)field->type;
+  if (ARNM_JSON_FIELD_TYPE_NONE == type) return ARNM_ERROR_INVALID_PARAM;
+
   // for all four integer types
-  if ((type & ARNM_JSON_FIELD_TYPE_INTEGER_GROUP) == ARNM_JSON_FIELD_TYPE_INTEGER_GROUP) {
+  if ((type <= ARNM_JSON_FIELD_TYPE_INT32)) {
     uint64_t integer_value = 0;
+    int64_t s_integer_value = 0;
     bool negative = false;
+    bool signed_overflow = false;
     if (unsafe_yyjson_is_uint((void*)value)) {
       integer_value = unsafe_yyjson_get_uint((void*)value);
+      if (integer_value <= INT64_MAX) {
+        s_integer_value = (int64_t)integer_value;
+      } else {
+        signed_overflow = true;
+      }
     } else if (yyjson_is_sint((void*)value)) {
-      int64_t s_integer_value = unsafe_yyjson_get_sint((void*)value);
-      if (s_integer_value < 0) { negative = true; }
-      integer_value = (uint64_t)s_integer_value;
+      s_integer_value = unsafe_yyjson_get_sint((void*)value);
+      if (s_integer_value >= 0) {
+        integer_value = (uint64_t)s_integer_value;
+      } else {
+        negative = true;
+      }
     } else {
       return ARNM_ERROR_INVALID_ENUM_TYPE;
     }
@@ -1113,18 +1124,20 @@ static arnm_result read_field(
           *(uint32_t*)field->target = (uint32_t)integer_value;
           return ARNM_SUCCESS;
       case ARNM_JSON_FIELD_TYPE_INT64:
-        *(int64_t*)field->target = (int64_t)integer_value;
+        if (signed_overflow) return ARNM_ERROR_ARITHMETIC_OVERFLOW;
+        *(int64_t*)field->target = s_integer_value;
         return ARNM_SUCCESS;
       case ARNM_JSON_FIELD_TYPE_INT32:
-        if ((int64_t)integer_value < INT32_MIN || integer_value > (uint64_t)INT32_MAX)
+        if (signed_overflow) return ARNM_ERROR_ARITHMETIC_OVERFLOW;
+        if (s_integer_value < (int64_t)INT32_MIN || s_integer_value > (int64_t)INT32_MAX)
           return ARNM_ERROR_ARITHMETIC_OVERFLOW;
-        *(int32_t*)field->target = (int32_t)integer_value;
+        *(int32_t*)field->target = (int32_t)s_integer_value;
         return ARNM_SUCCESS;
       default:
         return ARNM_ERROR_INVALID_STATE;
     }
-    // for all string types (uuid, hex, hex_fixed and base64)
-  } else if ((type & ARNM_JSON_FIELD_TYPE_STRING_GROUP) == ARNM_JSON_FIELD_TYPE_STRING_GROUP) {
+    // for all string types (string, hex_fixed and uuid)
+  } else if ((type <= ARNM_JSON_FIELD_TYPE_UUID)) {
     if (!unsafe_yyjson_is_str((void*)value)) return ARNM_ERROR_INVALID_ENUM_TYPE;
     const char* str = unsafe_yyjson_get_str((void*)value);
     uint32_t str_size = narrow_count(unsafe_yyjson_get_len((void*)value));
@@ -1137,31 +1150,10 @@ static arnm_result read_field(
     else if (ARNM_JSON_FIELD_TYPE_HEX_FIXED == type) {
       if ((uint64_t)out->size * 2u != (uint64_t)str_size) return ARNM_ERROR_DECODE_FAILED;
       return (ARNM_SUCCESS == arnm_binary_from_hex_with_known_hex_size(out->data, str, str_size)) ? ARNM_SUCCESS : ARNM_ERROR_DECODE_FAILED;
-    }
-    else if (ARNM_JSON_FIELD_TYPE_HEX == type) {
-      arnm_result result = arnm_memory_block_alloc(out, str_size / 2, memory);
-      if (ARNM_SUCCESS != result) { return result; }
-      return (ARNM_SUCCESS == arnm_binary_from_hex_with_known_hex_size(out->data, str, str_size)) ? ARNM_SUCCESS : ARNM_ERROR_DECODE_FAILED;
     } else if (ARNM_JSON_FIELD_TYPE_UUID == type) {
       if (ARNM_UUID_STRING_LENGTH != str_size || out->size != ARNM_UUID_BINARY_SIZE) return ARNM_ERROR_DECODE_FAILED;
       return (ARNM_SUCCESS == arnm_uuid_from_string(out->data, str)) ? ARNM_SUCCESS
                                                                 : ARNM_ERROR_DECODE_FAILED;
-    } else if (ARNM_JSON_FIELD_TYPE_BASE64_BLOCK == type) {
-      uint32_t size = 0;
-      arnm_result result = arnm_base64_binary_size(str, str_size, &size);
-      if (ARNM_SUCCESS != result) { return result; }
-      if (0 == size) { return ARNM_SUCCESS; }
-
-      result = arnm_memory_block_alloc(out, size, memory);
-      if (ARNM_SUCCESS != result) { return result; }
-
-      uint32_t written = 0;
-      if (ARNM_SUCCESS != arnm_binary_from_base64(out->data, &written, str)) {
-        return ARNM_ERROR_DECODE_FAILED;
-      }
-      return (written == size) ? ARNM_SUCCESS : ARNM_ERROR_DECODE_FAILED;
-    } else {
-      return ARNM_ERROR_INVALID_ENUM_TYPE;
     }
   }
   switch (type) {
@@ -1186,8 +1178,7 @@ arnm_result arnm_json_read_object(
     arnm_json_value *object,
     arnm_json_field *fields,
     uint32_t count,
-    uint64_t *out_found,
-    arnm *memory
+    uint64_t *out_found
 ) {
   if (out_found) { *out_found = 0; }
   if (!object || !fields) { return ARNM_ERROR_NULL_POINTER; }
@@ -1214,7 +1205,7 @@ arnm_result arnm_json_read_object(
       const arnm_json_field *field = &fields[i];
 
       if (key_size == field->key_length && 0 == memcmp(key_string, field->key, key_size)) {
-        const arnm_result result = read_field(field, yyjson_obj_iter_get_val(key), memory);
+        const arnm_result result = read_field(field, yyjson_obj_iter_get_val(key));
         if (ARNM_SUCCESS != result) {
           if (out_found) { *out_found = found; }
           return result;

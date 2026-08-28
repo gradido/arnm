@@ -980,23 +980,18 @@ arnm_result arnm_json_read_base64_block(
  */
 
 /** @brief What a field of a walk should become, and therefore what its target points at. */
-// use bit magic for grouping all integer based types with 2 (0010) and all string based with 16 (0000 0100)
-#define ARNM_JSON_FIELD_TYPE_INTEGER_GROUP 2u
-#define ARNM_JSON_FIELD_TYPE_STRING_GROUP  16u
 typedef enum arnm_json_field_type {
-  ARNM_JSON_FIELD_TYPE_NONE = 0,     /**< An entry that is never matched. */
-  ARNM_JSON_FIELD_TYPE_BOOL = 1,         /**< `bool *` */
-  ARNM_JSON_FIELD_TYPE_INT64 = ARNM_JSON_FIELD_TYPE_INTEGER_GROUP,        /**< `int64_t *` */
-  ARNM_JSON_FIELD_TYPE_UINT64 = ARNM_JSON_FIELD_TYPE_INTEGER_GROUP + 1,       /**< `uint64_t *` */
-  ARNM_JSON_FIELD_TYPE_DOUBLE = 5,       /**< `double *` */
-  ARNM_JSON_FIELD_TYPE_INT32 = ARNM_JSON_FIELD_TYPE_INTEGER_GROUP + 4,        /**< `int32_t *` */
-  ARNM_JSON_FIELD_TYPE_UINT32 = ARNM_JSON_FIELD_TYPE_INTEGER_GROUP + 8,       /**< `uint32_t *` */
-  ARNM_JSON_FIELD_TYPE_STRING = ARNM_JSON_FIELD_TYPE_STRING_GROUP,       /**< `arnm_memory_block (will receive ptr to string and size) * */
-  ARNM_JSON_FIELD_TYPE_HEX = ARNM_JSON_FIELD_TYPE_STRING_GROUP + 1,          /**< `arnm_memory_block (will receive allocated ptr with hex and size) drawn from the walk's memory. * */
-  ARNM_JSON_FIELD_TYPE_HEX_FIXED = ARNM_JSON_FIELD_TYPE_STRING_GROUP + 4,    /**< `arnm_memory_block * (will be filled with hex, if size is identical) */
-  ARNM_JSON_FIELD_TYPE_UUID = ARNM_JSON_FIELD_TYPE_STRING_GROUP + 8,         /**< `arnm_memory_block * of @ref ARNM_UUID_BINARY_SIZE bytes. */
-  ARNM_JSON_FIELD_TYPE_VALUE = 32,        /**< `arnm_json_value **`, handed over untouched. */
-  ARNM_JSON_FIELD_TYPE_BASE64_BLOCK = ARNM_JSON_FIELD_TYPE_STRING_GROUP + 32, /**< `arnm_memory_block *`, (will receive allocated ptr with hex and size) drawn from the walk's memory. */
+  ARNM_JSON_FIELD_TYPE_NONE = 0,     /**< Produce Error, make sure the caller has set all types explicit. */
+  ARNM_JSON_FIELD_TYPE_UINT64,       /**< `uint64_t *` */
+  ARNM_JSON_FIELD_TYPE_INT64,        /**< `int64_t *` */
+  ARNM_JSON_FIELD_TYPE_UINT32,       /**< `uint32_t *` */
+  ARNM_JSON_FIELD_TYPE_INT32,        /**< `int32_t *`, last integer type, used for prefilter */
+  ARNM_JSON_FIELD_TYPE_STRING,       /**< `arnm_memory_block (will receive ptr to string and size) * */
+  ARNM_JSON_FIELD_TYPE_HEX_FIXED,    /**< `arnm_memory_block * (will be filled with hex, if size is identical) */
+  ARNM_JSON_FIELD_TYPE_UUID,         /**< `arnm_memory_block * of @ref ARNM_UUID_BINARY_SIZE bytes. last string type, used for prefilter */
+  ARNM_JSON_FIELD_TYPE_DOUBLE,           /**< `double *` */
+  ARNM_JSON_FIELD_TYPE_BOOL,         /**< `bool *` */
+  ARNM_JSON_FIELD_TYPE_VALUE        /**< `arnm_json_value **`, handed over untouched. */
 } arnm_json_field_type;
 
 /**
@@ -1039,40 +1034,34 @@ typedef struct arnm_json_field {
   {(key), ARNM_JSON_KEY_LENGTH(key), (type_tag), ARNM_JSON_TARGET(want, (ptr))}
 /** @endcond */
 
-/** @brief A `true`/`false` member into a `bool`. */
+
 #define ARNM_JSON_FIELD_BOOL(key, ptr)                                                             \
   ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_BOOL, bool *, ptr)
-/** @brief A number into an `int64_t`. */
+
 #define ARNM_JSON_FIELD_INT64(key, ptr)                                                            \
   ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_INT64, int64_t *, ptr)
-/** @brief A number into a `uint64_t`. */
+
 #define ARNM_JSON_FIELD_UINT64(key, ptr)                                                           \
   ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_UINT64, uint64_t *, ptr)
-/** @brief A number into an `int32_t`, refusing what will not fit. */
+
 #define ARNM_JSON_FIELD_INT32(key, ptr)                                                            \
   ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_INT32, int32_t *, ptr)
-/** @brief A number into a `uint32_t`, refusing what will not fit. */
+
 #define ARNM_JSON_FIELD_UINT32(key, ptr)                                                           \
   ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_UINT32, uint32_t *, ptr)
-/** @brief A number into a `double`. */
+
 #define ARNM_JSON_FIELD_DOUBLE(key, ptr)                                                           \
   ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_DOUBLE, double *, ptr)
-/** @brief A string borrowed from the document, with its length into @p length_ptr or NULL. */
+
 #define ARNM_JSON_FIELD_STRING(key, ptr)                                               \
-  ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_STRING, const char **, ptr)
-/** @brief A hex string of any length into @p bytes, which holds @p capacity. */
-#define ARNM_JSON_FIELD_HEX(key, ptr)                                          \
-  ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_HEX, uint8_t *, ptr)
-/** @brief A hex string into a field of exactly @p bytes bytes. */
+  ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_STRING, arnm_memory_block *, ptr)
+
 #define ARNM_JSON_FIELD_HEX_FIXED(key, ptr)                                                 \
-  ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_HEX_FIXED, uint8_t *, ptr)
-/** @brief A uuid into @ref ARNM_UUID_BINARY_SIZE bytes. */
+  ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_HEX_FIXED, arnm_memory_block *, ptr)
+
 #define ARNM_JSON_FIELD_UUID(key, ptr)                                                             \
-  ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_UUID, uint8_t *, ptr)
-/** @brief A base64 string into a block drawn from the walk's allocator. */
-#define ARNM_JSON_FIELD_BASE64_BLOCK(key, ptr)                                                     \
-  ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_BASE64_BLOCK, arnm_memory_block *, ptr)
-/** @brief The member itself, for an object or an array the caller walks in turn. */
+  ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_UUID, arnm_memory_block *, ptr)
+
 #define ARNM_JSON_FIELD_VALUE(key, ptr)                                                            \
   ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_VALUE, arnm_json_value **, ptr)
 
@@ -1082,23 +1071,17 @@ typedef struct arnm_json_field {
 /**
  * @brief Walk @p object once and read every member @p fields names into where it points.
  *
- * The member chain is walked a single time. Each key is compared against the table starting at
- * the entry after the one that matched last, because a document written by the same mapping
- * carries its members in the table's order and that guess is then right every time; a key that
- * is somewhere else costs the rest of the table, and one that is nowhere in it is skipped.
+ * The member chain is walked a single time.
  * Because of optimizations, by multiple same keys, the first one will take, deviating from most other json implementations.
  *
  * A member the table does not name is not an error -- a document is allowed to carry more than
- * this reader wants. A member named twice is read twice, so the last one written is the one
- * kept, which is what a second assignment to the same target does and what JSON leaves open.
+ * this reader wants. A member named twice is read only first time.
  *
  * @param[in]     object    Object to walk; not NULL.
  * @param[in]     fields    The table; not NULL. Targets are written, never read.
  * @param[in]     count     Entries in @p fields, at most @ref ARNM_JSON_FIELDS_MAX.
  * @param[out]    out_found Bit @c i is set where entry @c i was read; may be NULL. Written even
  *                          when the walk is refused, so a caller can see how far it came.
- * @param[in,out] memory    Where @ref ARNM_JSON_FIELD_TYPE_BASE64_BLOCK and ARNM_JSON_FIELD_TYPE_HEX draws from; NULL for the
- *                          host allocator, and unused where the table has no such field.
  * @retval ARNM_SUCCESS                 Walked; @p out_found says what was there.
  * @retval ARNM_ERROR_NULL_POINTER      @p object or @p fields is NULL, or an entry's target is.
  * @retval ARNM_ERROR_INVALID_PARAM     @p count is 0 or past @ref ARNM_JSON_FIELDS_MAX, or an
@@ -1115,8 +1098,7 @@ arnm_result arnm_json_read_object(
     arnm_json_value *object,
     arnm_json_field *fields,
     uint32_t count,
-    uint64_t *out_found,
-    arnm *memory
+    uint64_t *out_found
 );
 
 // ********** what a value is *******************

@@ -202,8 +202,13 @@ pub fn build(b: *std.Build) void {
     // It is compiled straight into libarnm, so a consumer links one library and adds one include
     // path -- the same as before there was a JSON reader at all. The include path below is
     // private: no installed header names yyjson, and nothing of it reaches
-    // include/arnm/json_reader.h.
+
     const yyjson_source = "third_party/yyjson/src/yyjson.c";
+    // Disable not needed features from yyjson
+    core_lib.root_module.addCMacro("YYJSON_DISABLE_INCR_READER", "1");
+    core_lib.root_module.addCMacro("YYJSON_DISABLE_UTILS", "1");
+    core_lib.root_module.addCMacro("YYJSON_DISABLE_NON_STANDARD", "1");
+    core_lib.root_module.addCMacro("YYJSON_DISABLE_UTF8_VALIDATION", "1");
     core_lib.addIncludePath(b.path("third_party/yyjson/src"));
     core_lib.addCSourceFiles(.{
         .files = &[_][]const u8{yyjson_source},
