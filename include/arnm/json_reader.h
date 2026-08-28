@@ -1184,7 +1184,7 @@ arnm_result arnm_json_read_object(
     arnm_json_value *object, arnm_json_field *fields, uint32_t count, uint64_t *out_found
 );
 arnm_result arnm_json_read_array(
-    arnm_json_value *object, arnm_json_value **out_values, uint32_t capacity, uint32_t *out_found
+    arnm_json_value *array, arnm_json_value **out_values, uint32_t capacity, uint32_t *out_array_size
 );
 
 // ********** what a value is *******************

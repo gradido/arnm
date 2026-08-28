@@ -1209,21 +1209,20 @@ arnm_result arnm_json_read_object(
 }
 
 arnm_result arnm_json_read_array(
-    arnm_json_value *object, arnm_json_value **out_values, uint32_t capacity, uint32_t *out_found
+    arnm_json_value *array, arnm_json_value **out_values, uint32_t capacity, uint32_t *out_array_size
 ) {
-  if (out_found)  *out_found = 0;
-  if (!object || !out_values) return ARNM_ERROR_NULL_POINTER;
+  if (out_array_size) *out_array_size = 0;
+  if (!array || !out_values) return ARNM_ERROR_NULL_POINTER;
   if (0 == capacity) return ARNM_ERROR_INVALID_PARAM;
-  if (!unsafe_yyjson_is_arr((void *)object)) return ARNM_ERROR_INVALID_ENUM_TYPE;
-  if (unsafe_yyjson_get_len((void*)object) >= capacity) return ARNM_ERROR_DESTINATION_BUFFER_TO_SMALL;
+  if (!unsafe_yyjson_is_arr((void *)array)) return ARNM_ERROR_INVALID_ENUM_TYPE;
+  if (unsafe_yyjson_get_len((void *)array) > capacity)
+    return ARNM_ERROR_DESTINATION_BUFFER_TO_SMALL;
 
   yyjson_val *val = NULL;
-  yyjson_arr_iter iter = yyjson_arr_iter_with(to_yyjson(object));
+  yyjson_arr_iter iter = yyjson_arr_iter_with(to_yyjson(array));
   uint32_t count = 0;
-  while ((val = yyjson_arr_iter_next(&iter)) != NULL) {
-    out_values[count++] = to_public(val);
-  }
-  if (out_found) { *out_found = count; }
+  while ((val = yyjson_arr_iter_next(&iter)) != NULL) { out_values[count++] = to_public(val); }
+  if (out_array_size) { *out_array_size = count; }
   return ARNM_SUCCESS;
 }
 
