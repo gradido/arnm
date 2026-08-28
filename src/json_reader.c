@@ -240,7 +240,9 @@ arnm_result arnm_json_reader_parse_insitu(
 
 arnm_result arnm_json_reader_status(const arnm_json_reader *reader) {
   const json_reader_state *state = state_of(reader);
-  return state ? ARNM_SUCCESS : ARNM_ERROR_NOT_INITIALIZED;
+  if (!state) return ARNM_ERROR_NOT_INITIALIZED;
+  if (state->error_message) return ARNM_ERROR_DECODE_FAILED;
+  return ARNM_SUCCESS;
 }
 
 const char *arnm_json_reader_error_message(const arnm_json_reader *reader) {
@@ -271,13 +273,6 @@ uint32_t arnm_json_reader_bytes_read(const arnm_json_reader *reader) {
   return narrow_count(yyjson_doc_get_read_size(state->doc));
 }
 
-// ********** where the reader stands *******************
-
-arnm_json_value *arnm_json_reader_root(const arnm_json_reader *reader) {
-  const json_reader_state *state = state_of(reader);
-  if (!state || !state->doc) { return NULL; }
-  return to_public(yyjson_doc_get_root(state->doc));
-}
 
 /** @brief Read one member into the target its entry names, once the key has matched. */
 // hand written by human, for highly optimized hot-path

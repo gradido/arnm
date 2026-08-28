@@ -105,8 +105,6 @@ arnm_result arnm_json_reader_parse_insitu(
 
 arnm_result arnm_json_reader_status(const arnm_json_reader *reader);
 
-arnm_result arnm_json_reader_clear_error(arnm_json_reader *reader);
-
 const char *arnm_json_reader_error_message(const arnm_json_reader *reader);
 
 uint32_t arnm_json_reader_error_position(const arnm_json_reader *reader);
@@ -116,8 +114,6 @@ bool arnm_json_reader_has_document(const arnm_json_reader *reader);
 uint32_t arnm_json_reader_value_count(const arnm_json_reader *reader);
 
 uint32_t arnm_json_reader_bytes_read(const arnm_json_reader *reader);
-
-arnm_json_value *arnm_json_reader_root(const arnm_json_reader *reader);
 
 uint32_t arnm_json_reader_count(const arnm_json_reader *reader);
 
