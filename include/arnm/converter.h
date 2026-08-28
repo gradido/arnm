@@ -156,12 +156,11 @@ arnm_result arnm_binary_to_hex(char *result_buffer, const arnm_memory_block *dat
  *                           overlooks the result code never reads half converted bytes. Only
  *                           what this call decoded is cleared; whatever the buffer held before
  *                           belongs to the caller and is left alone.
- * @param[in]  hex           Null terminated string of an even number of hex digits. Empty is
- *                           allowed and writes nothing.
+ * @param[in]  hex           Null terminated string of an even number of hex digits.
  * @param[in]  hex_size      length of hex string
- * @retval ARNM_SUCCESS             strlen(hex) / 2 bytes written.
+ * @retval ARNM_SUCCESS             hex_size / 2 bytes written.
  * @retval ARNM_ERROR_NULL_POINTER  @p result_buffer or @p hex is NULL.
- * @retval ARNM_ERROR_INVALID_PARAM @p hex has an odd number of characters. Refused before
+ * @retval ARNM_ERROR_INVALID_PARAM @p hex has an odd or zero number of characters. Refused before
  *                                     anything is written, so @p result_buffer is left exactly
  *                                     as the caller had it -- there is nothing of this call's
  *                                     making in it to clear.
@@ -170,7 +169,9 @@ arnm_result arnm_binary_to_hex(char *result_buffer, const arnm_memory_block *dat
  * @note Not constant time; see the warning on this group.
  * @whisper Two characters settle back into the one byte they came from
  */
-arnm_result arnm_binary_from_hex_with_known_hex_size(uint8_t *result_buffer, const char *hex, size_t hex_size);
+arnm_result arnm_binary_from_hex_with_known_hex_size(
+    uint8_t *result_buffer, const char *hex, size_t hex_size
+);
 
 static inline arnm_result arnm_binary_from_hex(uint8_t *result_buffer, const char *hex) {
   return arnm_binary_from_hex_with_known_hex_size(result_buffer, hex, strlen(hex));

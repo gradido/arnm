@@ -981,17 +981,20 @@ arnm_result arnm_json_read_base64_block(
 
 /** @brief What a field of a walk should become, and therefore what its target points at. */
 typedef enum arnm_json_field_type {
-  ARNM_JSON_FIELD_TYPE_NONE = 0,     /**< Produce Error, make sure the caller has set all types explicit. */
-  ARNM_JSON_FIELD_TYPE_UINT64,       /**< `uint64_t *` */
-  ARNM_JSON_FIELD_TYPE_INT64,        /**< `int64_t *` */
-  ARNM_JSON_FIELD_TYPE_UINT32,       /**< `uint32_t *` */
-  ARNM_JSON_FIELD_TYPE_INT32,        /**< `int32_t *`, last integer type, used for prefilter */
-  ARNM_JSON_FIELD_TYPE_STRING,       /**< `arnm_memory_block (will receive ptr to string and size) * */
-  ARNM_JSON_FIELD_TYPE_HEX_FIXED,    /**< `arnm_memory_block * (will be filled with hex, if size is identical) */
-  ARNM_JSON_FIELD_TYPE_UUID,         /**< `arnm_memory_block * of @ref ARNM_UUID_BINARY_SIZE bytes. last string type, used for prefilter */
-  ARNM_JSON_FIELD_TYPE_DOUBLE,           /**< `double *` */
-  ARNM_JSON_FIELD_TYPE_BOOL,         /**< `bool *` */
-  ARNM_JSON_FIELD_TYPE_VALUE        /**< `arnm_json_value **`, handed over untouched. */
+  ARNM_JSON_FIELD_TYPE_NONE =
+      0, /**< Produce Error, make sure the caller has set all types explicit. */
+  ARNM_JSON_FIELD_TYPE_UINT64,    /**< `uint64_t *` */
+  ARNM_JSON_FIELD_TYPE_INT64,     /**< `int64_t *` */
+  ARNM_JSON_FIELD_TYPE_UINT32,    /**< `uint32_t *` */
+  ARNM_JSON_FIELD_TYPE_INT32,     /**< `int32_t *`, last integer type, used for prefilter */
+  ARNM_JSON_FIELD_TYPE_STRING,    /**< `arnm_memory_block (will receive ptr to string and size) * */
+  ARNM_JSON_FIELD_TYPE_HEX_FIXED, /**< `arnm_memory_block * (will be filled with hex, if size is
+                                     identical) */
+  ARNM_JSON_FIELD_TYPE_UUID,   /**< `arnm_memory_block * of @ref ARNM_UUID_BINARY_SIZE bytes. last
+                                  string type, used for prefilter */
+  ARNM_JSON_FIELD_TYPE_DOUBLE, /**< `double *` */
+  ARNM_JSON_FIELD_TYPE_BOOL,   /**< `bool *` */
+  ARNM_JSON_FIELD_TYPE_VALUE   /**< `arnm_json_value **`, handed over untouched. */
 } arnm_json_field_type;
 
 /**
@@ -1030,10 +1033,9 @@ typedef struct arnm_json_field {
 #endif
 
 /** @cond */
-#define ARNM_JSON_FIELD_MAKE(key, type_tag, want, ptr)                            \
+#define ARNM_JSON_FIELD_MAKE(key, type_tag, want, ptr)                                             \
   {(key), ARNM_JSON_KEY_LENGTH(key), (type_tag), ARNM_JSON_TARGET(want, (ptr))}
 /** @endcond */
-
 
 #define ARNM_JSON_FIELD_BOOL(key, ptr)                                                             \
   ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_BOOL, bool *, ptr)
@@ -1053,10 +1055,10 @@ typedef struct arnm_json_field {
 #define ARNM_JSON_FIELD_DOUBLE(key, ptr)                                                           \
   ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_DOUBLE, double *, ptr)
 
-#define ARNM_JSON_FIELD_STRING(key, ptr)                                               \
+#define ARNM_JSON_FIELD_STRING(key, ptr)                                                           \
   ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_STRING, arnm_memory_block *, ptr)
 
-#define ARNM_JSON_FIELD_HEX_FIXED(key, ptr)                                                 \
+#define ARNM_JSON_FIELD_HEX_FIXED(key, ptr)                                                        \
   ARNM_JSON_FIELD_MAKE(key, ARNM_JSON_FIELD_TYPE_HEX_FIXED, arnm_memory_block *, ptr)
 
 #define ARNM_JSON_FIELD_UUID(key, ptr)                                                             \
@@ -1072,7 +1074,8 @@ typedef struct arnm_json_field {
  * @brief Walk @p object once and read every member @p fields names into where it points.
  *
  * The member chain is walked a single time.
- * Because of optimizations, by multiple same keys, the first one will take, deviating from most other json implementations.
+ * Because of optimizations, by multiple same keys, the first one will take, deviating from most
+ * other json implementations.
  *
  * A member the table does not name is not an error -- a document is allowed to carry more than
  * this reader wants. A member named twice is read only first time.
@@ -1095,10 +1098,7 @@ typedef struct arnm_json_field {
  * @whisper Every name asked once what it is, in the order it expects to meet them
  */
 arnm_result arnm_json_read_object(
-    arnm_json_value *object,
-    arnm_json_field *fields,
-    uint32_t count,
-    uint64_t *out_found
+    arnm_json_value *object, arnm_json_field *fields, uint32_t count, uint64_t *out_found
 );
 
 // ********** what a value is *******************

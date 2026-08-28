@@ -598,8 +598,9 @@ arnm_result arnm_base64_binary_size(const char *base64, uint32_t length, uint32_
   return ARNM_SUCCESS;
 }
 
-arnm_result arnm_binary_from_hex_with_known_hex_size(uint8_t *result_buffer, const char *hex, size_t hex_size)
-{
+arnm_result arnm_binary_from_hex_with_known_hex_size(
+    uint8_t *result_buffer, const char *hex, size_t hex_size
+) {
   if (!result_buffer || !hex) return ARNM_ERROR_NULL_POINTER;
   if (!hex_size) return ARNM_ERROR_INVALID_PARAM;
   size_t bin_size = hex_size / 2;
