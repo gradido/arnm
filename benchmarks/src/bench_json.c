@@ -31,6 +31,8 @@
  * Three questions are asked of each of them.
  *
  * How much does the work itself cost, in each direction: a parse against a build and a write.
+ * The reading half is asked twice over, copying and in place, in time and in arena bytes --
+ * that pair carries its own commentary further down, at the in place parse.
  *
  * How much does knowing the size beforehand cost. The writer keeps its total as fields arrive,
  * so the answer is a field read; the reader has to walk a document it did not build, either
@@ -226,6 +228,218 @@ static void write_payload(payload *one, int steps) {
     arnm_reset(&output);
   }
   g_sink += sink;
+}
+
+/* --- the same parse, in place ---------------------------------------------------------------- */
+
+/*
+ * arnm_json_reader_parse() copies the input and leaves the caller's bytes alone.
+ * arnm_json_reader_parse_insitu() unescapes into the caller's own buffer and spends it: the
+ * string pool is never allocated, and what the buffer held is gone when the call returns.
+ *
+ * Timing the second one honestly is awkward, because a loop cannot parse the same buffer twice
+ * -- the first round destroys it. Refilling it between rounds is work the measurement adds and
+ * a real caller might not pay, so all three parts are measured separately and printed side by
+ * side rather than folded into one number:
+ *
+ *   copying         arnm_json_reader_parse(), the copy inside it included
+ *   insitu, refilled  the refill and the in place parse together
+ *   the refill alone  the memcpy on its own, which is the part the loop added
+ *
+ * The last column subtracts the third from the second, which is what an in place parse costs a
+ * caller whose buffer was already its to spend -- text just read off a socket or a file into a
+ * scratch buffer that nothing else will look at again. It is a difference of two measurements
+ * and therefore the noisiest figure on the page; the two it is derived from are printed so it
+ * can be checked rather than believed.
+ *
+ * A caller that has to keep its text reads the middle column instead, and will find it close to
+ * the first: the copy happens either way, once inside the parse or once in the refill. That is
+ * the whole trade -- in place parsing does not remove the copy, it moves it to the caller and
+ * then lets a caller who never needed one skip it.
+ */
+
+/** Scratch buffer for the in place parses; one is enough, since one payload is timed at a time. */
+static char insitu_buffer[TEXT_CAPACITY];
+
+/**
+ * @brief Put the payload's text back into the scratch buffer, padding included.
+ *
+ * The padding is zeroed rather than left as the last round found it: the parse writes through
+ * it, so a round that inherited the previous one's bytes there would not be starting where the
+ * one before it did.
+ */
+static void refill_insitu(payload *one) {
+  memcpy(insitu_buffer, one->text, (size_t)one->length);
+  memset(insitu_buffer + one->length, 0, ARNM_JSON_READER_INSITU_PADDING);
+}
+
+/** Parse in place and let it go, the buffer refilled first because the last round spent it. */
+static void parse_payload_insitu(payload *one, int steps) {
+  uint64_t sink = 0;
+  for (int step = 0; step < steps; ++step) {
+    refill_insitu(one);
+    arnm_json_reader reader;
+    require_ok(arnm_json_reader_init(&reader, &scratch, ARNM_JSON_READ_DEFAULT), "reader init");
+    require_ok(
+        arnm_json_reader_parse_insitu(
+            &reader, insitu_buffer, one->length, (uint32_t)sizeof(insitu_buffer)
+        ),
+        "parse insitu"
+    );
+    sink += arnm_json_reader_value_count(&reader);
+    (void)arnm_json_reader_release(&reader);
+    arnm_reset(&scratch);
+  }
+  g_sink += sink;
+}
+
+/** The refill on its own: what the row above carries that the copying parse does not. */
+static void refill_only(payload *one, int steps) {
+  uint64_t sink = 0;
+  for (int step = 0; step < steps; ++step) {
+    refill_insitu(one);
+    // read the copy back, so the memcpy cannot be lifted out of the loop as dead
+    sink += (unsigned char)insitu_buffer[one->length - 1u];
+  }
+  g_sink += sink;
+}
+
+/**
+ * @brief Check that both parses see the same document, before either is timed.
+ *
+ * The in place parse rewrites the bytes it reads. A payload whose text did not survive being
+ * rendered into the scratch buffer would still parse, and would still produce a row -- of a
+ * document that is not the one the copying parse read.
+ */
+static void verify_parses_agree(payload *one) {
+  arnm_json_reader copied;
+  arnm_json_reader in_place;
+
+  require_ok(arnm_json_reader_init(&copied, &scratch, ARNM_JSON_READ_DEFAULT), "reader init");
+  require_ok(arnm_json_reader_parse(&copied, one->text, one->length), "parse");
+
+  refill_insitu(one);
+  require_ok(arnm_json_reader_init(&in_place, &scratch, ARNM_JSON_READ_DEFAULT), "reader init");
+  require_ok(
+      arnm_json_reader_parse_insitu(
+          &in_place, insitu_buffer, one->length, (uint32_t)sizeof(insitu_buffer)
+      ),
+      "parse insitu"
+  );
+
+  const uint32_t copied_values = arnm_json_reader_value_count(&copied);
+  const uint32_t in_place_values = arnm_json_reader_value_count(&in_place);
+  const uint32_t copied_bytes = arnm_json_reader_bytes_read(&copied);
+  const uint32_t in_place_bytes = arnm_json_reader_bytes_read(&in_place);
+
+  (void)arnm_json_reader_release(&in_place);
+  (void)arnm_json_reader_release(&copied);
+  arnm_reset(&scratch);
+
+  if (copied_values != in_place_values || copied_bytes != in_place_bytes) {
+    fprintf(
+        stderr, "benchmark setup failed: the two parses of '%s' disagree (%u/%u values)\n",
+        one->name, (unsigned)copied_values, (unsigned)in_place_values
+    );
+    exit(EXIT_FAILURE);
+  }
+}
+
+/**
+ * @brief Where the arena's index stands, as an address.
+ *
+ * Measured the way a consumer can measure it: one byte handed out is the index itself, and
+ * giving it straight back leaves the arena as it was found. Only differences between two of
+ * these mean anything.
+ */
+static uintptr_t arena_mark(void) {
+  uint8_t *probe = NULL;
+  require_ok(arnm_alloc(&probe, 1, &scratch), "arena probe");
+  require_ok(arnm_free(probe, 1, &scratch), "arena probe");
+  return (uintptr_t)probe;
+}
+
+/**
+ * @brief What each parse costs the arena, which is the part the clock cannot show.
+ *
+ * The copying parse takes the string pool first and the value buffer above it, so releasing
+ * gives the value buffer back and leaves the pool buried until arnm_reset(). The in place parse
+ * has no pool: its one allocation sits at the tail and release moves the index all the way home.
+ *
+ * The second column of each pair is what a release did not give back. Subtracting the two
+ * "held" columns from each other lands on the same figure, which is the pool itself: what the
+ * copying parse still holds afterwards is exactly what it took beyond the in place parse.
+ *
+ * Exact figures, not timings -- an arena bump is deterministic, so these are the same on every
+ * run and on every machine.
+ */
+static void report_parse_footprint(payload *one) {
+  arnm_json_reader reader;
+
+  arnm_reset(&scratch);
+  const uintptr_t base = arena_mark();
+  require_ok(arnm_json_reader_init(&reader, &scratch, ARNM_JSON_READ_DEFAULT), "reader init");
+  require_ok(arnm_json_reader_parse(&reader, one->text, one->length), "parse");
+  const uintptr_t copying_held = arena_mark();
+  (void)arnm_json_reader_release(&reader);
+  const uintptr_t copying_after = arena_mark();
+
+  arnm_reset(&scratch);
+  refill_insitu(one);
+  require_ok(arnm_json_reader_init(&reader, &scratch, ARNM_JSON_READ_DEFAULT), "reader init");
+  require_ok(
+      arnm_json_reader_parse_insitu(
+          &reader, insitu_buffer, one->length, (uint32_t)sizeof(insitu_buffer)
+      ),
+      "parse insitu"
+  );
+  const uintptr_t insitu_held = arena_mark();
+  (void)arnm_json_reader_release(&reader);
+  const uintptr_t insitu_after = arena_mark();
+  arnm_reset(&scratch);
+
+  printf(
+      "  %-8s %11u %14u %14u %14u\n", one->name, (unsigned)(copying_held - base),
+      (unsigned)(copying_after - base), (unsigned)(insitu_held - base),
+      (unsigned)(insitu_after - base)
+  );
+}
+
+/**
+ * @brief Time all three parses of one payload and print the row.
+ *
+ * bench_step() is not used here for the same reason as in the mapping section: the figures only
+ * mean something beside each other, and the derived column is the answer the section exists for.
+ */
+static void bench_parse_modes(payload *one, int steps) {
+  char copying_text[BENCH_STRING_BUFFER_SIZE];
+  char refilled_text[BENCH_STRING_BUFFER_SIZE];
+  char refill_text[BENCH_STRING_BUFFER_SIZE];
+  char alone_text[BENCH_STRING_BUFFER_SIZE];
+  arnm_mono_timer timer;
+
+  arnm_mono_timer_reset(&timer);
+  parse_payload(one, steps);
+  const double copying = (double)arnm_mono_timer_nanos(timer) / (double)steps;
+
+  arnm_mono_timer_reset(&timer);
+  parse_payload_insitu(one, steps);
+  const double refilled = (double)arnm_mono_timer_nanos(timer) / (double)steps;
+
+  arnm_mono_timer_reset(&timer);
+  refill_only(one, steps);
+  const double refill = (double)arnm_mono_timer_nanos(timer) / (double)steps;
+
+  const double alone = refilled - refill;
+  bench_per_step_string(copying_text, BENCH_STRING_BUFFER_SIZE, copying);
+  bench_per_step_string(refilled_text, BENCH_STRING_BUFFER_SIZE, refilled);
+  bench_per_step_string(refill_text, BENCH_STRING_BUFFER_SIZE, refill);
+  bench_per_step_string(alone_text, BENCH_STRING_BUFFER_SIZE, alone > 0.0 ? alone : 0.0);
+
+  printf(
+      "  %-8s %11s %14s %14s %13s %10.2fx\n", one->name, copying_text, refilled_text, refill_text,
+      alone_text, (alone > 0.0) ? copying / alone : 0.0
+  );
 }
 
 /* --- measuring, before either direction runs ------------------------------------------------- */
@@ -644,7 +858,9 @@ static void prepare_test_data(void) {
     require_ok(
         arnm_json_writer_write(&one->writer, &output, &rendered, &one->length), "write payload"
     );
-    if (one->length + 1u > TEXT_CAPACITY) {
+    // the insitu rows render this text into a buffer of the same size and write padding past
+    // its end, so the room for that padding is what has to fit, not just the terminator
+    if (one->length + ARNM_JSON_READER_INSITU_PADDING > TEXT_CAPACITY) {
       fprintf(stderr, "benchmark setup failed: payload '%s' outgrew its buffer\n", one->name);
       exit(EXIT_FAILURE);
     }
@@ -654,6 +870,8 @@ static void prepare_test_data(void) {
     // and the reader that stays, on that same text
     require_ok(arnm_json_reader_init(&one->reader, &kept, ARNM_JSON_READ_DEFAULT), "reader init");
     require_ok(arnm_json_reader_parse(&one->reader, one->text, one->length), one->name);
+
+    verify_parses_agree(one);
   }
 
   // the three record layouts, rendered by the writer for the same reason: what the mapping rows
@@ -742,6 +960,23 @@ int main(void) {
   bench_every_payload(
       "one payload, read: parse and release", offsetof(row, parse), WORK_STEPS, "document"
   );
+  bench_section("the same parse, copying against in place, per document");
+  printf(
+      "  %-8s %11s %14s %14s %13s %11s\n", "payload", "copying", "insitu, refilled", "the refill",
+      "insitu alone", "insitu is"
+  );
+  for (size_t index = 0; index < PAYLOAD_COUNT; ++index) {
+    bench_parse_modes(payloads[index], WORK_STEPS);
+  }
+
+  bench_section("what each parse costs the arena, which the clock above cannot show");
+  printf(
+      "  %-8s %11s %14s %14s %14s\n", "payload", "copying", "still held", "insitu", "still held"
+  );
+  for (size_t index = 0; index < PAYLOAD_COUNT; ++index) {
+    report_parse_footprint(payloads[index]);
+  }
+
   bench_every_payload(
       "the same payload, written: build, render, give back", offsetof(row, write), WORK_STEPS,
       "document"

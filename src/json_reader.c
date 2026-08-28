@@ -7,6 +7,7 @@
 #include "arnm/result.h"
 // includes also yyjson
 #include "json_memory.h"
+#include "yyjson.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -1167,13 +1168,12 @@ static arnm_result read_field(const arnm_json_field *field, yyjson_val *value) {
 arnm_result arnm_json_read_object(
     arnm_json_value *object, arnm_json_field *fields, uint32_t count, uint64_t *out_found
 ) {
-  if (out_found) { *out_found = 0; }
-  if (!object || !fields) { return ARNM_ERROR_NULL_POINTER; }
-  if (0 == count || count > ARNM_JSON_FIELDS_MAX) { return ARNM_ERROR_INVALID_PARAM; }
+  if (out_found) *out_found = 0;
+  if (!object || !fields) return ARNM_ERROR_NULL_POINTER;
+  if (0 == count || count > ARNM_JSON_FIELDS_MAX) return ARNM_ERROR_INVALID_PARAM;
 
-  if (!unsafe_yyjson_is_obj((void *)object)) { return ARNM_ERROR_INVALID_ENUM_TYPE; }
-  yyjson_obj_iter iter = {0};
-  yyjson_obj_iter_init(to_yyjson(object), &iter);
+  if (!unsafe_yyjson_is_obj((void *)object)) return ARNM_ERROR_INVALID_ENUM_TYPE;
+  yyjson_obj_iter iter = yyjson_obj_iter_with(to_yyjson(object));
 
   const uint64_t valid_mask = (count == 64) ? UINT64_MAX : (UINT64_C(1) << count) - 1u;
   uint64_t found = 0;
@@ -1205,6 +1205,25 @@ arnm_result arnm_json_read_object(
   }
 
   if (out_found) { *out_found = found; }
+  return ARNM_SUCCESS;
+}
+
+arnm_result arnm_json_read_array(
+    arnm_json_value *object, arnm_json_value **out_values, uint32_t capacity, uint32_t *out_found
+) {
+  if (out_found)  *out_found = 0;
+  if (!object || !out_values) return ARNM_ERROR_NULL_POINTER;
+  if (0 == capacity) return ARNM_ERROR_INVALID_PARAM;
+  if (!unsafe_yyjson_is_arr((void *)object)) return ARNM_ERROR_INVALID_ENUM_TYPE;
+  if (unsafe_yyjson_get_len((void*)object) >= capacity) return ARNM_ERROR_DESTINATION_BUFFER_TO_SMALL;
+
+  yyjson_val *val = NULL;
+  yyjson_arr_iter iter = yyjson_arr_iter_with(to_yyjson(object));
+  uint32_t count = 0;
+  while ((val = yyjson_arr_iter_next(&iter)) != NULL) {
+    out_values[count++] = to_public(val);
+  }
+  if (out_found) { *out_found = count; }
   return ARNM_SUCCESS;
 }
 
