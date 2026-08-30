@@ -224,7 +224,7 @@ arnm_result arnm_binary_to_hex(char *result_buffer, const arnm_memory_block *dat
  *
  * @see arnm_binary_from_base64(), whose table survived the same experiment by a wider margin.
  */
-static const char BASE64_ALPHABET[64] =
+static const char BASE64_ALPHABET[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /**

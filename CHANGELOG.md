@@ -20,6 +20,145 @@ next build.
 Entries before 0.4.0 were reconstructed from the git history after the fact, so they summarise
 what the commits show rather than what was noted at the time.
 
+## 0.7.5 -- 2026-08-30
+
+The reader is a different reader. What 0.7.0 opened and 0.7.4 finished was a cursor: you entered
+an object, asked for a member by name, read it, and left again, and where you were lived in the
+reader rather than in your own code. That is gone. An object is now read by handing over a table
+-- what a key is called, what it should become, where to put it -- and an array by handing over a
+buffer of value handles. There is no third way in, because everything else is a member of one of
+those two.
+
+The point of the table is that the member chain is walked once. Each key is compared only against
+the entries the walk has not filled yet, starting at the lowest of them, so a table written in the
+document's own order is met at one comparison per member; once every entry is filled the rest of
+the object is not looked at. A member the table does not name is not an error, and a member named
+twice is read the first time and ignored after, which is the opposite of what most JSON readers do
+and is a consequence of that shape rather than a preference.
+
+**Every consumer of the old reader is rewritten rather than edited.** `arnm/json_reader.h` keeps
+init, create, release and destroy, keeps the two parses with signatures that changed, and loses
+the forty-odd calls that were the cursor and the value level. The compile error lands at every
+call site and there is no mechanical answer to it: a loop that entered an object, asked for five
+members and left becomes a table and one call. Code built against 0.7.4 stops compiling rather
+than going quietly wrong, which is what this file's opening says the patch number carries -- but
+it is by far the largest removal so far, and easier to meet knowing that in advance.
+
+**One change does go quietly, and it is not in that header.** Both builds now set
+`YYJSON_DISABLE_UTF8_VALIDATION`. A document whose strings hold malformed UTF-8 used to be refused
+by the parse and is now carried through unexamined, and the writer used to refuse to write such a
+string unless `ARNM_JSON_WRITE_ALLOW_INVALID_UNICODE` said otherwise and now always writes it.
+Nothing about either is visible at a call site, and there is no switch to ask for the old
+behaviour -- the flag is off at the source, not at run time. A caller who needs well formed text
+has to check its own, on the way in or on the way out. It is named here because it is the one
+thing in this release that a build will not tell you about -- and, by the rule at the top of this
+file, the one thing in it that argues for the minor number rather than the patch: the removals
+above all stop a build, this changes what two calls already did and stops nothing.
+
+### Added
+
+- **`arnm_json_read_object()`** in `arnm/json_reader.h`, with the table it is driven by:
+  `ARNM_JSON_FIELD_BOOL()`, `_INT64()`, `_UINT64()`, `_INT32()`, `_UINT32()`, `_DOUBLE()`,
+  `_STRING()`, `_HEX_FIXED()`, `_UUID()` and `_VALUE()`, plus `ARNM_JSON_FIELD_MAKE()` under
+  them. `out_found` is a bit per entry, so a caller sees what the document actually carried and
+  decides once, for the whole object, what was required.
+  - **The table is type checked where the compiler can.** `ARNM_JSON_TARGET()` is a `_Generic`
+    over the pointer, so an entry that says INT64 above an `int32_t *` matches no association and
+    the translation unit does not compile. Without `_Generic` -- C99, C++, or a C11 without it --
+    only the cast is left and the same mistake is a run time one instead. A `void *` beside a type
+    tag is a contract the compiler otherwise cannot see, and it writes eight bytes into four.
+  - **Nothing allocates and there is no allocator to hand over.** A string member is borrowed from
+    the document, and HEX_FIXED and UUID decode into a buffer the caller already had, named
+    through `ARNM_JSON_BLOCK_OF()`. Every target is either the caller's own storage or a view into
+    a document that outlives the call.
+  - **`ARNM_JSON_FIELDS_MAX` is 64** because the mask is a `uint64_t`, and a table longer than
+    that is refused rather than truncated.
+  - Measured in `bench_json`, nine mixed members -- a string, two 64 bit numbers, two 32 bit, a
+    double, a bool, a 32 byte hex digest and a uuid -- read into a struct, the parse not counted:
+    **79 ns** where the table is in the document's order, **78 ns** where 24 members the table does
+    not name follow the nine, **213 ns** where those same 24 come first, and **98 ns** where the
+    nine are written back to front. The spread is the walk meeting the table's order or not, and
+    it is the one thing a caller can do something about.
+- **`arnm_json_read_array()`**, the other half: value handles out, nothing converted, because an
+  array's elements have no names to hang a type on. 64 objects come back in **77 ns**, and the
+  caller reads each with a table of its own.
+- **`arnm_binary_from_base64_insitu()`** in `arnm/converter.h` -- the base64 decode written over
+  the string it was handed, three bytes going where four characters were, always behind the read
+  that produced them. It is what a caller reaches for after
+  `arnm_json_reader_parse_insitu()`, where the buffer the field is borrowed from is the caller's
+  own; the copying call is still what a borrowed view into a reader's own pool needs.
+  - **It saves the buffer and not the time.** Against the copying call it measures between 1.00x
+    and 1.03x from 1 KiB to 1 MiB and 1.05x to 1.09x at 8 MiB, where the two buffers together are
+    past any L3 this is likely to run on. The decode moves about 1.7 GB/s and the memory it stops
+    touching answers an order of magnitude faster than that, so the second buffer was never what
+    it waited on. `bench_binaryToString` carries the rows, a length sweep from 16 bytes to 8 MiB,
+    and the reasoning.
+- **`arnm_binary_from_hex_with_known_hex_size()`**, for a caller that already knows the length and
+  should not pay a `strlen` to say so -- a hex field borrowed out of a document knows exactly how
+  long it is.
+- **`arnm_ctz()` and `arnm_ctzll()`** in `arnm/bitmap.h`, the lowest set bit spelled the same way
+  on every toolchain. `arnm_json_read_object()` is the first caller: the entries still open are a
+  mask, and the next one to compare against is that scan.
+- **`bench_json` measures the writer as well as the reader**, over the same six documents: the
+  building and the rendering apart, both with and without the pool hint, what each costs the arena
+  where the clock cannot show it, and what `arnm_json_writer_size()` costs to ask. The hint is
+  level against the clock and is worth 32 KiB of stranded chunks on the largest of them.
+
+### Changed
+
+- **`arnm_json_reader_init()` loses its flags parameter** and `arnm_json_reader_create()` with it.
+  Every `ARNM_JSON_READ_*` switch it took is gone; see Removed.
+- **Both parses hand back the root and take `stop_when_done` as an argument.** Each grew the same
+  two parameters at the end -- a `bool` where the read flag used to be, and an
+  `arnm_json_value **` the root is written to. There is no `arnm_json_reader_root()` to ask
+  afterwards: the parse is where the root comes from, and a reader that no longer remembers where
+  you are has nowhere to keep one.
+- **`ARNM_JSON_READER_SIZE` falls from 256 to 72 bytes.** A reader holds an allocator, a document
+  and the first refusal it saw; the cursor, the path and the output allocator it used to keep are
+  no longer part of it.
+- **yyjson is compiled with four of its features taken out** rather than defaulted off:
+  `YYJSON_DISABLE_INCR_READER`, `YYJSON_DISABLE_UTILS`, `YYJSON_DISABLE_NON_STANDARD` and
+  `YYJSON_DISABLE_UTF8_VALIDATION`, in `build.zig` and `CMakeLists.txt` alike. Comments, trailing
+  commas, `Infinity`, `NaN` and a byte order mark are refused with no way to ask otherwise, which
+  is why the read flags could go. The fourth is the silent one described above.
+- **`ARNM_JSON_WRITE_ALLOW_INF_AND_NAN` and `ARNM_JSON_WRITE_ALLOW_INVALID_UNICODE` are gone**,
+  and bits 4 and 6 are deliberately left empty so an old value is refused with
+  `ARNM_ERROR_INVALID_PARAM` rather than landing on a neighbouring flag. Translating a bit into a
+  serializer that no longer reads it would be a switch accepted here and ignored there.
+  `ARNM_JSON_WRITE_INF_AND_NAN_AS_NULL` is unaffected: `null` is standard JSON and that path
+  survives the build.
+- **`arnm_binary_from_hex()` is now a `static inline` in the header** over the sized call.
+  Source compatible and the same behaviour, but the symbol is no longer exported: a consumer that
+  links `-Dshared=true` and does not recompile will not find it.
+
+### Removed
+
+- **The whole cursor level of the reader**: `arnm_json_reader_root()`, `_current()`, `_enter()`,
+  `_enter_at()`, `_leave()`, `_has()`, `_count()`, `_type_of()`, `_clear_error()`,
+  `_error_field()`, and the eight `arnm_json_reader_get_*()` calls. Where you are is now a
+  variable in the caller's own code, which is where it is easiest to read and hardest to get
+  quietly wrong.
+- **The value level beside it**: `arnm_json_object_get()`, `_size()`, `_iter_init()`,
+  `_iter_next()`, the four `arnm_json_array_*()` matching them, `arnm_json_value_type()`,
+  `arnm_json_value_number_type()` and `arnm_json_type_to_string()`. A value is now something a
+  table names or a handle an array read hands over.
+- **The per value reads**: `arnm_json_read_bool()`, `_int32()`, `_int64()`, `_uint32()`,
+  `_uint64()`, `_double()`, `_string()`, `_hex_fixed()` and `_uuid()` are field types in the table
+  now, one entry each. `arnm_json_read_hex()` and `arnm_json_read_base64_block()` are not: a hex
+  field of no fixed length and a base64 block have no entry, so a caller reads the string with
+  `ARNM_JSON_FIELD_STRING()` and hands it to `arnm/converter.h` -- which is what
+  `arnm_binary_from_base64_insitu()` above was added for. `arnm_base64_binary_size()` stays where
+  0.7.4 put it, and is how the block is sized before it is decoded.
+- **The output allocator and the sizes it went with**:
+  `arnm_json_reader_set_output_allocator()`, `arnm_json_reader_output_size()` and
+  `arnm_json_reader_output_size_for_keys()`. Nothing is copied out of a document any more --
+  strings are borrowed and the two decoding field types write into the caller's own buffer -- so
+  there is no output to size and no allocator to name for it.
+- **Every read flag**: `ARNM_JSON_READ_DEFAULT`, `_ALLOW_COMMENTS`, `_ALLOW_TRAILING_COMMAS`,
+  `_ALLOW_INF_AND_NAN`, `_ALLOW_INVALID_UNICODE`, `_ALLOW_BOM` and `_STOP_WHEN_DONE`, together
+  with `ARNM_JSON_READER_FIELD_NAME_SIZE`. Six of them switched code the build no longer contains;
+  the seventh is the `bool` the parses now take.
+
 ## 0.7.4 -- 2026-08-27
 
 The reading side of what 0.7.3 gave the writer. A document has no type for bytes, so it spells
