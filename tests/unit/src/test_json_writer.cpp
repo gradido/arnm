@@ -133,6 +133,17 @@ TEST(JsonWriter, AnUnknownFlagBitIsRefusedBeforeAnythingIsWritten) {
   std::memset(&writer, 0, sizeof(writer));
   EXPECT_EQ(arnm_json_writer_init(&writer, nullptr, 1u << 20, nullptr), ARNM_ERROR_INVALID_PARAM);
   EXPECT_EQ(arnm_json_writer_status(&writer), ARNM_ERROR_NOT_INITIALIZED);
+
+  // bits 4 and 6 carried ALLOW_INF_AND_NAN and ALLOW_INVALID_UNICODE, which this build cannot
+  // honour. They were left empty rather than closed up, so a caller still passing one is told
+  // so here instead of landing on whatever a renumbering would have moved into their place.
+  for (unsigned bit : {4u, 6u}) {
+    EXPECT_EQ(arnm_json_writer_init(&writer, nullptr, 1u << bit, nullptr), ARNM_ERROR_INVALID_PARAM)
+        << "bit " << bit;
+  }
+  // and the neighbours that survived still mean exactly what they did
+  EXPECT_EQ(ARNM_JSON_WRITE_INF_AND_NAN_AS_NULL, 1u << 5);
+  EXPECT_EQ(ARNM_JSON_WRITE_NEWLINE_AT_END, 1u << 7);
   EXPECT_EQ(arnm_json_writer_create(nullptr, 1u << 20, nullptr), nullptr);
   EXPECT_EQ(
       arnm_json_writer_init(nullptr, nullptr, ARNM_JSON_WRITE_DEFAULT, nullptr),
@@ -766,7 +777,10 @@ TEST(JsonWriter, AnArenaWithNoRoomIsRecordedAsOutOfMemory) {
   arnm_release(&arena);
 }
 
-TEST(JsonWriter, ANonFiniteNumberNeedsAFlagOrTheWholeWriteIsRefused) {
+TEST(JsonWriter, ANonFiniteNumberIsRefusedOrWrittenAsNull) {
+  // yyjson is built here with YYJSON_DISABLE_NON_STANDARD, which takes out the code behind
+  // YYJSON_WRITE_ALLOW_INF_AND_NAN -- there is no longer a way to spell `Infinity` in the
+  // output, so the two answers left are a refusal and a null.
   const double infinity = 1e308 * 10.0;
 
   ArenaWriter strict;
@@ -776,15 +790,18 @@ TEST(JsonWriter, ANonFiniteNumberNeedsAFlagOrTheWholeWriteIsRefused) {
       arnm_json_writer_write(strict.writer(), strict.arena(), &block, nullptr),
       ARNM_ERROR_ENCODE_FAILED
   );
-  EXPECT_EQ(block.data, nullptr);
+  EXPECT_EQ(block.data, nullptr) << "a refused write hands back nothing to release";
 
-  ArenaWriter allowed(ARNM_JSON_WRITE_ALLOW_INF_AND_NAN);
-  arnm_json_writer_add_double(allowed.writer(), "n", infinity);
-  EXPECT_EQ(Write(allowed.writer(), allowed.arena(), /*size_is_exact=*/false), "{\"n\":Infinity}");
-
+  // standard JSON has a spelling for this one, so it survives the build that removed the other
   ArenaWriter as_null(ARNM_JSON_WRITE_INF_AND_NAN_AS_NULL);
   arnm_json_writer_add_double(as_null.writer(), "n", infinity);
   EXPECT_EQ(Write(as_null.writer(), as_null.arena(), /*size_is_exact=*/false), "{\"n\":null}");
+
+  ArenaWriter nan_as_null(ARNM_JSON_WRITE_INF_AND_NAN_AS_NULL);
+  arnm_json_writer_add_double(nan_as_null.writer(), "n", infinity - infinity);
+  EXPECT_EQ(
+      Write(nan_as_null.writer(), nan_as_null.arena(), /*size_is_exact=*/false), "{\"n\":null}"
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1076,24 +1093,42 @@ TEST(JsonWriter, WhatWasWrittenReadsBackAsWhatWentIn) {
   arnm reading{};
   ASSERT_EQ(arnm_init_arena(&reading, kArenaCapacity), ARNM_SUCCESS);
   arnm_json_reader reader{};
-  ASSERT_EQ(arnm_json_reader_init(&reader, &reading, ARNM_JSON_READ_DEFAULT), ARNM_SUCCESS);
+  ASSERT_EQ(arnm_json_reader_init(&reader, &reading), ARNM_SUCCESS);
+  arnm_json_value *root = nullptr;
   ASSERT_EQ(
-      arnm_json_reader_parse(&reader, reinterpret_cast<const char *>(block.data), length),
+      arnm_json_reader_parse(
+          &reader, reinterpret_cast<const char *>(block.data), length, false, &root
+      ),
       ARNM_SUCCESS
   );
+  ASSERT_NE(root, nullptr);
 
-  EXPECT_STREQ(arnm_json_reader_get_string(&reader, "name"), "arnm");
-  EXPECT_EQ(arnm_json_reader_get_uint64(&reader, "port"), 8443u);
-  EXPECT_EQ(arnm_json_reader_get_int64(&reader, "offset"), -7);
-  EXPECT_TRUE(arnm_json_reader_get_bool(&reader, "debug"));
-  EXPECT_DOUBLE_EQ(arnm_json_reader_get_double(&reader, "ratio"), 0.25);
+  arnm_memory_block name{};
+  uint64_t port = 0;
+  int64_t offset = 0;
+  bool debug = false;
+  double ratio = 0.0;
+  arnm_json_value *tags = nullptr;
+  arnm_json_field fields[] = {
+      ARNM_JSON_FIELD_STRING("name", &name),    ARNM_JSON_FIELD_UINT64("port", &port),
+      ARNM_JSON_FIELD_INT64("offset", &offset), ARNM_JSON_FIELD_BOOL("debug", &debug),
+      ARNM_JSON_FIELD_DOUBLE("ratio", &ratio),  ARNM_JSON_FIELD_VALUE("tags", &tags)
+  };
+  uint64_t found = 0;
+  ASSERT_EQ(arnm_json_read_object(root, fields, 6, &found), ARNM_SUCCESS);
+  EXPECT_EQ(found, 0x3full) << "every member the writer put there came back";
 
-  arnm_json_value *tags = arnm_json_reader_enter(&reader, "tags");
-  ASSERT_EQ(arnm_json_reader_count(&reader), 2u);
-  arnm_json_value *first = arnm_json_reader_enter_at(&reader, 0);
-  EXPECT_STREQ(arnm_json_reader_get_string(&reader, nullptr), "one");
-  arnm_json_reader_leave(&reader, first);
-  arnm_json_reader_leave(&reader, tags);
+  EXPECT_EQ(std::string(reinterpret_cast<const char *>(name.data), name.size), "arnm");
+  EXPECT_EQ(port, 8443u);
+  EXPECT_EQ(offset, -7);
+  EXPECT_TRUE(debug);
+  EXPECT_DOUBLE_EQ(ratio, 0.25);
+
+  ASSERT_NE(tags, nullptr);
+  arnm_json_value *tag[2] = {nullptr, nullptr};
+  uint32_t tag_count = 0;
+  ASSERT_EQ(arnm_json_read_array(tags, tag, 2, &tag_count), ARNM_SUCCESS);
+  EXPECT_EQ(tag_count, 2u);
   EXPECT_EQ(arnm_json_reader_status(&reader), ARNM_SUCCESS);
 
   arnm_json_reader_release(&reader);

@@ -203,9 +203,9 @@ TEST(HexTest, WritesTheTerminatorAndNothingBeyondIt) {
   }
 }
 
-// promise: upper case digits decode to the same bytes, and an empty string is a conversion of
-// nothing rather than an error
-TEST(HexTest, AcceptsBothDigitCasesAndTheEmptyString) {
+// promise: upper case digits decode to the same bytes, and an empty string spells no bytes and
+// is refused rather than answered -- the same way arnm_binary_to_hex() refuses an empty block
+TEST(HexTest, AcceptsBothDigitCasesAndRefusesTheEmptyString) {
   uint8_t payload[8] = {0x00, 0x0f, 0xa5, 0xff, 0x10, 0xde, 0xad, 0xbe};
   arnm_memory_block block{payload, sizeof(payload)};
 
@@ -231,8 +231,54 @@ TEST(HexTest, AcceptsBothDigitCasesAndTheEmptyString) {
 
   uint8_t untouched[4];
   memset(untouched, 0x77, sizeof(untouched));
-  EXPECT_EQ(arnm_binary_from_hex(untouched, ""), ARNM_SUCCESS);
-  for (unsigned char byte : untouched) { EXPECT_EQ(byte, 0x77); }
+  EXPECT_EQ(arnm_binary_from_hex(untouched, ""), ARNM_ERROR_INVALID_PARAM);
+  for (unsigned char byte : untouched) {
+    EXPECT_EQ(byte, 0x77) << "a refusal writes nothing, not even the zeros a failed decode clears";
+  }
+  EXPECT_EQ(arnm_binary_from_hex_with_known_hex_size(untouched, "00", 0), ARNM_ERROR_INVALID_PARAM)
+      << "the length decides, not what the buffer happens to carry after it";
+}
+
+// promise: the sized call reads exactly the characters it is given, so a run that is not a C
+// string decodes and a NUL inside one is a character like any other rather than an early end
+TEST(HexTest, TheSizedCallReadsTheLengthItIsGivenAndNotToATerminator) {
+  uint8_t out[2] = {0, 0};
+
+  // a slice of a longer buffer, with no terminator anywhere near the end of it
+  const char embedded[] = "dead__beef";
+  ASSERT_EQ(arnm_binary_from_hex_with_known_hex_size(out, embedded, 4), ARNM_SUCCESS);
+  EXPECT_EQ(out[0], 0xdeu);
+  EXPECT_EQ(out[1], 0xadu);
+
+  // a NUL among the characters is not a hex digit, so the run is refused rather than cut short
+  const char with_nul[] = {'0', '1', '\0', '2', '3'};
+  uint8_t four[2] = {0x55, 0x55};
+  EXPECT_EQ(
+      arnm_binary_from_hex_with_known_hex_size(four, with_nul, sizeof(with_nul)),
+      ARNM_ERROR_INVALID_PARAM
+  ) << "five characters is an odd run, refused before a byte is written";
+  EXPECT_EQ(four[0], 0x55u);
+
+  uint8_t two[2] = {0x55, 0x55};
+  EXPECT_EQ(arnm_binary_from_hex_with_known_hex_size(two, with_nul, 4), ARNM_ERROR_DECODE_FAILED)
+      << "an even run holding a NUL is decodable in length and not in content";
+  EXPECT_EQ(two[0], 0x00u) << "a failed decode clears what it wrote";
+  EXPECT_EQ(two[1], 0x00u);
+
+  // the wrapper measures the same string and stops at the NUL, which is the one difference
+  uint8_t wrapped[1] = {0x55};
+  EXPECT_EQ(arnm_binary_from_hex(wrapped, with_nul), ARNM_SUCCESS);
+  EXPECT_EQ(wrapped[0], 0x01u);
+}
+
+// promise: neither entry point reaches into a NULL string, the wrapper included -- it measures
+// before it forwards, so the check has to sit in front of the measuring
+TEST(HexTest, BothDecodeEntryPointsRefuseANullString) {
+  uint8_t out[2] = {0, 0};
+  EXPECT_EQ(arnm_binary_from_hex(out, nullptr), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_binary_from_hex(nullptr, "0a"), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_binary_from_hex_with_known_hex_size(out, nullptr, 2), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_binary_from_hex_with_known_hex_size(nullptr, "0a", 2), ARNM_ERROR_NULL_POINTER);
 }
 
 // promise: anything that is not an even run of hex digits is refused, the output is cleared
@@ -699,4 +745,142 @@ TEST(Base64, PaddingIsOnlyAllowedWhereItBelongs) {
   EXPECT_EQ(arnm_binary_from_base64(out, &written, "Zg=="), ARNM_SUCCESS);
   EXPECT_EQ(written, 1u);
   EXPECT_EQ(out[0], 'f');
+}
+
+// ---------------------------------------------------------------------------
+// base64 in place: the same decode, over the string it was handed
+// ---------------------------------------------------------------------------
+
+TEST(Base64Insitu, EveryLengthDecodesToWhatTheCopyingCallWrites) {
+  // the two calls share one loop, so what this test is really guarding is that writing the
+  // bytes over the characters they came from never overwrites a character still to be read
+  for (uint32_t size = 1; size <= 300; ++size) {
+    std::vector<uint8_t> bytes(size);
+    for (uint32_t i = 0; i < size; ++i) { bytes[i] = (uint8_t)((i * 37u + size) & 0xFFu); }
+
+    std::string text(ARNM_BASE64_STRING_LENGTH(size) + 1u, '\0');
+    const arnm_memory_block block{bytes.data(), size};
+    ASSERT_EQ(arnm_binary_to_base64(text.data(), &block), ARNM_SUCCESS) << "size " << size;
+    const uint32_t length = ARNM_BASE64_STRING_LENGTH(size);
+
+    std::string in_place(text);
+    uint32_t written = 0;
+    ASSERT_EQ(arnm_binary_from_base64_insitu(in_place.data(), length, &written), ARNM_SUCCESS)
+        << "size " << size;
+    ASSERT_EQ(written, size);
+    EXPECT_EQ(0, std::memcmp(in_place.data(), bytes.data(), size)) << "size " << size;
+  }
+}
+
+TEST(Base64Insitu, TheLongestGroupsAreDecodedWhereTheCharactersOverlapTheBytes) {
+  // 3 bytes out of 4 characters means the write index catches up with the read index by a
+  // quarter every group; a long input is where that would show if the order were wrong
+  const uint32_t size = 100000;
+  std::vector<uint8_t> bytes(size);
+  for (uint32_t i = 0; i < size; ++i) { bytes[i] = (uint8_t)((i * 251u + 13u) & 0xFFu); }
+
+  std::string text(ARNM_BASE64_STRING_LENGTH(size) + 1u, '\0');
+  const arnm_memory_block block{bytes.data(), size};
+  ASSERT_EQ(arnm_binary_to_base64(text.data(), &block), ARNM_SUCCESS);
+
+  uint32_t written = 0;
+  ASSERT_EQ(
+      arnm_binary_from_base64_insitu(text.data(), ARNM_BASE64_STRING_LENGTH(size), &written),
+      ARNM_SUCCESS
+  );
+  ASSERT_EQ(written, size);
+  EXPECT_EQ(0, std::memcmp(text.data(), bytes.data(), size));
+}
+
+TEST(Base64Insitu, ThePaddedLengthsAreReadFromTheStringAndNotAssumed) {
+  struct {
+    const char *text;
+    const char *expected;
+    uint32_t size;
+  } cases[] = {{"aGVs", "hel", 3}, {"aGU=", "he", 2}, {"aA==", "h", 1}};
+
+  for (const auto &one : cases) {
+    char buffer[8] = {0};
+    std::memcpy(buffer, one.text, 4);
+    uint32_t written = 0;
+    ASSERT_EQ(arnm_binary_from_base64_insitu(buffer, 4, &written), ARNM_SUCCESS) << one.text;
+    EXPECT_EQ(written, one.size) << one.text;
+    EXPECT_EQ(0, std::memcmp(buffer, one.expected, one.size)) << one.text;
+  }
+}
+
+TEST(Base64Insitu, AnEmptyInputWritesNothingAndALengthThatIsNoBase64IsRefused) {
+  char buffer[8] = "Zm9vYmF";
+  uint32_t written = 99;
+  EXPECT_EQ(arnm_binary_from_base64_insitu(buffer, 0, &written), ARNM_SUCCESS);
+  EXPECT_EQ(written, 0u);
+  EXPECT_EQ(buffer[0], 'Z') << "nothing to decode means nothing written";
+
+  written = 0;
+  EXPECT_EQ(arnm_binary_from_base64_insitu(buffer, 7, &written), ARNM_ERROR_INVALID_PARAM);
+  EXPECT_EQ(buffer[0], 'Z') << "refused before anything is written, so the string is untouched";
+}
+
+TEST(Base64Insitu, AForeignCharacterIsRefusedAndTheBytesZeroed) {
+  for (const char *bad : {"Zm9v!mFy", "Zm9vYm-y", "Zm9v Zm9v", "Zm=vYmFy", "Zm9vY==y"}) {
+    char buffer[16] = {0};
+    const uint32_t length = (uint32_t)std::strlen(bad);
+    std::memcpy(buffer, bad, length);
+    uint32_t written = 0;
+    // the one input above whose length is not a multiple of four is refused for that instead
+    const arnm_result expected =
+        (length % 4u) ? ARNM_ERROR_INVALID_PARAM : ARNM_ERROR_DECODE_FAILED;
+    EXPECT_EQ(arnm_binary_from_base64_insitu(buffer, length, &written), expected) << bad;
+    if (ARNM_ERROR_DECODE_FAILED == expected) {
+      EXPECT_EQ(buffer[0], 0) << "a caller who overlooks the code must not read half a decode";
+    }
+  }
+}
+
+TEST(Base64Insitu, NullIsAnswered) {
+  char buffer[8] = "aGVs";
+  uint32_t written = 0;
+  EXPECT_EQ(arnm_binary_from_base64_insitu(nullptr, 4, &written), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_binary_from_base64_insitu(buffer, 4, nullptr), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(buffer[0], 'a') << "answered before the decode, so the string is untouched";
+}
+
+// ---------------------------------------------------------------------------
+// base64: what a string really decodes to, before anything is allocated for it
+// ---------------------------------------------------------------------------
+
+TEST(Converter, Base64BinarySizeReadsThePaddingRatherThanAssumingIt) {
+  uint32_t size = 0;
+  // the same four characters carry three bytes, two, or one, and only the '=' says which
+  EXPECT_EQ(arnm_base64_binary_size("aGVs", 4, &size), ARNM_SUCCESS);
+  EXPECT_EQ(size, 3u);
+  EXPECT_EQ(arnm_base64_binary_size("aGU=", 4, &size), ARNM_SUCCESS);
+  EXPECT_EQ(size, 2u);
+  EXPECT_EQ(arnm_base64_binary_size("aA==", 4, &size), ARNM_SUCCESS);
+  EXPECT_EQ(size, 1u);
+  EXPECT_EQ(arnm_base64_binary_size("", 0, &size), ARNM_SUCCESS);
+  EXPECT_EQ(size, 0u);
+}
+
+TEST(Converter, Base64BinarySizeAgreesWithWhatTheDecodeWrites) {
+  const char *strings[] = {"aGVsbG8=", "aGVsbG9v", "aA==", "aGVsbG8gd29ybGQh"};
+  for (const char *base64 : strings) {
+    uint32_t expected = 0;
+    ASSERT_EQ(
+        arnm_base64_binary_size(base64, static_cast<uint32_t>(strlen(base64)), &expected),
+        ARNM_SUCCESS
+    ) << base64;
+    uint8_t buffer[64] = {0};
+    uint32_t written = 0;
+    ASSERT_EQ(arnm_binary_from_base64(buffer, &written, base64), ARNM_SUCCESS) << base64;
+    EXPECT_EQ(written, expected) << base64;
+  }
+}
+
+TEST(Converter, Base64BinarySizeRefusesALengthThatIsNoBase64) {
+  uint32_t size = 0xffffffffu;
+  EXPECT_EQ(arnm_base64_binary_size("aGVsb", 5, &size), ARNM_ERROR_DECODE_FAILED);
+  EXPECT_EQ(size, 0xffffffffu); // untouched, as every failing call here leaves its output
+  EXPECT_EQ(arnm_base64_binary_size(nullptr, 4, &size), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_base64_binary_size("aGVs", 4, nullptr), ARNM_ERROR_NULL_POINTER);
 }

@@ -224,7 +224,7 @@ arnm_result arnm_binary_to_hex(char *result_buffer, const arnm_memory_block *dat
  *
  * @see arnm_binary_from_base64(), whose table survived the same experiment by a wider margin.
  */
-static const char BASE64_ALPHABET[64] =
+static const char BASE64_ALPHABET[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /**
@@ -536,25 +536,58 @@ arnm_result arnm_binary_to_base64(char *result_buffer, const arnm_memory_block *
   return ARNM_SUCCESS;
 }
 
-arnm_result arnm_binary_from_base64(
-    uint8_t *result_buffer, uint32_t *out_size, const char *base64
+/** @brief What the padding at the end of @p base64 takes off the byte count. */
+static size_t base64_padding(const char *base64, size_t length) {
+  if ('=' != base64[length - 1u]) { return 0; }
+  return ('=' == base64[length - 2u]) ? 2u : 1u;
+}
+
+/*
+ * Kept out of line, which is a performance decision and not a style one.
+ *
+ * Two entry points share this loop, and letting the compiler inline it into both is what the
+ * obvious reading of "static helper" gets. Measured on bench_binaryToString, that reading costs:
+ * inlined twice, the hot loop comes out with one more load per group hoisted into the path every
+ * group takes, and the 1024 byte row moves from 580 ns to 650. One copy, called twice, measures
+ * where the loop measured before it was shared -- 573 ns -- and the call it adds does not show
+ * even on the 16 byte row, where a call is the largest share of the work there is.
+ *
+ * The attribute is a hint and every compiler that does not have it is still correct, only
+ * possibly back to the inlined figure.
+ */
+#if defined(__GNUC__) || defined(__clang__)
+#define ARNM_CONVERTER_NOINLINE __attribute__((noinline))
+#elif defined(_MSC_VER)
+#define ARNM_CONVERTER_NOINLINE __declspec(noinline)
+#else
+#define ARNM_CONVERTER_NOINLINE
+#endif
+
+/**
+ * @brief The loop both decoders are, with the two buffers named apart.
+ *
+ * @p result_buffer may be @p base64 itself, which is what makes the in place decode this same
+ * loop rather than a second one: a group is read whole into @c group before any of its bytes is
+ * written, and the three bytes of group `i` land at `3i` while its characters sat at `4i`, so
+ * every write goes behind the read that is already done. Nothing is read after it is written,
+ * at any length, and the padding check reads no further than the group it is in.
+ *
+ * The two pointers are deliberately not `restrict`. They are character types, so a compiler may
+ * not assume they are apart anyway, and saying it here would be the one place the in place call
+ * turns into undefined behaviour rather than the intended one.
+ *
+ * @param[out] result_buffer Where the bytes go; @p binary_size of them, or zeros on a refusal.
+ * @param[in]  base64        The characters; @p length of them, a multiple of four, not empty.
+ * @param[in]  length        Characters to read.
+ * @param[in]  binary_size   Bytes the padding says those characters carry.
+ * @retval ARNM_SUCCESS             @p binary_size bytes written.
+ * @retval ARNM_ERROR_DECODE_FAILED A character outside the alphabet, or padding where none
+ *                                  belongs. The output is zeroed, which for the in place call
+ *                                  is the front of the string it was handed.
+ */
+ARNM_CONVERTER_NOINLINE static arnm_result base64_decode_into(
+    uint8_t *result_buffer, const char *base64, size_t length, size_t binary_size
 ) {
-  if (!result_buffer || !out_size || !base64) { return ARNM_ERROR_NULL_POINTER; }
-
-  const size_t length = strlen(base64);
-  if (0 == length) {
-    *out_size = 0;
-    return ARNM_SUCCESS;
-  }
-  // four characters make three bytes, so a length that is not a multiple of four cannot be
-  // base64 -- refused before anything is written, so the buffer is left as the caller had it
-  if (length % 4u) { return ARNM_ERROR_INVALID_PARAM; }
-
-  // how much the padding takes off, read before the loop so the output size is known up front
-  size_t padding = 0;
-  if ('=' == base64[length - 1u]) { padding = ('=' == base64[length - 2u]) ? 2u : 1u; }
-  const size_t binary_size = (length / 4u) * 3u - padding;
-
   size_t out = 0;
   for (size_t i = 0; i < length; i += 4u) {
     uint32_t group = 0;
@@ -578,14 +611,73 @@ arnm_result arnm_binary_from_base64(
     if (out < binary_size) { result_buffer[out++] = (uint8_t)((group >> 8) & 0xFFu); }
     if (out < binary_size) { result_buffer[out++] = (uint8_t)(group & 0xFFu); }
   }
+  return ARNM_SUCCESS;
+}
+
+arnm_result arnm_binary_from_base64(
+    uint8_t *result_buffer, uint32_t *out_size, const char *base64
+) {
+  if (!result_buffer || !out_size || !base64) { return ARNM_ERROR_NULL_POINTER; }
+
+  const size_t length = strlen(base64);
+  if (0 == length) {
+    *out_size = 0;
+    return ARNM_SUCCESS;
+  }
+  // four characters make three bytes, so a length that is not a multiple of four cannot be
+  // base64 -- refused before anything is written, so the buffer is left as the caller had it
+  if (length % 4u) { return ARNM_ERROR_INVALID_PARAM; }
+
+  // how much the padding takes off, read before the loop so the output size is known up front
+  const size_t binary_size = (length / 4u) * 3u - base64_padding(base64, length);
+
+  const arnm_result result = base64_decode_into(result_buffer, base64, length, binary_size);
+  if (ARNM_SUCCESS != result) { return result; }
 
   *out_size = (uint32_t)binary_size;
   return ARNM_SUCCESS;
 }
 
-arnm_result arnm_binary_from_hex(uint8_t *result_buffer, const char *hex) {
-  if (!result_buffer || !hex) { return ARNM_ERROR_NULL_POINTER; }
-  size_t hex_size = strlen(hex);
+arnm_result arnm_binary_from_base64_insitu(char *base64, uint32_t length, uint32_t *out_size) {
+  if (!base64 || !out_size) { return ARNM_ERROR_NULL_POINTER; }
+
+  if (0 == length) {
+    *out_size = 0;
+    return ARNM_SUCCESS;
+  }
+  if (length % 4u) { return ARNM_ERROR_INVALID_PARAM; }
+
+  const size_t binary_size = ((size_t)length / 4u) * 3u - base64_padding(base64, length);
+
+  // the same buffer as both arguments; see base64_decode_into() for why the loop survives that
+  const arnm_result result =
+      base64_decode_into((uint8_t *)base64, base64, (size_t)length, binary_size);
+  if (ARNM_SUCCESS != result) { return result; }
+
+  *out_size = (uint32_t)binary_size;
+  return ARNM_SUCCESS;
+}
+
+arnm_result arnm_base64_binary_size(const char *base64, uint32_t length, uint32_t *out_size) {
+  if (!base64 || !out_size) { return ARNM_ERROR_NULL_POINTER; }
+  // four characters make three bytes, so anything else was never base64
+  if (length % 4u) { return ARNM_ERROR_DECODE_FAILED; }
+  if (0 == length) {
+    *out_size = 0;
+    return ARNM_SUCCESS;
+  }
+
+  uint32_t padding = 0;
+  if ('=' == base64[length - 1u]) { padding = ('=' == base64[length - 2u]) ? 2u : 1u; }
+  *out_size = ARNM_BASE64_BINARY_SIZE(length) - padding;
+  return ARNM_SUCCESS;
+}
+
+arnm_result arnm_binary_from_hex_with_known_hex_size(
+    uint8_t *result_buffer, const char *hex, size_t hex_size
+) {
+  if (!result_buffer || !hex) return ARNM_ERROR_NULL_POINTER;
+  if (!hex_size) return ARNM_ERROR_INVALID_PARAM;
   size_t bin_size = hex_size / 2;
   // two characters make one byte, so an odd length cannot be hex -- the division above dropped
   // the stray character and multiplying back reveals it

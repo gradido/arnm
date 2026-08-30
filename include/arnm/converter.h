@@ -6,6 +6,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -145,30 +146,57 @@ uint8_t arnm_int64_to_string_size(int64_t value);
 arnm_result arnm_binary_to_hex(char *result_buffer, const arnm_memory_block *data);
 
 /**
- * @brief Read a hex string back into the bytes it spells.
+ * @brief Read a hex string back into the bytes it spells, over a length the caller already has.
  *
  * Both digit cases are accepted. Nothing is skipped: a separator between the bytes makes the
  * string undecodable rather than being ignored.
  *
- * @param[out] result_buffer Expected to hold strlen(hex) / 2 bytes. Those bytes are set to all
+ * The length is passed rather than measured, which is what lets this decode a run of characters
+ * that is not a C string -- a slice of a larger buffer, or a JSON member whose bytes the parser
+ * already counted. Exactly @p hex_size characters are read and a NUL among them is a character
+ * like any other, and not a hex digit, so it is refused rather than treated as an early end.
+ *
+ * @param[out] result_buffer Expected to hold @p hex_size / 2 bytes. Those bytes are set to all
  *                           zeros when the string turns out not to be hex, so a caller that
  *                           overlooks the result code never reads half converted bytes. Only
  *                           what this call decoded is cleared; whatever the buffer held before
  *                           belongs to the caller and is left alone.
- * @param[in]  hex           Null terminated string of an even number of hex digits. Empty is
- *                           allowed and writes nothing.
- * @retval ARNM_SUCCESS             strlen(hex) / 2 bytes written.
+ * @param[in]  hex           Characters to read; not NULL. No terminator is required and none is
+ *                           looked for.
+ * @param[in]  hex_size      Characters in @p hex: even, and not 0.
+ * @retval ARNM_SUCCESS             @p hex_size / 2 bytes written.
  * @retval ARNM_ERROR_NULL_POINTER  @p result_buffer or @p hex is NULL.
- * @retval ARNM_ERROR_INVALID_PARAM @p hex has an odd number of characters. Refused before
- *                                     anything is written, so @p result_buffer is left exactly
- *                                     as the caller had it -- there is nothing of this call's
- *                                     making in it to clear.
+ * @retval ARNM_ERROR_INVALID_PARAM @p hex_size is odd or 0. Refused before anything is written,
+ *                                     so @p result_buffer is left exactly as the caller had it
+ *                                     -- there is nothing of this call's making in it to clear.
+ *                                     An empty run spells no bytes and is a refusal here, the
+ *                                     same way @ref arnm_binary_to_hex() refuses an empty block.
  * @retval ARNM_ERROR_DECODE_FAILED @p hex holds a character that is not a hex digit. The
- *                                     strlen(hex) / 2 bytes are zeroed.
+ *                                     @p hex_size / 2 bytes are zeroed.
  * @note Not constant time; see the warning on this group.
  * @whisper Two characters settle back into the one byte they came from
  */
-arnm_result arnm_binary_from_hex(uint8_t *result_buffer, const char *hex);
+arnm_result arnm_binary_from_hex_with_known_hex_size(
+    uint8_t *result_buffer, const char *hex, size_t hex_size
+);
+
+/**
+ * @brief Read a NUL terminated hex string back into the bytes it spells.
+ *
+ * @ref arnm_binary_from_hex_with_known_hex_size() over the length `strlen()` reports, which is
+ * the shape a caller holding a plain C string wants. Everything that call promises holds here,
+ * the refusal of an empty string included: `""` measures 0 and is answered with
+ * @ref ARNM_ERROR_INVALID_PARAM, not with a success that wrote nothing.
+ *
+ * @param[out] result_buffer Expected to hold `strlen(hex) / 2` bytes; see the sized call.
+ * @param[in]  hex           Null terminated string of an even, non zero number of hex digits.
+ * @return What @ref arnm_binary_from_hex_with_known_hex_size() answers.
+ * @whisper The string measures itself before it settles back into bytes
+ */
+static inline arnm_result arnm_binary_from_hex(uint8_t *result_buffer, const char *hex) {
+  if (!hex) { return ARNM_ERROR_NULL_POINTER; }
+  return arnm_binary_from_hex_with_known_hex_size(result_buffer, hex, strlen(hex));
+}
 
 /**
  * @brief Characters the base64 of @p size bytes takes, terminator not counted.
@@ -230,6 +258,74 @@ arnm_result arnm_binary_to_base64(char *result_buffer, const arnm_memory_block *
  * @whisper Four letters settle back into the three bytes they came from
  */
 arnm_result arnm_binary_from_base64(uint8_t *result_buffer, uint32_t *out_size, const char *base64);
+
+/**
+ * @brief Read a base64 string back into the bytes it spells, over the string itself.
+ *
+ * @ref arnm_binary_from_base64() where the caller owns the characters and does not need them
+ * afterwards -- a field borrowed out of a document parsed in place, a buffer that arrived off a
+ * socket. The bytes are written over the front of the same buffer, so there is no second
+ * allocation to size, none to free, and no cache line touched that the string was not already
+ * on: three bytes go where four characters were, always behind the read that produced them.
+ *
+ * The alphabet, the padding rules and what counts as undecodable are the ones
+ * @ref arnm_binary_from_base64() documents; only the buffer and the length differ. The length
+ * is passed rather than measured, because the caller of an in place decode usually has it and a
+ * borrowed field is not always terminated.
+ *
+ * @param[in,out] base64   The characters on the way in, the bytes on the way out; not NULL.
+ *                         Read as @p length characters, written as @p out_size bytes at its
+ *                         front. Need not be NUL terminated, and no terminator is written --
+ *                         @p out_size is what says how far the bytes go.
+ * @param[in]     length   Characters to read, terminator not counted. Zero is allowed, decodes
+ *                         to nothing and leaves the buffer alone.
+ * @param[out]    out_size Receives the bytes actually written, which the padding decides; not
+ *                         NULL. Untouched unless the call succeeds.
+ * @retval ARNM_SUCCESS             @p out_size bytes written at the front of @p base64.
+ * @retval ARNM_ERROR_NULL_POINTER  @p base64 or @p out_size is NULL.
+ * @retval ARNM_ERROR_INVALID_PARAM @p length is not a multiple of four. Refused before anything
+ *                                  is written, so the string is left as it was.
+ * @retval ARNM_ERROR_DECODE_FAILED @p base64 holds a character the alphabet does not have, or
+ *                                  padding where none belongs. The bytes a decode would have
+ *                                  written are zeroed, as in the copying call.
+ * @warning The string does not survive this, whatever the call answers: on success its front
+ *          holds bytes, and on @ref ARNM_ERROR_DECODE_FAILED that same front holds zeros.
+ *          A caller that still needs the characters wants @ref arnm_binary_from_base64().
+ * @note What this saves is the buffer and not the time. Against the copying call in
+ *       bench_binaryToString it runs 1.01x to 1.04x from 1 KiB to 1 MiB and about 1.05x at
+ *       8 MiB: the decode moves around 1.5 GB/s, far under what the memory it stops touching
+ *       could have delivered, so the second buffer was never what it waited on. Reach for this
+ *       one to be rid of the allocation, not to go faster.
+ * @note Not constant time; see the warning on this group.
+ * @whisper The letters lie down as the bytes they always were, without leaving the page
+ */
+arnm_result arnm_binary_from_base64_insitu(char *base64, uint32_t length, uint32_t *out_size);
+
+/**
+ * @brief Bytes @p base64 really decodes to, padding read rather than assumed.
+ *
+ * @ref ARNM_BASE64_BINARY_SIZE() answers what a length of characters can hold at most, which is
+ * what a buffer is sized by. This answers what this particular string will write, which is what
+ * an allocation is measured by: the last group carries one, two or three bytes, and only the
+ * `=` at the end of it says which. The two differ by at most two bytes -- and an arena handed
+ * two bytes it is never given back is an arena that ends short of the read that follows it.
+ *
+ * Nothing is decoded and nothing is written; only the last two characters are looked at.
+ *
+ * @param[in]  base64   The string; not NULL. Need not be NUL terminated.
+ * @param[in]  length   Characters in @p base64, terminator not counted. Zero is allowed and
+ *                      answers zero.
+ * @param[out] out_size Receives the byte count; not NULL. Untouched unless the call succeeds.
+ * @retval ARNM_SUCCESS             @p out_size holds what a decode would write.
+ * @retval ARNM_ERROR_NULL_POINTER  @p base64 or @p out_size is NULL.
+ * @retval ARNM_ERROR_DECODE_FAILED @p length is not a multiple of four, so the string is not
+ *                                  base64 at all. @ref arnm_binary_from_base64() calls the same
+ *                                  condition @ref ARNM_ERROR_INVALID_PARAM, because there it is
+ *                                  a caller writing through a buffer; here a string is only
+ *                                  being asked what it is.
+ * @whisper Counted before a single byte is lifted
+ */
+arnm_result arnm_base64_binary_size(const char *base64, uint32_t length, uint32_t *out_size);
 
 /** @brief Bytes a uuid occupies in binary form. */
 #define ARNM_UUID_BINARY_SIZE 16

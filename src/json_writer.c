@@ -2,6 +2,7 @@
 
 #include "arnm/converter.h"
 
+// includes also yyjson
 #include "json_memory.h"
 
 #include <stdint.h>
@@ -115,8 +116,7 @@ static uint32_t narrow_length(size_t length) {
 /** @brief Every bit arnm/json_writer.h defines; anything else is refused. */
 #define JSON_WRITE_KNOWN_FLAGS                                                                     \
   (ARNM_JSON_WRITE_PRETTY | ARNM_JSON_WRITE_PRETTY_TWO_SPACES | ARNM_JSON_WRITE_ESCAPE_UNICODE |   \
-   ARNM_JSON_WRITE_ESCAPE_SLASHES | ARNM_JSON_WRITE_ALLOW_INF_AND_NAN |                            \
-   ARNM_JSON_WRITE_INF_AND_NAN_AS_NULL | ARNM_JSON_WRITE_ALLOW_INVALID_UNICODE |                   \
+   ARNM_JSON_WRITE_ESCAPE_SLASHES | ARNM_JSON_WRITE_INF_AND_NAN_AS_NULL |                          \
    ARNM_JSON_WRITE_NEWLINE_AT_END)
 
 /**
@@ -132,6 +132,11 @@ static arnm_result translate_write_flags(arnm_json_write_flags flags, yyjson_wri
     return ARNM_ERROR_INVALID_PARAM;
   }
 
+  // Two switches do not survive the build's YYJSON_DISABLE_NON_STANDARD, which takes the code
+  // behind every YYJSON_WRITE_ALLOW_* out rather than defaulting it off. Translating a bit into
+  // a serializer that no longer reads it would be a flag accepted here and ignored there, so the
+  // public header carries no such bit to translate, and bits 4 and 6 are left empty so an old
+  // value is refused above instead of landing on a neighbour. See arnm/json_writer.h.
   yyjson_write_flag translated = YYJSON_WRITE_NOFLAG;
   if (0 != (flags & ARNM_JSON_WRITE_PRETTY)) { translated |= YYJSON_WRITE_PRETTY; }
   if (0 != (flags & ARNM_JSON_WRITE_PRETTY_TWO_SPACES)) {
@@ -139,14 +144,8 @@ static arnm_result translate_write_flags(arnm_json_write_flags flags, yyjson_wri
   }
   if (0 != (flags & ARNM_JSON_WRITE_ESCAPE_UNICODE)) { translated |= YYJSON_WRITE_ESCAPE_UNICODE; }
   if (0 != (flags & ARNM_JSON_WRITE_ESCAPE_SLASHES)) { translated |= YYJSON_WRITE_ESCAPE_SLASHES; }
-  if (0 != (flags & ARNM_JSON_WRITE_ALLOW_INF_AND_NAN)) {
-    translated |= YYJSON_WRITE_ALLOW_INF_AND_NAN;
-  }
   if (0 != (flags & ARNM_JSON_WRITE_INF_AND_NAN_AS_NULL)) {
     translated |= YYJSON_WRITE_INF_AND_NAN_AS_NULL;
-  }
-  if (0 != (flags & ARNM_JSON_WRITE_ALLOW_INVALID_UNICODE)) {
-    translated |= YYJSON_WRITE_ALLOW_INVALID_UNICODE;
   }
   if (0 != (flags & ARNM_JSON_WRITE_NEWLINE_AT_END)) { translated |= YYJSON_WRITE_NEWLINE_AT_END; }
 

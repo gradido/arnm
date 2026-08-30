@@ -1,6 +1,6 @@
 .{
     .name = .arnm,
-    .version = "0.7.3",
+    .version = "0.7.5",
     .dependencies = .{
         .googletest = .{
             .url = "git+https://github.com/allyourcodebase/googletest#e2affdd13730f800aa63772039f2adfa971461b6",
