@@ -748,6 +748,104 @@ TEST(Base64, PaddingIsOnlyAllowedWhereItBelongs) {
 }
 
 // ---------------------------------------------------------------------------
+// base64 in place: the same decode, over the string it was handed
+// ---------------------------------------------------------------------------
+
+TEST(Base64Insitu, EveryLengthDecodesToWhatTheCopyingCallWrites) {
+  // the two calls share one loop, so what this test is really guarding is that writing the
+  // bytes over the characters they came from never overwrites a character still to be read
+  for (uint32_t size = 1; size <= 300; ++size) {
+    std::vector<uint8_t> bytes(size);
+    for (uint32_t i = 0; i < size; ++i) { bytes[i] = (uint8_t)((i * 37u + size) & 0xFFu); }
+
+    std::string text(ARNM_BASE64_STRING_LENGTH(size) + 1u, '\0');
+    const arnm_memory_block block{bytes.data(), size};
+    ASSERT_EQ(arnm_binary_to_base64(text.data(), &block), ARNM_SUCCESS) << "size " << size;
+    const uint32_t length = ARNM_BASE64_STRING_LENGTH(size);
+
+    std::string in_place(text);
+    uint32_t written = 0;
+    ASSERT_EQ(arnm_binary_from_base64_insitu(in_place.data(), length, &written), ARNM_SUCCESS)
+        << "size " << size;
+    ASSERT_EQ(written, size);
+    EXPECT_EQ(0, std::memcmp(in_place.data(), bytes.data(), size)) << "size " << size;
+  }
+}
+
+TEST(Base64Insitu, TheLongestGroupsAreDecodedWhereTheCharactersOverlapTheBytes) {
+  // 3 bytes out of 4 characters means the write index catches up with the read index by a
+  // quarter every group; a long input is where that would show if the order were wrong
+  const uint32_t size = 100000;
+  std::vector<uint8_t> bytes(size);
+  for (uint32_t i = 0; i < size; ++i) { bytes[i] = (uint8_t)((i * 251u + 13u) & 0xFFu); }
+
+  std::string text(ARNM_BASE64_STRING_LENGTH(size) + 1u, '\0');
+  const arnm_memory_block block{bytes.data(), size};
+  ASSERT_EQ(arnm_binary_to_base64(text.data(), &block), ARNM_SUCCESS);
+
+  uint32_t written = 0;
+  ASSERT_EQ(
+      arnm_binary_from_base64_insitu(text.data(), ARNM_BASE64_STRING_LENGTH(size), &written),
+      ARNM_SUCCESS
+  );
+  ASSERT_EQ(written, size);
+  EXPECT_EQ(0, std::memcmp(text.data(), bytes.data(), size));
+}
+
+TEST(Base64Insitu, ThePaddedLengthsAreReadFromTheStringAndNotAssumed) {
+  struct {
+    const char *text;
+    const char *expected;
+    uint32_t size;
+  } cases[] = {{"aGVs", "hel", 3}, {"aGU=", "he", 2}, {"aA==", "h", 1}};
+
+  for (const auto &one : cases) {
+    char buffer[8] = {0};
+    std::memcpy(buffer, one.text, 4);
+    uint32_t written = 0;
+    ASSERT_EQ(arnm_binary_from_base64_insitu(buffer, 4, &written), ARNM_SUCCESS) << one.text;
+    EXPECT_EQ(written, one.size) << one.text;
+    EXPECT_EQ(0, std::memcmp(buffer, one.expected, one.size)) << one.text;
+  }
+}
+
+TEST(Base64Insitu, AnEmptyInputWritesNothingAndALengthThatIsNoBase64IsRefused) {
+  char buffer[8] = "Zm9vYmF";
+  uint32_t written = 99;
+  EXPECT_EQ(arnm_binary_from_base64_insitu(buffer, 0, &written), ARNM_SUCCESS);
+  EXPECT_EQ(written, 0u);
+  EXPECT_EQ(buffer[0], 'Z') << "nothing to decode means nothing written";
+
+  written = 0;
+  EXPECT_EQ(arnm_binary_from_base64_insitu(buffer, 7, &written), ARNM_ERROR_INVALID_PARAM);
+  EXPECT_EQ(buffer[0], 'Z') << "refused before anything is written, so the string is untouched";
+}
+
+TEST(Base64Insitu, AForeignCharacterIsRefusedAndTheBytesZeroed) {
+  for (const char *bad : {"Zm9v!mFy", "Zm9vYm-y", "Zm9v Zm9v", "Zm=vYmFy", "Zm9vY==y"}) {
+    char buffer[16] = {0};
+    const uint32_t length = (uint32_t)std::strlen(bad);
+    std::memcpy(buffer, bad, length);
+    uint32_t written = 0;
+    // the one input above whose length is not a multiple of four is refused for that instead
+    const arnm_result expected =
+        (length % 4u) ? ARNM_ERROR_INVALID_PARAM : ARNM_ERROR_DECODE_FAILED;
+    EXPECT_EQ(arnm_binary_from_base64_insitu(buffer, length, &written), expected) << bad;
+    if (ARNM_ERROR_DECODE_FAILED == expected) {
+      EXPECT_EQ(buffer[0], 0) << "a caller who overlooks the code must not read half a decode";
+    }
+  }
+}
+
+TEST(Base64Insitu, NullIsAnswered) {
+  char buffer[8] = "aGVs";
+  uint32_t written = 0;
+  EXPECT_EQ(arnm_binary_from_base64_insitu(nullptr, 4, &written), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_binary_from_base64_insitu(buffer, 4, nullptr), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(buffer[0], 'a') << "answered before the decode, so the string is untouched";
+}
+
+// ---------------------------------------------------------------------------
 // base64: what a string really decodes to, before anything is allocated for it
 // ---------------------------------------------------------------------------
 

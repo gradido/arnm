@@ -260,6 +260,48 @@ arnm_result arnm_binary_to_base64(char *result_buffer, const arnm_memory_block *
 arnm_result arnm_binary_from_base64(uint8_t *result_buffer, uint32_t *out_size, const char *base64);
 
 /**
+ * @brief Read a base64 string back into the bytes it spells, over the string itself.
+ *
+ * @ref arnm_binary_from_base64() where the caller owns the characters and does not need them
+ * afterwards -- a field borrowed out of a document parsed in place, a buffer that arrived off a
+ * socket. The bytes are written over the front of the same buffer, so there is no second
+ * allocation to size, none to free, and no cache line touched that the string was not already
+ * on: three bytes go where four characters were, always behind the read that produced them.
+ *
+ * The alphabet, the padding rules and what counts as undecodable are the ones
+ * @ref arnm_binary_from_base64() documents; only the buffer and the length differ. The length
+ * is passed rather than measured, because the caller of an in place decode usually has it and a
+ * borrowed field is not always terminated.
+ *
+ * @param[in,out] base64   The characters on the way in, the bytes on the way out; not NULL.
+ *                         Read as @p length characters, written as @p out_size bytes at its
+ *                         front. Need not be NUL terminated, and no terminator is written --
+ *                         @p out_size is what says how far the bytes go.
+ * @param[in]     length   Characters to read, terminator not counted. Zero is allowed, decodes
+ *                         to nothing and leaves the buffer alone.
+ * @param[out]    out_size Receives the bytes actually written, which the padding decides; not
+ *                         NULL. Untouched unless the call succeeds.
+ * @retval ARNM_SUCCESS             @p out_size bytes written at the front of @p base64.
+ * @retval ARNM_ERROR_NULL_POINTER  @p base64 or @p out_size is NULL.
+ * @retval ARNM_ERROR_INVALID_PARAM @p length is not a multiple of four. Refused before anything
+ *                                  is written, so the string is left as it was.
+ * @retval ARNM_ERROR_DECODE_FAILED @p base64 holds a character the alphabet does not have, or
+ *                                  padding where none belongs. The bytes a decode would have
+ *                                  written are zeroed, as in the copying call.
+ * @warning The string does not survive this, whatever the call answers: on success its front
+ *          holds bytes, and on @ref ARNM_ERROR_DECODE_FAILED that same front holds zeros.
+ *          A caller that still needs the characters wants @ref arnm_binary_from_base64().
+ * @note What this saves is the buffer and not the time. Against the copying call in
+ *       bench_binaryToString it runs 1.01x to 1.04x from 1 KiB to 1 MiB and about 1.05x at
+ *       8 MiB: the decode moves around 1.5 GB/s, far under what the memory it stops touching
+ *       could have delivered, so the second buffer was never what it waited on. Reach for this
+ *       one to be rid of the allocation, not to go faster.
+ * @note Not constant time; see the warning on this group.
+ * @whisper The letters lie down as the bytes they always were, without leaving the page
+ */
+arnm_result arnm_binary_from_base64_insitu(char *base64, uint32_t length, uint32_t *out_size);
+
+/**
  * @brief Bytes @p base64 really decodes to, padding read rather than assumed.
  *
  * @ref ARNM_BASE64_BINARY_SIZE() answers what a length of characters can hold at most, which is
