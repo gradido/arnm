@@ -181,6 +181,12 @@ returns the arena buffer; `arnm_destroy` releases a descriptor that came from `a
 
 ## How to work in this repository
 
+- **Never commit, never push.** Leave the work in the working tree, say what is in it, and stop
+  there. `git add`, `git commit`, `git tag` and `git push` belong to the human whose name goes
+  on the change, and an agent that runs them takes away the one moment where a person reads the
+  diff before it becomes history. Reading git is the other half of the same rule and is always
+  fine — `status`, `diff`, `log` and `show` are how you find out what you touched. And being
+  asked to "add it" is a request to finish the work, not to run the command.
 - **Measure before you claim.** Object sizes, timings, "this is faster" — run it, in a release
   build. A compiler often optimises away exactly the thing you were about to take credit for.
 - **Prove the test bites.** After fixing something, revert the fix, watch the new test fail,

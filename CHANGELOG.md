@@ -20,6 +20,102 @@ next build.
 Entries before 0.4.0 were reconstructed from the git history after the fact, so they summarise
 what the commits show rather than what was noted at the time.
 
+## 0.7.6 -- 2026-08-31
+
+`arnm/fixed_ring.h`, a bounded queue. Elements enter at the back and leave at the front, in one
+block reserved at `arnm_fixed_ring_init()` and never asked for again, so the peak is known the
+moment init returns and known exactly: `capacity * element_size`. Nothing else is added and
+nothing is taken away -- code built against 0.7.5 compiles unchanged.
+
+It exists because `arnm_bvec` is the wrong container for a queue that is consumed continuously.
+A bucket vector is right while a round ends all at once: `_clear()` drops everything, keeps the
+buckets warm, and the next round allocates nothing. A queue with something always in flight has
+no such moment, and an append-only container that is never entirely empty grows without bound.
+A ring reuses the slot the front just left, so a queue drained as fast as it is filled sits
+still -- `TurningOverManyTimesCostsNoMemoryAndLosesNothing` puts ten thousand elements through
+three slots and checks the arena has not moved.
+
+The other half of it is the ceiling. A vector answers a burst by growing; a ring answers with
+`ARNM_ERROR_RESOURCE_EXHAUSTED` and changes nothing, which leaves the producer to decide what a
+backlog should mean. It does not drop the oldest element to make room, because that decision
+has consequences the ring cannot see -- an entry may hold an arena, a file, a reference someone
+still owes a release to. A caller who wants the oldest gone pops it first, where the cleanup
+belongs.
+
+**Fixed, and named so.** As with `arnm_fixed_arena_pool`, a growable ring would be a second
+container rather than a mode of this one. One shape does one thing well and stays worth
+optimising; two shapes behind one name is where both get slower and harder to read.
+
+The capacity is exactly what was asked for, not rounded up to a power of two. Indexing costs an
+addition and a comparison instead of a mask, because `head` is below the capacity and an index
+into the queue is at most the capacity, so their sum passes the end at most once. A queue of
+1000 therefore reserves 1000 slots and not 1024.
+
+`ARNM_FIXED_RING_DEFINE(name, type)` generates the typed accessor set, the way
+`ARNM_BVEC_DEFINE` does.
+
+**The allocator is handed in twice and stored nowhere**, as `arnm_fixed_arena_pool` does it and
+unlike `arnm_bvec`, which keeps one for its whole life. `_init()` is given one, `_free()` is
+given the same one, and no other call in the header takes an allocator at all -- which is the
+point rather than a saving. A fixed ring does not grow and does not shrink, so between those
+two calls there is nothing that could ask anyone for memory, and that is readable in the
+signatures instead of only in the prose. The release order is the caller's to know as well: a
+ring inside an arena about to be reset can simply be left where it is. What it asks in return
+is the duty every size in this library already carries -- which allocator a ring was built on
+is the caller's to remember, and naming another one leaves the block where it is and answers
+`ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED`.
+
+**`arnm_bvec` carries the count of buckets it holds**, in a new `allocated_count` field, where
+it used to derive it by walking the index array while the slots were non-empty. The walk was
+free for a vector growing into fresh slots -- the next one is NULL and it ends at once -- and
+O(remaining) for one whose buckets already exist, which is what `arnm_bvec_reserve()` makes.
+`arnm_bvec_grow()` asks twice, once directly and once through its state check, so filling a
+reserved vector cost about `bucket_count^2` pointer loads: 61 M of them for the 7813 buckets of
+a 4 M element run, measured at 12 ms of a 22 ms append. The append phase of that run is now
+7.8 ms, and reserving is finally faster than growing rather than slower.
+
+**`arnm_bvec_free()` and `arnm_bvec_shrink()` choose which end to release from by allocator.**
+An arena is unwound newest first, as before -- it takes back only its most recent allocation, so
+no other order returns anything to it. The host is now given the buckets oldest first. glibc
+merges a freed chunk into the top chunk when it is adjacent, and trims the heap with `brk()`
+once top passes the trim threshold, so releasing newest first walks the top of the heap down and
+pays a shrink per bucket, with the pages faulted back in later. Measured with 7813 buckets of
+4 KiB, nothing above them: 32.1 ms newest first against 2.2 ms oldest first.
+
+That it never showed on a vector which grew into its buckets is an accident of layout, not a
+property of the container -- the index array is reallocated last and sits above every bucket,
+shielding them from the top chunk, while a reserved vector has it below them and is fully
+exposed. Same call, different history, and now the same cost: the free phase of a reserved 4 M
+element run went from 33.2 ms to 2.5 ms, and the whole run from 65.5 ms to 22.2 ms, which is
+finally a shade under the vector that grew.
+
+Four rows of `bench_vector` move with the two changes together, because every one of them fills
+a vector whose buckets are already there and then gives them back: `push, reserved`
+15.8 -> 5.2 ns an element, `push, arena` 6.4 -> 2.7, `push + pop cycle` 17.1 -> 6.5. The one
+worth naming is `refill after clear`, 5.4 -> 1.9: that is the round-based pattern the container
+is best at, `_clear()` keeps every bucket, and keeping them was exactly what made the walk long.
+Reserving is now the fastest way to fill one rather than the slowest -- 5.2 ns against the
+5.9 ns of a vector that grows into its buckets.
+
+Nothing about the interface changed and no call behaves differently. The struct is public, so
+this is a recompile rather than an edit -- the field fits in padding the descriptor already
+carried, and `sizeof(arnm_bvec)` is what it was.
+
+**`bench_bucket_vector` is now `bench_vector`**, because it holds three containers rather than
+one. It gains a queue section, and the shape of that section is the point: a queue consumed
+continuously is a row the ring has to itself, because a bucket vector appends and pops at the
+back and cannot do it at all. Putting a nanosecond figure beside the ring's would compare two
+things that are not the same operation, so what the vector costs is reported in the terms it is
+really paid in -- after 4 M elements through a 4096 element window it holds 30.6 MiB where the
+ring holds 32.0 KiB, and it stops accepting after 4 190 208 of them with
+`ARNM_ERROR_ARITHMETIC_OVERFLOW`, at 8184 of at most 8191 bucket pointers.
+
+The head to head that does mean something is beside it: filling a window and emptying it all at
+once is something both containers genuinely do, and there they are level, 2.4 ns an element for
+the ring against 2.5 ns for a bucket vector whose `_clear()` keeps the buckets. That is the
+container doing what it is for, and it is printed next to the other so the section does not read
+as a verdict.
+
 ## 0.7.5 -- 2026-08-30
 
 The reader is a different reader. What 0.7.0 opened and 0.7.4 finished was a cursor: you entered
