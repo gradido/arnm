@@ -52,6 +52,7 @@ allocator is on no path this library takes.
 | `arnm/multi_arena.h` | a chain of arenas that opens another one instead of running dry |
 | `arnm/fixed_arena_pool.h` | a fixed set of equal sized arenas, lent out and returned; the peak is known at init |
 | `arnm/bucket_vector.h` | growing sequence with stable element addresses; no copy on growth |
+| `arnm/fixed_ring.h` | bounded queue, first in first out; the room taken once, a full ring refuses rather than grows |
 | `arnm/json_reader.h` | JSON parsed into your arena; one line per struct field, the first error kept with its field name, an in-situ path that copies nothing |
 | `arnm/json_writer.h` | the way back: one line per struct field, strings borrowed rather than copied, and the output size known before the text exists |
 | `arnm/converter.h` | integer to decimal string, roughly 4× faster than `snprintf`; bytes to lowercase hex and back, uuid to its 8-4-4-4-12 form and back |

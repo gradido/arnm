@@ -249,6 +249,7 @@ pub fn build(b: *std.Build) void {
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_duration", .srcs = &.{"test_duration.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_memory", .srcs = &.{"test_memory.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_fixed_arena_pool", .srcs = &.{"test_fixed_arena_pool.cpp"} }, path);
+        processBuildTarget(&context, .{ .link_googletest = true, .name = "test_fixed_ring", .srcs = &.{"test_fixed_ring.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_json_reader", .srcs = &.{"test_json_reader.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_json_writer", .srcs = &.{"test_json_writer.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_multi_arena", .srcs = &.{"test_multi_arena.cpp"} }, path);

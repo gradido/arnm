@@ -20,6 +20,43 @@ next build.
 Entries before 0.4.0 were reconstructed from the git history after the fact, so they summarise
 what the commits show rather than what was noted at the time.
 
+## 0.7.6 -- 2026-08-31
+
+`arnm/fixed_ring.h`, a bounded queue. Elements enter at the back and leave at the front, in one
+block reserved at `arnm_fixed_ring_init()` and never asked for again, so the peak is known the
+moment init returns and known exactly: `capacity * element_size`. Nothing else is added and
+nothing is taken away -- code built against 0.7.5 compiles unchanged.
+
+It exists because `arnm_bvec` is the wrong container for a queue that is consumed continuously.
+A bucket vector is right while a round ends all at once: `_clear()` drops everything, keeps the
+buckets warm, and the next round allocates nothing. A queue with something always in flight has
+no such moment, and an append-only container that is never entirely empty grows without bound.
+A ring reuses the slot the front just left, so a queue drained as fast as it is filled sits
+still -- `TurningOverManyTimesCostsNoMemoryAndLosesNothing` puts ten thousand elements through
+three slots and checks the arena has not moved.
+
+The other half of it is the ceiling. A vector answers a burst by growing; a ring answers with
+`ARNM_ERROR_RESOURCE_EXHAUSTED` and changes nothing, which leaves the producer to decide what a
+backlog should mean. It does not drop the oldest element to make room, because that decision
+has consequences the ring cannot see -- an entry may hold an arena, a file, a reference someone
+still owes a release to. A caller who wants the oldest gone pops it first, where the cleanup
+belongs.
+
+**Fixed, and named so.** As with `arnm_fixed_arena_pool`, a growable ring would be a second
+container rather than a mode of this one. One shape does one thing well and stays worth
+optimising; two shapes behind one name is where both get slower and harder to read.
+
+The capacity is exactly what was asked for, not rounded up to a power of two. Indexing costs an
+addition and a comparison instead of a mask, because `head` is below the capacity and an index
+into the queue is at most the capacity, so their sum passes the end at most once. A queue of
+1000 therefore reserves 1000 slots and not 1024.
+
+`ARNM_FIXED_RING_DEFINE(name, type)` generates the typed accessor set, the way
+`ARNM_BVEC_DEFINE` does. The allocator is kept in the descriptor, as `arnm_bvec` keeps it and
+unlike `arnm_fixed_arena_pool`, which is handed one at init and again at release: a ring owns
+one block for exactly as long as it exists, so there is one allocator and one moment to hand it
+back at, and naming it twice would only open the way to naming it differently the second time.
+
 ## 0.7.5 -- 2026-08-30
 
 The reader is a different reader. What 0.7.0 opened and 0.7.4 finished was a cursor: you entered
