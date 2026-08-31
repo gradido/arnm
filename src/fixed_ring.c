@@ -17,6 +17,11 @@
  * leave a full ring and an empty one looking alike -- the ambiguity that costs either a spare
  * slot or a flag everywhere.
  *
+ * No allocator is among the fields. It arrives at _init and again at _free, so nothing between
+ * the two has one to reach for -- which is not a saving of eight bytes but the shape of the
+ * container written into its signatures: a fixed ring cannot grow, and a push that was handed
+ * no allocator cannot start.
+ *
  * Every index step is an addition and a comparison rather than a modulo, which is what lets the
  * capacity be exactly what the caller asked for: head is below the capacity and an index into
  * the queue is at most the capacity, so their sum passes the end at most once and one
@@ -32,7 +37,6 @@ static inline uint32_t block_bytes(const arnm_fixed_ring *ring) {
 
 /** The state a ring is in before init and after free: holding nothing, promising nothing. */
 static void forget_everything(arnm_fixed_ring *ring) {
-  ring->allocator = NULL;
   ring->slots = NULL;
   ring->capacity = 0;
   ring->head = 0;
@@ -57,8 +61,9 @@ arnm_result arnm_fixed_ring_init(
   const arnm_result result = arnm_alloc(&slots, bytes, allocator);
   if (ARNM_SUCCESS != result) { return result; }
 
-  // written only now, so a refused allocation leaves whatever the caller had
-  ring->allocator = allocator;
+  // written only now, so a refused allocation leaves whatever the caller had. The allocator is
+  // not among the fields: it is handed in again at _free, the way the pool asks for its source
+  // twice, and the ring stores nothing that could be given to it.
   ring->slots = slots;
   ring->capacity = capacity;
   ring->head = 0;
@@ -67,18 +72,17 @@ arnm_result arnm_fixed_ring_init(
   return ARNM_SUCCESS;
 }
 
-arnm_result arnm_fixed_ring_free(arnm_fixed_ring *ring) {
+arnm_result arnm_fixed_ring_free(arnm_fixed_ring *ring, arnm *allocator) {
   if (!ring) { return ARNM_ERROR_NULL_POINTER; }
   if (!ring->slots) {
     forget_everything(ring);
     return ARNM_SUCCESS;
   }
 
-  // read out before the descriptor is emptied: the size is recomputed from what the ring holds
-  // and the allocator is the one init was handed, so neither can be the caller's to remember
+  // the size is recomputed from what the ring holds, the allocator comes from the caller -- the
+  // same split every free in this library uses, and the same duty it puts on the caller
   uint8_t *block = ring->slots;
   const uint32_t bytes = block_bytes(ring);
-  arnm *allocator = ring->allocator;
 
   // emptied first: whatever the allocator answers, the ring has let go of the block and must
   // not be left pointing at it

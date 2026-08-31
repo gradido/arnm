@@ -66,7 +66,7 @@ TEST(FixedRing, InitReservesEverythingUpFront) {
   PushRange(&ring, 0, kCapacity);
   EXPECT_EQ(slot_ring_reserved(&ring), reserved);
 
-  EXPECT_EQ(slot_ring_free(&ring), ARNM_SUCCESS);
+  EXPECT_EQ(slot_ring_free(&ring, nullptr), ARNM_SUCCESS);
 }
 
 TEST(FixedRing, InitRefusesWhatItCannotHold) {
@@ -80,7 +80,7 @@ TEST(FixedRing, InitRefusesWhatItCannotHold) {
       ARNM_ERROR_INVALID_PARAM
   );
   EXPECT_EQ(arnm_fixed_ring_init(&ring, kCapacity, UINT16_MAX, nullptr), ARNM_SUCCESS);
-  EXPECT_EQ(arnm_fixed_ring_free(&ring), ARNM_SUCCESS);
+  EXPECT_EQ(arnm_fixed_ring_free(&ring, nullptr), ARNM_SUCCESS);
 
   // capacity times element size has to stay inside what the allocator counts in
   EXPECT_EQ(arnm_fixed_ring_init(&ring, UINT32_MAX, 8, nullptr), ARNM_ERROR_ARITHMETIC_OVERFLOW);
@@ -99,14 +99,13 @@ TEST(FixedRing, InitLeavesTheDescriptorAloneWhenTheAllocatorRefuses) {
   // them is nobody's to compare
   arnm_fixed_ring refused = ring;
   EXPECT_EQ(slot_ring_init(&refused, 16, &arena), ARNM_ERROR_OUT_OF_MEMORY);
-  EXPECT_EQ(refused.allocator, ring.allocator);
   EXPECT_EQ(refused.slots, ring.slots);
   EXPECT_EQ(refused.capacity, ring.capacity);
   EXPECT_EQ(refused.head, ring.head);
   EXPECT_EQ(refused.size, ring.size);
   EXPECT_EQ(refused.element_size, ring.element_size);
 
-  EXPECT_EQ(slot_ring_free(&ring), ARNM_SUCCESS);
+  EXPECT_EQ(slot_ring_free(&ring, &arena), ARNM_SUCCESS);
   arnm_release(&arena);
 }
 
@@ -121,7 +120,7 @@ TEST(FixedRing, FreeGivesTheBlockBackToTheArena) {
   EXPECT_LT(arnm_arena_remaining(&arena), before);
 
   // the ring is the arena's most recent allocation, so the bytes really come back
-  EXPECT_EQ(slot_ring_free(&ring), ARNM_SUCCESS);
+  EXPECT_EQ(slot_ring_free(&ring, &arena), ARNM_SUCCESS);
   EXPECT_EQ(arnm_arena_remaining(&arena), before);
 
   // and the descriptor is back where it started: nothing held, every write refused
@@ -132,7 +131,7 @@ TEST(FixedRing, FreeGivesTheBlockBackToTheArena) {
   EXPECT_EQ(slot_ring_emplace(&ring, &slot), ARNM_ERROR_NOT_INITIALIZED);
 
   // freeing again has nothing to give back and says so with a success
-  EXPECT_EQ(slot_ring_free(&ring), ARNM_SUCCESS);
+  EXPECT_EQ(slot_ring_free(&ring, &arena), ARNM_SUCCESS);
   arnm_release(&arena);
 }
 
@@ -149,10 +148,35 @@ TEST(FixedRing, FreeReportsWhatAnArenaCouldNotReclaim) {
   ASSERT_EQ(arnm_alloc(&later, 32, &arena), ARNM_SUCCESS);
 
   // the operation happened, the memory did not come back -- neither success nor failure
-  EXPECT_EQ(slot_ring_free(&ring), ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED);
+  EXPECT_EQ(slot_ring_free(&ring, &arena), ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED);
   EXPECT_EQ(ring.slots, nullptr);
 
   arnm_release(&arena);
+}
+
+TEST(FixedRing, FreeingWithAnotherAllocatorLeavesTheBlockWhereItIs) {
+  alignas(8) uint8_t blob[256];
+  alignas(8) uint8_t other_blob[256];
+  arnm arena;
+  arnm other;
+  ASSERT_EQ(arnm_init_arena_borrow(&arena, blob, sizeof(blob)), ARNM_SUCCESS);
+  ASSERT_EQ(arnm_init_arena_borrow(&other, other_blob, sizeof(other_blob)), ARNM_SUCCESS);
+  const uint32_t other_before = arnm_arena_remaining(&other);
+
+  arnm_fixed_ring ring;
+  ASSERT_EQ(slot_ring_init(&ring, kCapacity, &arena), ARNM_SUCCESS);
+  const uint32_t arena_after_init = arnm_arena_remaining(&arena);
+
+  // which allocator a ring was built on is the caller's to remember, and naming another one is
+  // caught by the address check in arnm_free(): the ring is empty either way, the block stays
+  // with its real owner, and neither arena is left holding something that is not theirs
+  EXPECT_EQ(slot_ring_free(&ring, &other), ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED);
+  EXPECT_EQ(ring.slots, nullptr);
+  EXPECT_EQ(arnm_arena_remaining(&other), other_before);
+  EXPECT_EQ(arnm_arena_remaining(&arena), arena_after_init);
+
+  arnm_release(&arena);
+  arnm_release(&other);
 }
 
 TEST(FixedRing, AZeroedDescriptorReadsAsEmptyAndRefusesEveryWrite) {
@@ -170,6 +194,8 @@ TEST(FixedRing, AZeroedDescriptorReadsAsEmptyAndRefusesEveryWrite) {
   uint32_t *slot = nullptr;
   EXPECT_EQ(slot_ring_emplace(&ring, &slot), ARNM_ERROR_NOT_INITIALIZED);
   EXPECT_EQ(slot_ring_push(&ring, 1u), ARNM_ERROR_NOT_INITIALIZED);
+  // nothing was taken, so nothing is owed back, whatever allocator is named here
+  EXPECT_EQ(slot_ring_free(&ring, nullptr), ARNM_SUCCESS);
   // holding nothing is the true answer to a pop, whatever the reason for it
   EXPECT_EQ(slot_ring_pop(&ring), ARNM_ERROR_ARRAY_INDEX_OUT_OF_BOUNDS);
 }
@@ -177,7 +203,7 @@ TEST(FixedRing, AZeroedDescriptorReadsAsEmptyAndRefusesEveryWrite) {
 TEST(FixedRing, NullIsAnswered) {
   uint32_t value = 0;
   void *slot = nullptr;
-  EXPECT_EQ(arnm_fixed_ring_free(nullptr), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_fixed_ring_free(nullptr, nullptr), ARNM_ERROR_NULL_POINTER);
   EXPECT_EQ(arnm_fixed_ring_emplace(nullptr, &slot), ARNM_ERROR_NULL_POINTER);
   EXPECT_EQ(arnm_fixed_ring_push_ptr(nullptr, &value), ARNM_ERROR_NULL_POINTER);
   EXPECT_EQ(arnm_fixed_ring_pop(nullptr), ARNM_ERROR_NULL_POINTER);
@@ -193,7 +219,7 @@ TEST(FixedRing, NullIsAnswered) {
   EXPECT_EQ(arnm_fixed_ring_pop_copy(&ring, nullptr), ARNM_ERROR_NULL_POINTER);
   EXPECT_EQ(arnm_fixed_ring_copy_to(&ring, nullptr, 1), ARNM_ERROR_NULL_POINTER);
   EXPECT_EQ(slot_ring_size(&ring), 0u); // and none of them added anything
-  EXPECT_EQ(slot_ring_free(&ring), ARNM_SUCCESS);
+  EXPECT_EQ(slot_ring_free(&ring, nullptr), ARNM_SUCCESS);
 }
 
 // ---------------------------------------------------------------------------
@@ -218,7 +244,7 @@ TEST(FixedRing, ElementsLeaveInTheOrderTheyArrived) {
   for (uint32_t i = 0; i < kCapacity; ++i) { EXPECT_EQ(taken[i], 10u + i) << i; }
   EXPECT_TRUE(slot_ring_is_empty(&ring));
 
-  EXPECT_EQ(slot_ring_free(&ring), ARNM_SUCCESS);
+  EXPECT_EQ(slot_ring_free(&ring, nullptr), ARNM_SUCCESS);
 }
 
 TEST(FixedRing, FullIsAnAnswerAndChangesNothing) {
@@ -239,7 +265,7 @@ TEST(FixedRing, FullIsAnAnswerAndChangesNothing) {
   EXPECT_EQ(slot_ring_push(&ring, 999u), ARNM_SUCCESS);
   EXPECT_EQ(*slot_ring_back(&ring), 999u);
 
-  EXPECT_EQ(slot_ring_free(&ring), ARNM_SUCCESS);
+  EXPECT_EQ(slot_ring_free(&ring, nullptr), ARNM_SUCCESS);
 }
 
 TEST(FixedRing, PopOnAnEmptyRingIsRefusedAndLeavesTheDestinationAlone) {
@@ -253,7 +279,7 @@ TEST(FixedRing, PopOnAnEmptyRingIsRefusedAndLeavesTheDestinationAlone) {
   EXPECT_EQ(slot_ring_front(&ring), nullptr);
   EXPECT_EQ(slot_ring_back(&ring), nullptr);
 
-  EXPECT_EQ(slot_ring_free(&ring), ARNM_SUCCESS);
+  EXPECT_EQ(slot_ring_free(&ring, nullptr), ARNM_SUCCESS);
 }
 
 TEST(FixedRing, ClearDropsEverythingAndKeepsTheBlock) {
@@ -271,7 +297,7 @@ TEST(FixedRing, ClearDropsEverythingAndKeepsTheBlock) {
   EXPECT_EQ(*slot_ring_front(&ring), 100u);
   EXPECT_EQ(slot_ring_reserved(&ring), reserved);
 
-  EXPECT_EQ(slot_ring_free(&ring), ARNM_SUCCESS);
+  EXPECT_EQ(slot_ring_free(&ring, nullptr), ARNM_SUCCESS);
 }
 
 // ---------------------------------------------------------------------------
@@ -300,7 +326,7 @@ TEST(FixedRing, TheQueueSurvivesTheWrap) {
   // draining took the front past the last slot, and it has to have come back to the first
   EXPECT_LT(ring.head, ring.capacity);
 
-  EXPECT_EQ(slot_ring_free(&ring), ARNM_SUCCESS);
+  EXPECT_EQ(slot_ring_free(&ring, nullptr), ARNM_SUCCESS);
 }
 
 TEST(FixedRing, TurningOverManyTimesCostsNoMemoryAndLosesNothing) {
@@ -330,7 +356,7 @@ TEST(FixedRing, TurningOverManyTimesCostsNoMemoryAndLosesNothing) {
   const std::vector<uint32_t> taken = DrainRing(&ring);
   EXPECT_EQ(taken, (std::vector<uint32_t>{9997u, 9998u, 9999u}));
 
-  EXPECT_EQ(slot_ring_free(&ring), ARNM_SUCCESS);
+  EXPECT_EQ(slot_ring_free(&ring, &arena), ARNM_SUCCESS);
   arnm_release(&arena);
 }
 
@@ -363,7 +389,7 @@ TEST(FixedRing, EmplaceBuildsTheElementWhereItWillLive) {
   EXPECT_STREQ(taken.tag, "mail");
   EXPECT_TRUE(entry_ring_is_empty(&ring));
 
-  EXPECT_EQ(entry_ring_free(&ring), ARNM_SUCCESS);
+  EXPECT_EQ(entry_ring_free(&ring, nullptr), ARNM_SUCCESS);
 }
 
 TEST(FixedRing, PushCopiesTheWholeElement) {
@@ -381,7 +407,7 @@ TEST(FixedRing, PushCopiesTheWholeElement) {
   EXPECT_EQ(entry_ring_front(&ring)->id, 1u);
   EXPECT_STREQ(entry_ring_front(&ring)->tag, "first");
 
-  EXPECT_EQ(entry_ring_free(&ring), ARNM_SUCCESS);
+  EXPECT_EQ(entry_ring_free(&ring, nullptr), ARNM_SUCCESS);
 }
 
 // ---------------------------------------------------------------------------
@@ -424,7 +450,7 @@ TEST(FixedRing, CopyToLaysTheWrappedLineOutStraight) {
   EXPECT_EQ(slot_ring_copy_to(&ring, dst, 3), ARNM_ERROR_DESTINATION_BUFFER_TO_SMALL);
   EXPECT_EQ(dst[0], 0xFFFFFFFFu);
 
-  EXPECT_EQ(slot_ring_free(&ring), ARNM_SUCCESS);
+  EXPECT_EQ(slot_ring_free(&ring, nullptr), ARNM_SUCCESS);
 }
 
 // ---------------------------------------------------------------------------
@@ -448,7 +474,7 @@ TEST(FixedRing, ARingOfOneIsAHandover) {
   EXPECT_EQ(slot_ring_push(&ring, 43u), ARNM_SUCCESS);
   EXPECT_EQ(*slot_ring_front(&ring), 43u);
 
-  EXPECT_EQ(slot_ring_free(&ring), ARNM_SUCCESS);
+  EXPECT_EQ(slot_ring_free(&ring, nullptr), ARNM_SUCCESS);
 }
 
 TEST(FixedRing, TheFrontAloneSaysWhetherAnythingIsDue) {
@@ -475,5 +501,5 @@ TEST(FixedRing, TheFrontAloneSaysWhetherAnythingIsDue) {
   EXPECT_EQ(due, 2u); // 30100 and 30200 are due, 30300 and 30400 are not
   EXPECT_EQ(entry_ring_front(&ring)->due_ms, 30300u);
 
-  EXPECT_EQ(entry_ring_free(&ring), ARNM_SUCCESS);
+  EXPECT_EQ(entry_ring_free(&ring, nullptr), ARNM_SUCCESS);
 }

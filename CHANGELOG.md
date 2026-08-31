@@ -52,20 +52,69 @@ into the queue is at most the capacity, so their sum passes the end at most once
 1000 therefore reserves 1000 slots and not 1024.
 
 `ARNM_FIXED_RING_DEFINE(name, type)` generates the typed accessor set, the way
-`ARNM_BVEC_DEFINE` does. The allocator is kept in the descriptor, as `arnm_bvec` keeps it and
-unlike `arnm_fixed_arena_pool`, which is handed one at init and again at release: a ring owns
-one block for exactly as long as it exists, so there is one allocator and one moment to hand it
-back at, and naming it twice would only open the way to naming it differently the second time.
+`ARNM_BVEC_DEFINE` does.
+
+**The allocator is handed in twice and stored nowhere**, as `arnm_fixed_arena_pool` does it and
+unlike `arnm_bvec`, which keeps one for its whole life. `_init()` is given one, `_free()` is
+given the same one, and no other call in the header takes an allocator at all -- which is the
+point rather than a saving. A fixed ring does not grow and does not shrink, so between those
+two calls there is nothing that could ask anyone for memory, and that is readable in the
+signatures instead of only in the prose. The release order is the caller's to know as well: a
+ring inside an arena about to be reset can simply be left where it is. What it asks in return
+is the duty every size in this library already carries -- which allocator a ring was built on
+is the caller's to remember, and naming another one leaves the block where it is and answers
+`ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED`.
+
+**`arnm_bvec` carries the count of buckets it holds**, in a new `allocated_count` field, where
+it used to derive it by walking the index array while the slots were non-empty. The walk was
+free for a vector growing into fresh slots -- the next one is NULL and it ends at once -- and
+O(remaining) for one whose buckets already exist, which is what `arnm_bvec_reserve()` makes.
+`arnm_bvec_grow()` asks twice, once directly and once through its state check, so filling a
+reserved vector cost about `bucket_count^2` pointer loads: 61 M of them for the 7813 buckets of
+a 4 M element run, measured at 12 ms of a 22 ms append. The append phase of that run is now
+7.8 ms, and reserving is finally faster than growing rather than slower.
+
+**`arnm_bvec_free()` and `arnm_bvec_shrink()` choose which end to release from by allocator.**
+An arena is unwound newest first, as before -- it takes back only its most recent allocation, so
+no other order returns anything to it. The host is now given the buckets oldest first. glibc
+merges a freed chunk into the top chunk when it is adjacent, and trims the heap with `brk()`
+once top passes the trim threshold, so releasing newest first walks the top of the heap down and
+pays a shrink per bucket, with the pages faulted back in later. Measured with 7813 buckets of
+4 KiB, nothing above them: 32.1 ms newest first against 2.2 ms oldest first.
+
+That it never showed on a vector which grew into its buckets is an accident of layout, not a
+property of the container -- the index array is reallocated last and sits above every bucket,
+shielding them from the top chunk, while a reserved vector has it below them and is fully
+exposed. Same call, different history, and now the same cost: the free phase of a reserved 4 M
+element run went from 33.2 ms to 2.5 ms, and the whole run from 65.5 ms to 22.2 ms, which is
+finally a shade under the vector that grew.
+
+Four rows of `bench_vector` move with the two changes together, because every one of them fills
+a vector whose buckets are already there and then gives them back: `push, reserved`
+15.8 -> 5.2 ns an element, `push, arena` 6.4 -> 2.7, `push + pop cycle` 17.1 -> 6.5. The one
+worth naming is `refill after clear`, 5.4 -> 1.9: that is the round-based pattern the container
+is best at, `_clear()` keeps every bucket, and keeping them was exactly what made the walk long.
+Reserving is now the fastest way to fill one rather than the slowest -- 5.2 ns against the
+5.9 ns of a vector that grows into its buckets.
+
+Nothing about the interface changed and no call behaves differently. The struct is public, so
+this is a recompile rather than an edit -- the field fits in padding the descriptor already
+carried, and `sizeof(arnm_bvec)` is what it was.
 
 **`bench_bucket_vector` is now `bench_vector`**, because it holds three containers rather than
-one. It gains a queue section that puts the same 4 M elements through a 4096 element window on
-both, and prints what each still held at the end. On the machine this was written on, in
-`ReleaseFast`: 2.7 ns an element and 32.0 KiB for the ring, 6.0 ns and 30.6 MiB for a bucket
-vector walked by a head index. The time follows from the memory and not from the indexing --
-a bucket vector's `_get` over a window that stays in cache costs about half a nanosecond, which
-is less than either row -- and where a round does end all at once the two are level, 2.7 ns
-against 2.5 ns with `_clear()` keeping the buckets. Read the whole section before choosing; it
-is laid out to be read that way rather than for its first line.
+one. It gains a queue section, and the shape of that section is the point: a queue consumed
+continuously is a row the ring has to itself, because a bucket vector appends and pops at the
+back and cannot do it at all. Putting a nanosecond figure beside the ring's would compare two
+things that are not the same operation, so what the vector costs is reported in the terms it is
+really paid in -- after 4 M elements through a 4096 element window it holds 30.6 MiB where the
+ring holds 32.0 KiB, and it stops accepting after 4 190 208 of them with
+`ARNM_ERROR_ARITHMETIC_OVERFLOW`, at 8184 of at most 8191 bucket pointers.
+
+The head to head that does mean something is beside it: filling a window and emptying it all at
+once is something both containers genuinely do, and there they are level, 2.4 ns an element for
+the ring against 2.5 ns for a bucket vector whose `_clear()` keeps the buckets. That is the
+container doing what it is for, and it is printed next to the other so the section does not read
+as a verdict.
 
 ## 0.7.5 -- 2026-08-30
 

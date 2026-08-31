@@ -103,6 +103,19 @@ typedef struct arnm_bvec {
   uint32_t size;            /**< Total element count. */
   uint8_t bucket_capacity_max_log2; /**< Elements per bucket as a power of two, 1 to 15. */
   uint8_t index_grow_step_size;     /**< Slots @c buckets grows by when it runs out. */
+  /**
+   * Buckets the vector holds, whether they carry elements or not.
+   *
+   * @c tail_index answers the other question -- how far the elements reach, which is what
+   * drops back to 0 on @ref arnm_bvec_clear() while the buckets stay. Slots below this count
+   * hold a bucket and slots above it are NULL, which is the invariant every call here keeps.
+   *
+   * Counted rather than derived, and that is a fix rather than a saving: reading it off the
+   * index array meant scanning forward while the slots were non-empty, and a vector whose
+   * buckets are all there before the first push -- the one @ref arnm_bvec_reserve() makes --
+   * scanned to the end of the array on every single one of them.
+   */
+  uint16_t allocated_count;
 } arnm_bvec;
 
 /**
@@ -177,7 +190,9 @@ arnm_result arnm_bvec_reserve(arnm_bvec *bvec, uint32_t element_count);
  *                                  reachable only by writing the descriptor's fields directly.
  * @note Behind an arena only the most recent buckets come back. Release walks newest first and
  *       stops at the first block the arena will not take, which keeps the rest reusable rather
- *       than stranding it -- and that is a success, not a partial failure.
+ *       than stranding it -- and that is a success, not a partial failure. On the host nothing
+ *       is ever refused, so every unused bucket goes back; it walks oldest first there, for the
+ *       reason on @ref arnm_bvec_free().
  * @whisper What holds nothing is handed back
  */
 arnm_result arnm_bvec_shrink(arnm_bvec *v);
@@ -203,6 +218,10 @@ void arnm_bvec_clear(arnm_bvec *v);
  *
  * @param[in,out] v Vector; NULL is a no-op, as is one that never allocated.
  * @warning Every pointer into the vector is dangling afterwards.
+ * @note Which end the buckets are released from follows the allocator. An arena is unwound
+ *       newest first, the only order that returns anything to it; the host is given them
+ *       oldest first, because releasing the newest block first walks the top of its heap
+ *       downwards and makes it trim page by page. @ref arnm_bvec_shrink() splits the same way.
  * @whisper The shelves come down, the measurements are remembered
  */
 void arnm_bvec_free(arnm_bvec *v);

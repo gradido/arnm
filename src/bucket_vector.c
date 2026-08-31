@@ -1,5 +1,6 @@
 #include "arnm/bucket_vector.h"
 
+#include "arnm/arena.h"
 #include "arnm/memory.h"
 #include "arnm/result.h"
 #include <stdint.h>
@@ -17,11 +18,46 @@ static inline uint32_t bucket_mask(uint8_t bucket_capacity_log2) {
   return (uint32_t)bucket_capacity(bucket_capacity_log2) - 1u;
 }
 
+/*
+ * Which end to release the buckets from, and why the two allocators want different answers.
+ *
+ * An arena takes back only its most recent allocation, so it has to be unwound newest first --
+ * anything else hands it a block that is not at its tail and it keeps every one of them until
+ * the next reset. That is not a preference, it is the only order that returns anything.
+ *
+ * The host has no such rule and one of its own. glibc merges a freed chunk into the top chunk
+ * when it is adjacent to it, and trims the heap with brk() once top passes the trim threshold
+ * -- so releasing the newest block first walks the top of the heap downwards and pays a shrink
+ * per bucket, with the pages faulted back in the next time they are used. Oldest first puts
+ * every bucket in a bin instead, consolidates them as neighbours meet, and reaches the top
+ * chunk once, at the end. Measured with 7813 buckets of 4 KiB: 32.1 ms newest first against
+ * 2.2 ms oldest first, in a process where nothing sits above them.
+ *
+ * A vector that grew into its buckets is not exposed to that, because its index array was
+ * reallocated last and sits above every bucket, shielding them from the top chunk. One that was
+ * reserved has the index array below them and is fully exposed. Both are the same call and only
+ * the history differs, which is exactly why the order is chosen here rather than left to it.
+ */
+static inline bool releases_newest_first(const arnm_bvec *v) {
+  return arnm_is_arena(v->allocator);
+}
+
+/*
+ * Buckets the vector holds, in use or merely reserved.
+ *
+ * A field read. It used to be a scan forward from the buckets in use, while the index slots
+ * were non-empty, and that was O(1) for a vector growing into fresh slots -- the next one is
+ * NULL and the walk ends at once -- and O(remaining) for one whose buckets all exist already.
+ * _grow asks twice, once here and once through is_state_valid(), so a reserved vector paid
+ * about `bucket_count^2` pointer loads across a fill: 61 M of them for the 7813 buckets of
+ * bench_vector's 4 M element run, which measured as 12 ms of its 22 ms append.
+ *
+ * The count is therefore carried in the descriptor and written wherever the set of buckets
+ * changes: _init, _reserve, _grow, _shrink and _free. The invariant it stands for is unchanged
+ * -- slots below it hold a bucket, slots above it are NULL.
+ */
 static inline uint16_t bucket_count_allocated(const arnm_bvec *v) {
-  if (!v->buckets) { return 0; }
-  uint16_t bucket_count = arnm_bvec_bucket_count(v);
-  while (bucket_count < v->bucket_capacity && v->buckets[bucket_count]) { ++bucket_count; }
-  return bucket_count;
+  return v->buckets ? v->allocated_count : (uint16_t)0;
 }
 
 /** Slots to bytes. The callers keep capacities inside the bound checked in _index_grow. */
@@ -75,6 +111,7 @@ arnm_result arnm_bvec_init(
   v->tail_used = bucket_capacity(bucket_capacity_log2);
   v->tail = NULL;
   v->size = 0;
+  v->allocated_count = 0;
   v->bucket_capacity_max_log2 = bucket_capacity_log2;
   v->index_grow_step_size =
       index_grow_step_size ? index_grow_step_size : ARNM_BVEC_DEFAULT_INDEX_GROW_STEP_SIZE;
@@ -120,6 +157,9 @@ arnm_result arnm_bvec_reserve(arnm_bvec *v, uint32_t element_count) {
     arnm_result result = arnm_alloc(&bucket, bucket_size, v->allocator);
     if (ARNM_SUCCESS != result) return result;
     v->buckets[bucket_count++] = bucket;
+    /* inside the loop, not after it: a refusal returns above, and what was handed over by then
+       stays with the vector and has to be counted */
+    v->allocated_count = bucket_count;
   }
   return ARNM_SUCCESS;
 }
@@ -131,14 +171,31 @@ arnm_result arnm_bvec_shrink(arnm_bvec *v) {
 
   const uint32_t bucket_size = bucket_bytes(v->element_size, v->bucket_capacity_max_log2);
   const uint16_t used_before = arnm_bvec_bucket_count(v);
-  /* top down, so an arena unwinds in allocation order; it stops at the first bucket it   */
-  /* refuses to reclaim, and nothing is lost when it does -- that block is simply kept.    */
   uint16_t i = bucket_count_allocated(v);
-  for (; i > used_before; --i) {
-    if (!v->buckets[i - 1]) continue;
-    if (ARNM_SUCCESS != arnm_free((uint8_t *)v->buckets[i - 1], bucket_size, v->allocator)) break;
-    v->buckets[i - 1] = NULL;
+  if (releases_newest_first(v)) {
+    /* top down, so an arena unwinds in allocation order; it stops at the first bucket it   */
+    /* refuses to reclaim, and nothing is lost when it does -- that block is simply kept.    */
+    for (; i > used_before; --i) {
+      if (!v->buckets[i - 1]) continue;
+      if (ARNM_SUCCESS != arnm_free((uint8_t *)v->buckets[i - 1], bucket_size, v->allocator)) {
+        break;
+      }
+      v->buckets[i - 1] = NULL;
+    }
+  } else {
+    /* oldest first on the host, for the reason at releases_newest_first(). There is no early
+       exit to mirror: the one answer arnm_free() gives besides ARNM_SUCCESS is the arena
+       warning, which is what the other branch is for, so this walk always reaches used_before. */
+    for (uint16_t k = used_before; k < i; ++k) {
+      if (!v->buckets[k]) continue;
+      arnm_free((uint8_t *)v->buckets[k], bucket_size, v->allocator);
+      v->buckets[k] = NULL;
+    }
+    i = used_before;
   }
+  /* where the walk stopped is what the vector still holds, whether it ran out of buckets to
+     release or met one the allocator would not take back */
+  v->allocated_count = i;
 
   if (!i) {
     /* the index array leaves the descriptor only when it really came back; a refusal  */
@@ -176,12 +233,21 @@ void arnm_bvec_clear(arnm_bvec *v) {
 void arnm_bvec_free(arnm_bvec *v) {
   if (!v || !v->buckets || !v->element_size) return;
   const uint32_t bucket_size = bucket_bytes(v->element_size, v->bucket_capacity_max_log2);
-  /* buckets backwards then the index array, the reverse of how they were taken */
-  uint16_t i = bucket_count_allocated(v);
-  for (; i > 0; --i) {
-    if (!v->buckets[i - 1]) continue;
-    arnm_free((uint8_t *)v->buckets[i - 1], bucket_size, v->allocator);
+  const uint16_t count = bucket_count_allocated(v);
+  /* every bucket goes either way; only the order differs, and why it does is above */
+  if (releases_newest_first(v)) {
+    for (uint16_t i = count; i > 0; --i) {
+      if (!v->buckets[i - 1]) continue;
+      arnm_free((uint8_t *)v->buckets[i - 1], bucket_size, v->allocator);
+    }
+  } else {
+    for (uint16_t i = 0; i < count; ++i) {
+      if (!v->buckets[i]) continue;
+      arnm_free((uint8_t *)v->buckets[i], bucket_size, v->allocator);
+    }
   }
+  /* the index array last in both cases: it was taken last where it matters, and on the host it
+     is what the freed buckets consolidate up to */
   arnm_free((uint8_t *)v->buckets, index_bytes(v->bucket_capacity), v->allocator);
   /* the empty state is what _init writes, and the allocator stays attached */
   (void)arnm_bvec_init(
@@ -207,7 +273,8 @@ arnm_result arnm_bvec_grow(arnm_bvec *v, void **out_slot) {
           arnm_realloc((uint8_t **)&v->buckets, old_index_bytes, new_index_bytes, v->allocator);
       if (result != ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED && result != ARNM_SUCCESS)
         return result;
-      /* bucket_count_allocated() reads these slots, so they have to say "no bucket here" */
+      /* above allocated_count every slot has to say "no bucket here": _shrink and _free walk
+         them, and the count alone does not tell an empty slot from a stale pointer */
       memset((uint8_t *)v->buckets + old_index_bytes, 0, new_index_bytes - old_index_bytes);
       v->bucket_capacity = (uint16_t)new_capacity;
     }
@@ -217,6 +284,7 @@ arnm_result arnm_bvec_grow(arnm_bvec *v, void **out_slot) {
     );
     if (result != ARNM_SUCCESS) return result;
     v->buckets[bucket_count++] = bucket;
+    v->allocated_count = bucket_count;
   }
   v->tail = v->buckets[next];
   v->tail_index = next;

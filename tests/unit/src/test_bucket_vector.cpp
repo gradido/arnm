@@ -89,6 +89,21 @@ void CheckInvariants(const arnm_bvec &v, uint32_t capacity) {
   if (v.bucket_capacity > 0) { ASSERT_NE(v.buckets, nullptr); }
   EXPECT_EQ(uint32_t{1} << v.bucket_capacity_max_log2, capacity);
 
+  // the descriptor's own count of held buckets, against the index array it stands for. It is
+  // carried rather than derived, so every call that takes or releases a bucket has to write it,
+  // and this is what proves each of them does -- AllocatedBuckets() reads the pointers.
+  EXPECT_EQ(v.allocated_count, AllocatedBuckets(v))
+      << "allocated_count disagrees with what the index array holds";
+  // slots below the count hold a bucket, slots above it are empty: the invariant the count
+  // stands for, and what _shrink and _free walk on
+  for (uint16_t i = 0; v.buckets && i < v.bucket_capacity; ++i) {
+    if (i < v.allocated_count) {
+      EXPECT_NE(v.buckets[i], nullptr) << "slot " << i << " is below the count but empty";
+    } else {
+      EXPECT_EQ(v.buckets[i], nullptr) << "slot " << i << " is above the count but holds one";
+    }
+  }
+
   // a slot is either empty or holds a bucket no other slot holds. Reserved-but-unused buckets
   // sit past in_use and are just as much the vector's to keep distinct.
   std::set<const void *> distinct;

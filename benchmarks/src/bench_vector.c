@@ -22,9 +22,10 @@
  * append throughput, traversal, random access, and the cost of the bucket size itself.
  *
  * A fixed ring gives up growth entirely and buys back a queue that does not accumulate. The
- * queue section is where the two meet: the same elements pass through both, and what separates
- * them is the memory standing at the end of the run, with the time following from it. Both
- * numbers are printed, because either one alone says the wrong thing.
+ * queue section is where the two meet -- but only for the pattern they share, a window filled
+ * and emptied all at once. A queue consumed continuously is not something a bucket vector does
+ * at all, so that row is a ring's alone, and what the vector would cost is reported in memory
+ * and in the point where it stops accepting rather than in nanoseconds it never earned.
  */
 
 #define ELEMENT_COUNT 4000000
@@ -89,9 +90,8 @@ static arnm g_arena;
 static volatile uint64_t g_sink = 0;
 /** Prefilled ring for the read-side steps, the same ELEMENT_COUNT values as g_filled. */
 static arnm_fixed_ring g_filled_ring;
-/** What each queue step still held when it finished; the finding the timings do not carry. */
-static uint32_t g_ring_queue_bytes = 0;
-static uint32_t g_bvec_queue_bytes = 0;
+/** What the ring still held when its queue step finished, ready for the report below it. */
+static char g_ring_queue_bytes_string[32] = "";
 
 /**
  * Stop on a failed setup instead of measuring the wreckage.
@@ -122,7 +122,31 @@ static arnm_result push_all(arnm_bvec *v, int count) {
   return result;
 }
 
-/* --- append ----------------------------------------------------------------------------- */
+/* --- append -----------------------------------------------------------------------------
+ *
+ * Every step here is a whole life: init, whatever it reserves, the appends, and the free. That
+ * keeps the rows comparable with each other, and it is worth knowing before reading any single
+ * one of them -- an append figure includes giving 32 MiB back.
+ *
+ * The reserved row is where that used to matter, and the history is worth keeping because both
+ * causes were invisible in the row itself. With the phases timed apart it read reserve 10.7 ms,
+ * append 21.9 ms, free 33.2 ms -- and the append was the smallest of the three.
+ *
+ * The free was glibc trimming the heap. A freed chunk adjacent to the top chunk merges into it,
+ * and once top passes the trim threshold every further merge shrinks the heap with brk(), the
+ * pages coming back as faults the next time they are used. Releasing newest first walks the top
+ * downwards and pays that per bucket; oldest first reaches the top once. A vector that grew
+ * into its buckets was never exposed to it, because its index array is reallocated last and
+ * sits above every bucket -- the same call, and only the history differing. 0.7.6 picks the
+ * order by allocator, and the phase went to 2.5 ms.
+ *
+ * The append was arnm's own: _grow derived the count of held buckets by scanning the index
+ * array, twice per bucket, which a reserved vector paid quadratically. That is a field now and
+ * the phase went to 7.8 ms.
+ *
+ * What is left in the row is 32 MiB of first-touch page faults, which every variant pays and
+ * only the phase it lands in differs.
+ */
 
 static void test_bvec_push(int stepCount) {
   arnm_bvec v;
@@ -313,9 +337,14 @@ static void test_bvec_push_pop_cycle(int stepCount) {
  * Only the allocated buckets count, not the elements in them -- a bucket is taken whole and
  * stays taken until _shrink() or _free(), which is exactly what makes the figure interesting
  * next to a ring that never takes a second one.
+ *
+ * `allocated_count` and not `_bucket_count()`: the second answers how far the elements reach,
+ * and a vector that has been popped empty reports 0 there while still holding every bucket it
+ * ever opened. The two agree in the queue below, which never pops, and the one that stays right
+ * when they part is the one this asks.
  */
 static uint32_t bvec_bytes_held(const arnm_bvec *v, uint8_t bucket_capacity_log2) {
-  const uint32_t buckets = bvec_u64_bucket_count(v);
+  const uint32_t buckets = v->allocated_count;
   return (buckets << bucket_capacity_log2) * (uint32_t)sizeof(uint64_t) +
          (uint32_t)v->bucket_capacity * (uint32_t)sizeof(void *);
 }
@@ -345,38 +374,10 @@ static void test_ring_queue_steady(int stepCount) {
     require_ok(ring_u64_pop(&r), "pop");
     require_ok(ring_u64_push(&r, (uint64_t)i), "push");
   }
-  g_ring_queue_bytes = ring_u64_reserved(&r);
-  require_ok(ring_u64_free(&r), "free ring");
-}
-
-/**
- * The same queue on a bucket vector, which has no pop at the front to offer.
- *
- * A head index walking forward is what one writes instead, and it is correct: the order is
- * kept, the reads are right, the window is the same size. What it cannot do is give the slot
- * back. Every element that ever entered is still there when the run ends, which is what the
- * footprint line under this section reports.
- *
- * **The time difference is the working set, not the indexing.** A bucket vector's `_get` is a
- * shift, a mask, a pointer load and an addition, and asked over a window that stays in cache it
- * costs about half a nanosecond -- faster than this whole row and faster than the ring's own
- * index math. What the row above measures is the queue walking 30 MiB of memory it will never
- * read again: a new bucket every 512 elements and a fresh page every 512 of those. The ring
- * stays inside 32 KiB because the slot the front left is the slot the back takes. Reserving the
- * vector up front does not rescue it and makes it slower still, the same way
- * `bucket vector push, reserved` is slower than the unreserved append above it.
- */
-static void test_bvec_queue_steady(int stepCount) {
-  arnm_bvec v;
-  uint32_t head = 0;
-  bvec_u64_init(&v, BVEC_U64_LOG2, BVEC_GROW_DEFAULT, NULL);
-  for (int i = 0; i < QUEUE_WINDOW; ++i) { require_ok(bvec_u64_push(&v, (uint64_t)i), "fill"); }
-  for (int i = QUEUE_WINDOW; i < stepCount; ++i) {
-    g_sink += *bvec_u64_get(&v, head++);
-    require_ok(bvec_u64_push(&v, (uint64_t)i), "push");
-  }
-  g_bvec_queue_bytes = bvec_bytes_held(&v, BVEC_U64_LOG2);
-  bvec_u64_free(&v);
+  bench_bytes_string(
+      g_ring_queue_bytes_string, sizeof(g_ring_queue_bytes_string), ring_u64_reserved(&r)
+  );
+  require_ok(ring_u64_free(&r, NULL), "free ring");
 }
 
 /**
@@ -411,7 +412,7 @@ static void test_ring_queue_rounds(int stepCount) {
     for (uint32_t k = 0; k < QUEUE_WINDOW; ++k) { g_sink += *ring_u64_get(&r, k); }
     ring_u64_clear(&r);
   }
-  require_ok(ring_u64_free(&r), "free ring");
+  require_ok(ring_u64_free(&r, NULL), "free ring");
 }
 
 /* --- driver ----------------------------------------------------------------------------- */
@@ -445,7 +446,7 @@ static void prepare_test_data(void) {
 }
 
 static void release_test_data(void) {
-  require_ok(ring_u64_free(&g_filled_ring), "free filled ring");
+  require_ok(ring_u64_free(&g_filled_ring, NULL), "free filled ring");
   bvec_u64_free(&g_filled);
   bvec_u64_free(&g_reused);
   arnm_release(&g_arena);
@@ -480,24 +481,13 @@ int main(void) {
   bench_step(test_payload_emplace, stepCount, "  emplace in place", "element");
 
   bench_section("queue, 4 M elements through a 4096 element window");
+  /* Three rows and no fourth. The first is what a queue costs the container built for one; the
+     other two are the round based pattern, which both containers really do and which is where a
+     comparison between them means something. What a bucket vector does when it is asked to be
+     the first row is underneath, in the only terms it can honestly be put. */
   bench_step(test_ring_queue_steady, stepCount, "  fixed ring, steady state", "element");
-  bench_step(test_bvec_queue_steady, stepCount, "  bucket vector fifo, head index", "element");
   bench_step(test_ring_queue_rounds, stepCount, "  fixed ring, in rounds", "element");
   bench_step(test_bvec_queue_rounds, stepCount, "  bucket vector, cleared per round", "element");
-  {
-    /* the row the timings cannot carry: what each of the two steady state steps still held when
-       it finished. The ring gave the front's slot back to the next push; the vector could not
-       be asked to, so it ends the run holding every element that ever entered it. */
-    char ring_bytes[BENCH_STRING_BUFFER_SIZE];
-    char bvec_bytes[BENCH_STRING_BUFFER_SIZE];
-    bench_bytes_string(ring_bytes, sizeof(ring_bytes), g_ring_queue_bytes);
-    bench_bytes_string(bvec_bytes, sizeof(bvec_bytes), g_bvec_queue_bytes);
-    /* deliberately not a table row: the two figures are not the two time columns, and one
-       shaped like them would be read as if they were */
-    printf(
-        "  memory held at the end: fixed ring %s, bucket vector fifo %s\n", ring_bytes, bvec_bytes
-    );
-  }
 
   bench_section("traversal");
   bench_step(test_bvec_iterate_buckets, stepCount, "  bucket vector, bucket wise", "element");

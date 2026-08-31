@@ -61,13 +61,25 @@ extern "C" {
  * is due is a look at one element rather than a walk. That is a property of the insertion
  * order, not of anything the ring does, and it lapses the moment entries carry different spans.
  *
- * ### The allocator is kept
+ * ### The allocator is handed in, never kept
  *
- * @ref arnm_fixed_ring_init() stores it, the way @ref arnm_bvec does and unlike
- * @ref arnm_fixed_arena_pool, which is handed one at init and again at release. A ring owns
- * exactly one block for exactly as long as it exists, so there is one allocator and one moment
- * to hand it back at -- and naming it twice would only open the way to naming it differently
- * the second time.
+ * @ref arnm_fixed_ring_init() is given one and @ref arnm_fixed_ring_free() is given it again,
+ * the way @ref arnm_fixed_arena_pool works and unlike @ref arnm_bvec, which keeps one for its
+ * whole life. Two things follow from that, and the second is the reason for it.
+ *
+ * The order things are released in is the caller's to know. A ring inside an arena the caller
+ * resets wholesale never needs its block handed back at all; one drawn from a chain that
+ * outlives it does. A stored allocator would make the ring look like that was its decision.
+ *
+ * And every other call in this header takes no allocator, which is not an omission but the
+ * statement itself: a fixed ring does not grow and does not shrink, so between init and free
+ * there is no call that could ask anyone for memory. That promise is readable in the
+ * signatures rather than only in this paragraph -- a push cannot allocate, because it was
+ * handed nothing to allocate from.
+ *
+ * What it asks of the caller is the duty every size in this library already carries: which
+ * allocator a ring was built on is the caller's to remember. See the warning on
+ * @ref arnm_fixed_ring_free().
  *
  * ### NULL
  *
@@ -102,8 +114,6 @@ extern "C" {
  * @note Do not write these fields; read them through the API.
  */
 typedef struct arnm_fixed_ring {
-  /** Where the block came from and where it goes back to; NULL is the host. */
-  arnm *allocator;
   /** The one block, `capacity * element_size` bytes, seen as slot 0. */
   uint8_t *slots;
   /** Slots in the block. Fixed at init and never changed. */
@@ -129,8 +139,9 @@ typedef struct arnm_fixed_ring {
  * @param[in]     capacity     Elements it will ever hold at once; must be > 0. This is the
  *                             ceiling, for good.
  * @param[in]     element_size Bytes per element; 1 to `UINT16_MAX`.
- * @param[in,out] allocator    Where the block comes from, or NULL for the host. Kept for the
- *                             ring's whole life.
+ * @param[in,out] allocator    Where the block comes from, or NULL for the host. Not
+ *                             remembered; @ref arnm_fixed_ring_free() has to be handed the
+ *                             same one.
  * @retval ARNM_SUCCESS                   Empty and ready, the room already taken.
  * @retval ARNM_ERROR_NULL_POINTER        @p ring is NULL.
  * @retval ARNM_ERROR_INVALID_PARAM       @p capacity is 0, or @p element_size is 0 or above
@@ -141,8 +152,11 @@ typedef struct arnm_fixed_ring {
  *         arena, an arena that was released. Nothing is kept and @p ring is untouched.
  * @warning Calling this on a ring that still holds its block leaks it. Use
  *          @ref arnm_fixed_ring_free() first.
+ * @warning @p allocator is not stored. Which one a ring was built on is the caller's to keep,
+ *          the way the sizes everything else here is freed with are.
  * @note Behind an arena this is the only allocation the ring makes, so it can be taken at
- *       startup and nothing after it competes for the tail.
+ *       startup and nothing after it competes for the tail. It is also the last call that
+ *       touches an allocator until the ring is freed -- nothing between the two can.
  * @whisper The bed is dug once, and the water finds its own way around it
  */
 arnm_result arnm_fixed_ring_init(
@@ -157,17 +171,25 @@ arnm_result arnm_fixed_ring_init(
  * again. Unlike @ref arnm_bvec_free() nothing is kept back for a second round, because a ring
  * without its block has no shape left to reuse.
  *
- * @param[in,out] ring Ring to empty; not NULL. One that holds no block is already there and
- *                     answers @ref ARNM_SUCCESS.
+ * When this is called, and whether it is called at all, is the caller's to decide -- a ring
+ * inside an arena that is about to be reset can simply be left where it is.
+ *
+ * @param[in,out] ring      Ring to empty; not NULL. One that holds no block is already there
+ *                          and answers @ref ARNM_SUCCESS.
+ * @param[in,out] allocator The allocator the block came from -- the same one
+ *                          @ref arnm_fixed_ring_init() was handed, NULL for the host.
  * @retval ARNM_SUCCESS            The block is back and the ring holds nothing.
  * @retval ARNM_ERROR_NULL_POINTER @p ring is NULL.
- * @retval ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED The allocator is an arena and the block is
- *                                 not its most recent allocation. The ring is empty either way;
+ * @retval ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED @p allocator is an arena and the block is not
+ *                                 its most recent allocation. The ring is empty either way;
  *                                 those bytes come back on that arena's own reset.
+ * @warning An @p allocator other than the one the ring was built on leaves the block where it
+ *          is and answers with the warning above -- except NULL for memory an arena gave, which
+ *          reaches free() unchecked. See arnm_free().
  * @warning Every pointer into the ring is dangling afterwards.
  * @whisper The bed is filled in, and the ground is level again
  */
-arnm_result arnm_fixed_ring_free(arnm_fixed_ring *ring);
+arnm_result arnm_fixed_ring_free(arnm_fixed_ring *ring, arnm *allocator);
 
 /**
  * @brief Drop every element and keep the block. O(1).
@@ -348,7 +370,7 @@ arnm_result arnm_fixed_ring_copy_to(const arnm_fixed_ring *ring, void *dst, uint
  * slot_ring_push(&ring, 17u);
  * const uint32_t *oldest = slot_ring_front(&ring);
  * slot_ring_pop(&ring);
- * slot_ring_free(&ring);
+ * slot_ring_free(&ring, NULL);   // the same allocator init was handed
  * @endcode
  *
  * @param name Prefix for the generated functions.
@@ -364,9 +386,11 @@ arnm_result arnm_fixed_ring_copy_to(const arnm_fixed_ring *ring, void *dst, uint
     return arnm_fixed_ring_init(ring, capacity, sizeof(type), allocator);                          \
   }                                                                                                \
                                                                                                    \
-  /** Give the block back, leaving nothing reserved. */                                            \
-  ARNM_FIXED_RING_MAYBE_UNUSED static inline arnm_result name##_free(arnm_fixed_ring *ring) {      \
-    return arnm_fixed_ring_free(ring);                                                             \
+  /** Give the block back to the allocator it came from, leaving nothing reserved. */              \
+  ARNM_FIXED_RING_MAYBE_UNUSED static inline arnm_result name##_free(                              \
+      arnm_fixed_ring *ring, arnm *allocator                                                       \
+  ) {                                                                                              \
+    return arnm_fixed_ring_free(ring, allocator);                                                  \
   }                                                                                                \
                                                                                                    \
   /** Drop every element and keep the block. O(1). */                                              \
