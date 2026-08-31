@@ -57,6 +57,16 @@ unlike `arnm_fixed_arena_pool`, which is handed one at init and again at release
 one block for exactly as long as it exists, so there is one allocator and one moment to hand it
 back at, and naming it twice would only open the way to naming it differently the second time.
 
+**`bench_bucket_vector` is now `bench_vector`**, because it holds three containers rather than
+one. It gains a queue section that puts the same 4 M elements through a 4096 element window on
+both, and prints what each still held at the end. On the machine this was written on, in
+`ReleaseFast`: 2.7 ns an element and 32.0 KiB for the ring, 6.0 ns and 30.6 MiB for a bucket
+vector walked by a head index. The time follows from the memory and not from the indexing --
+a bucket vector's `_get` over a window that stays in cache costs about half a nanosecond, which
+is less than either row -- and where a round does end all at once the two are level, 2.7 ns
+against 2.5 ns with `_clear()` keeping the buckets. Read the whole section before choosing; it
+is laid out to be read that way rather than for its first line.
+
 ## 0.7.5 -- 2026-08-30
 
 The reader is a different reader. What 0.7.0 opened and 0.7.4 finished was a cursor: you entered

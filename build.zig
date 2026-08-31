@@ -234,7 +234,7 @@ pub fn build(b: *std.Build) void {
 
     if (enable_benchmarks) {
         const path = "benchmarks/src";
-        processBuildTarget(&context, .{ .name = "bench_bucket_vector", .srcs = &.{"bench_bucket_vector.c"} }, path);
+        processBuildTarget(&context, .{ .name = "bench_vector", .srcs = &.{"bench_vector.c"} }, path);
         processBuildTarget(&context, .{ .name = "bench_multi_arena", .srcs = &.{"bench_multi_arena.c"} }, path);
         processBuildTarget(&context, .{ .name = "bench_numberToString", .srcs = &.{"bench_numberToString.c"} }, path);
         processBuildTarget(&context, .{ .name = "bench_binaryToString", .srcs = &.{"bench_binaryToString.c"} }, path);

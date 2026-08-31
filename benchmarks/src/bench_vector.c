@@ -1,5 +1,6 @@
 #include "arnm/arena.h"
 #include "arnm/bucket_vector.h"
+#include "arnm/fixed_ring.h"
 #include "arnm/memory.h"
 #include "arnm/mono_timer.h"
 #include "arnm/result.h"
@@ -13,10 +14,17 @@
 /*
  * What this benchmark measures
  *
+ * Three ways to hold a sequence, measured against each other.
+ *
  * A bucket vector trades one indirection on random access for two things a flat, doubling
  * array cannot give: appends that never copy what is already stored, and element addresses
  * that stay valid forever. The steps below put numbers on both sides of that trade --
  * append throughput, traversal, random access, and the cost of the bucket size itself.
+ *
+ * A fixed ring gives up growth entirely and buys back a queue that does not accumulate. The
+ * queue section is where the two meet: the same elements pass through both, and what separates
+ * them is the memory standing at the end of the run, with the time following from it. Both
+ * numbers are printed, because either one alone says the wrong thing.
  */
 
 #define ELEMENT_COUNT 4000000
@@ -33,6 +41,17 @@ typedef struct bench_payload {
    the generated accessors differ, and they are what keeps the element type straight. */
 ARNM_BVEC_DEFINE(bvec_u64, uint64_t)
 ARNM_BVEC_DEFINE(bvec_payload, bench_payload)
+ARNM_FIXED_RING_DEFINE(ring_u64, uint64_t)
+
+/**
+ * Elements in flight at once in the queue section, while ELEMENT_COUNT of them pass through.
+ *
+ * Small enough that the window itself stays in cache on both sides, so the section reports what
+ * the containers do rather than what the working set does. What it is not small enough for is
+ * the bucket vector's footprint: 4 M elements enter, and a container that only ever appends
+ * keeps every one of them.
+ */
+#define QUEUE_WINDOW 4096
 
 /*
  * The index array holds at most ARNM_BVEC_MAX_INDEX_CAPACITY bucket pointers, so a vector
@@ -68,6 +87,11 @@ static arnm_bvec g_reused;
 static arnm g_arena;
 /** Consumes every value read so the compiler cannot drop the traversal steps. */
 static volatile uint64_t g_sink = 0;
+/** Prefilled ring for the read-side steps, the same ELEMENT_COUNT values as g_filled. */
+static arnm_fixed_ring g_filled_ring;
+/** What each queue step still held when it finished; the finding the timings do not carry. */
+static uint32_t g_ring_queue_bytes = 0;
+static uint32_t g_bvec_queue_bytes = 0;
 
 /**
  * Stop on a failed setup instead of measuring the wreckage.
@@ -217,6 +241,16 @@ static void test_bvec_iterate_indexed(int stepCount) {
   g_sink += sum;
 }
 
+/** The ring by index: one addition, one comparison, and a load out of a single block. */
+static void test_ring_iterate_indexed(int stepCount) {
+  uint64_t sum = 0;
+  (void)stepCount;
+  for (uint32_t i = 0, count = ring_u64_size(&g_filled_ring); i < count; ++i) {
+    sum += *ring_u64_get(&g_filled_ring, i);
+  }
+  g_sink += sum;
+}
+
 static void test_flat_iterate(int stepCount) {
   uint64_t sum = 0;
   for (int i = 0; i < stepCount; ++i) sum += g_flat[i];
@@ -235,6 +269,17 @@ static void test_bvec_random_access(int stepCount) {
   for (int i = 0; i < stepCount; ++i) {
     index = (index + 524287) % size; /* prime stride: defeats the prefetcher */
     sum += *bvec_u64_get(&g_filled, index);
+  }
+  g_sink += sum;
+}
+
+static void test_ring_random_access(int stepCount) {
+  uint64_t sum = 0;
+  uint32_t index = 0;
+  const uint32_t size = ring_u64_size(&g_filled_ring);
+  for (int i = 0; i < stepCount; ++i) {
+    index = (index + 524287) % size;
+    sum += *ring_u64_get(&g_filled_ring, index);
   }
   g_sink += sum;
 }
@@ -260,6 +305,115 @@ static void test_bvec_push_pop_cycle(int stepCount) {
   bvec_u64_free(&v);
 }
 
+/* --- queue ------------------------------------------------------------------------------ */
+
+/**
+ * Bytes a bucket vector holds: its buckets, plus the index array of pointers to them.
+ *
+ * Only the allocated buckets count, not the elements in them -- a bucket is taken whole and
+ * stays taken until _shrink() or _free(), which is exactly what makes the figure interesting
+ * next to a ring that never takes a second one.
+ */
+static uint32_t bvec_bytes_held(const arnm_bvec *v, uint8_t bucket_capacity_log2) {
+  const uint32_t buckets = bvec_u64_bucket_count(v);
+  return (buckets << bucket_capacity_log2) * (uint32_t)sizeof(uint64_t) +
+         (uint32_t)v->bucket_capacity * (uint32_t)sizeof(void *);
+}
+
+/** Bytes as KiB or MiB, one decimal -- the range a queue's footprint lands in. */
+static void bench_bytes_string(char *buffer, size_t buffer_size, uint32_t bytes) {
+  if (bytes < 1024u * 1024u) {
+    snprintf(buffer, buffer_size, "%.1f KiB", (double)bytes / 1024.0);
+  } else {
+    snprintf(buffer, buffer_size, "%.1f MiB", (double)bytes / (1024.0 * 1024.0));
+  }
+}
+
+/**
+ * A ring in its steady state: the window stays full while everything passes through it.
+ *
+ * Read the front, step over it, put one on the back -- the shape a mail queue or an expiry
+ * queue runs in. The slot the front just left is the one the next push takes, so the footprint
+ * is what QUEUE_WINDOW asked for and stays there for the whole run.
+ */
+static void test_ring_queue_steady(int stepCount) {
+  arnm_fixed_ring r;
+  require_ok(ring_u64_init(&r, QUEUE_WINDOW, NULL), "init ring");
+  for (int i = 0; i < QUEUE_WINDOW; ++i) { require_ok(ring_u64_push(&r, (uint64_t)i), "fill"); }
+  for (int i = QUEUE_WINDOW; i < stepCount; ++i) {
+    g_sink += *ring_u64_front(&r);
+    require_ok(ring_u64_pop(&r), "pop");
+    require_ok(ring_u64_push(&r, (uint64_t)i), "push");
+  }
+  g_ring_queue_bytes = ring_u64_reserved(&r);
+  require_ok(ring_u64_free(&r), "free ring");
+}
+
+/**
+ * The same queue on a bucket vector, which has no pop at the front to offer.
+ *
+ * A head index walking forward is what one writes instead, and it is correct: the order is
+ * kept, the reads are right, the window is the same size. What it cannot do is give the slot
+ * back. Every element that ever entered is still there when the run ends, which is what the
+ * footprint line under this section reports.
+ *
+ * **The time difference is the working set, not the indexing.** A bucket vector's `_get` is a
+ * shift, a mask, a pointer load and an addition, and asked over a window that stays in cache it
+ * costs about half a nanosecond -- faster than this whole row and faster than the ring's own
+ * index math. What the row above measures is the queue walking 30 MiB of memory it will never
+ * read again: a new bucket every 512 elements and a fresh page every 512 of those. The ring
+ * stays inside 32 KiB because the slot the front left is the slot the back takes. Reserving the
+ * vector up front does not rescue it and makes it slower still, the same way
+ * `bucket vector push, reserved` is slower than the unreserved append above it.
+ */
+static void test_bvec_queue_steady(int stepCount) {
+  arnm_bvec v;
+  uint32_t head = 0;
+  bvec_u64_init(&v, BVEC_U64_LOG2, BVEC_GROW_DEFAULT, NULL);
+  for (int i = 0; i < QUEUE_WINDOW; ++i) { require_ok(bvec_u64_push(&v, (uint64_t)i), "fill"); }
+  for (int i = QUEUE_WINDOW; i < stepCount; ++i) {
+    g_sink += *bvec_u64_get(&v, head++);
+    require_ok(bvec_u64_push(&v, (uint64_t)i), "push");
+  }
+  g_bvec_queue_bytes = bvec_bytes_held(&v, BVEC_U64_LOG2);
+  bvec_u64_free(&v);
+}
+
+/**
+ * The other pattern, where a round ends all at once and the bucket vector is at home.
+ *
+ * Fill the window, read it out, empty the container, start again. `_clear()` keeps every bucket
+ * for the next round, so this allocates once and then costs nothing -- and the ring, which
+ * allocated once at init, has no advantage left to have. Printed beside the steady state so the
+ * queue section does not read as a verdict on the container.
+ */
+static void test_bvec_queue_rounds(int stepCount) {
+  arnm_bvec v;
+  bvec_u64_init(&v, BVEC_U64_LOG2, BVEC_GROW_DEFAULT, NULL);
+  require_ok(bvec_u64_reserve(&v, QUEUE_WINDOW), "reserve");
+  for (int i = 0; i + QUEUE_WINDOW <= stepCount; i += QUEUE_WINDOW) {
+    for (int k = 0; k < QUEUE_WINDOW; ++k) {
+      require_ok(bvec_u64_push(&v, (uint64_t)(i + k)), "push");
+    }
+    for (uint32_t k = 0; k < QUEUE_WINDOW; ++k) { g_sink += *bvec_u64_get(&v, k); }
+    bvec_u64_clear(&v);
+  }
+  bvec_u64_free(&v);
+}
+
+static void test_ring_queue_rounds(int stepCount) {
+  arnm_fixed_ring r;
+  require_ok(ring_u64_init(&r, QUEUE_WINDOW, NULL), "init ring");
+  for (int i = 0; i + QUEUE_WINDOW <= stepCount; i += QUEUE_WINDOW) {
+    for (int k = 0; k < QUEUE_WINDOW; ++k) {
+      require_ok(ring_u64_push(&r, (uint64_t)(i + k)), "push");
+    }
+    for (uint32_t k = 0; k < QUEUE_WINDOW; ++k) { g_sink += *ring_u64_get(&r, k); }
+    ring_u64_clear(&r);
+  }
+  require_ok(ring_u64_free(&r), "free ring");
+}
+
 /* --- driver ----------------------------------------------------------------------------- */
 
 static void prepare_test_data(void) {
@@ -270,6 +424,12 @@ static void prepare_test_data(void) {
   for (int i = 0; i < ELEMENT_COUNT; ++i) {
     require_ok(bvec_u64_push(&g_filled, (uint64_t)i), "fill source");
     g_flat[i] = (uint64_t)i;
+  }
+  /* the same values in a ring, for the read side: full to the brim, so the wrap sits at the
+     end of the block and an index walk crosses it exactly once */
+  require_ok(ring_u64_init(&g_filled_ring, (uint32_t)ELEMENT_COUNT, NULL), "init filled ring");
+  for (int i = 0; i < ELEMENT_COUNT; ++i) {
+    require_ok(ring_u64_push(&g_filled_ring, (uint64_t)i), "fill ring");
   }
   /* filled once, then cleared: the refill step finds every bucket already in place */
   bvec_u64_init(&g_reused, BVEC_U64_LOG2, BVEC_GROW_DEFAULT, NULL);
@@ -285,6 +445,7 @@ static void prepare_test_data(void) {
 }
 
 static void release_test_data(void) {
+  require_ok(ring_u64_free(&g_filled_ring), "free filled ring");
   bvec_u64_free(&g_filled);
   bvec_u64_free(&g_reused);
   arnm_release(&g_arena);
@@ -318,13 +479,35 @@ int main(void) {
   bench_step(test_payload_push_by_value, stepCount, "  push by value", "element");
   bench_step(test_payload_emplace, stepCount, "  emplace in place", "element");
 
+  bench_section("queue, 4 M elements through a 4096 element window");
+  bench_step(test_ring_queue_steady, stepCount, "  fixed ring, steady state", "element");
+  bench_step(test_bvec_queue_steady, stepCount, "  bucket vector fifo, head index", "element");
+  bench_step(test_ring_queue_rounds, stepCount, "  fixed ring, in rounds", "element");
+  bench_step(test_bvec_queue_rounds, stepCount, "  bucket vector, cleared per round", "element");
+  {
+    /* the row the timings cannot carry: what each of the two steady state steps still held when
+       it finished. The ring gave the front's slot back to the next push; the vector could not
+       be asked to, so it ends the run holding every element that ever entered it. */
+    char ring_bytes[BENCH_STRING_BUFFER_SIZE];
+    char bvec_bytes[BENCH_STRING_BUFFER_SIZE];
+    bench_bytes_string(ring_bytes, sizeof(ring_bytes), g_ring_queue_bytes);
+    bench_bytes_string(bvec_bytes, sizeof(bvec_bytes), g_bvec_queue_bytes);
+    /* deliberately not a table row: the two figures are not the two time columns, and one
+       shaped like them would be read as if they were */
+    printf(
+        "  memory held at the end: fixed ring %s, bucket vector fifo %s\n", ring_bytes, bvec_bytes
+    );
+  }
+
   bench_section("traversal");
   bench_step(test_bvec_iterate_buckets, stepCount, "  bucket vector, bucket wise", "element");
   bench_step(test_bvec_iterate_indexed, stepCount, "  bucket vector, by index", "element");
+  bench_step(test_ring_iterate_indexed, stepCount, "  fixed ring, by index", "element");
   bench_step(test_flat_iterate, stepCount, "  flat array", "element");
 
   bench_section("random access");
   bench_step(test_bvec_random_access, stepCount, "  bucket vector", "element");
+  bench_step(test_ring_random_access, stepCount, "  fixed ring", "element");
   bench_step(test_flat_random_access, stepCount, "  flat array", "element");
 
   bench_total(timeUsed, stepCount, "element");
