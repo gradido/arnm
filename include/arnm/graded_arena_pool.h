@@ -305,15 +305,20 @@ uint32_t arnm_graded_arena_pool_capacity_for(const arnm_graded_arena_pool *pool,
  * works on them. Filling the stock before the first request is what this is mainly for:
  * `arnm_dynamic_arena_pool_reserve(arnm_graded_arena_pool_grade_at(pool, 0), 4)`.
  *
- * @param[in] pool  Pool to ask; may be NULL.
- * @param[in] index Grade to reach, 0 being the smallest capacity.
+ * @param[in,out] pool  Pool to reach into; may be NULL. Not `const`, and deliberately so: what
+ *                      comes back is a grade the caller may fill, drain and read, so a `const`
+ *                      ladder handing one out would promise something it does not keep.
+ * @param[in]     index Grade to reach, 0 being the smallest capacity.
  * @return The grade, or NULL when @p pool is NULL or empty, or @p index names no grade.
+ * @note The figures a ladder answers on its own -- arnm_graded_arena_pool_grade_count(),
+ *       arnm_graded_arena_pool_capacity_for(), arnm_graded_arena_pool_reserved() -- are the
+ *       ones a `const` pool can still be asked for.
  * @warning Releasing a grade through this pointer leaves the ladder intact and that grade
  *          empty -- usable, but no longer holding what it held. Lending and returning are
  *          what this is for.
  */
 arnm_dynamic_arena_pool *arnm_graded_arena_pool_grade_at(
-    const arnm_graded_arena_pool *pool, uint16_t index
+    arnm_graded_arena_pool *pool, uint16_t index
 );
 
 /**

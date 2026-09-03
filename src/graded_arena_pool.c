@@ -223,7 +223,7 @@ uint32_t arnm_graded_arena_pool_capacity_for(const arnm_graded_arena_pool *pool,
 }
 
 arnm_dynamic_arena_pool *arnm_graded_arena_pool_grade_at(
-    const arnm_graded_arena_pool *pool, uint16_t index
+    arnm_graded_arena_pool *pool, uint16_t index
 ) {
   if (!pool || !pool->grades || index >= pool->grade_count) { return NULL; }
   return &pool->grades[index];
