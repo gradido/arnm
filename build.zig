@@ -235,7 +235,7 @@ pub fn build(b: *std.Build) void {
     if (enable_benchmarks) {
         const path = "benchmarks/src";
         processBuildTarget(&context, .{ .name = "bench_vector", .srcs = &.{"bench_vector.c"} }, path);
-        processBuildTarget(&context, .{ .name = "bench_multi_arena", .srcs = &.{"bench_multi_arena.c"} }, path);
+        processBuildTarget(&context, .{ .name = "bench_arena", .srcs = &.{"bench_arena.c"} }, path);
         processBuildTarget(&context, .{ .name = "bench_numberToString", .srcs = &.{"bench_numberToString.c"} }, path);
         processBuildTarget(&context, .{ .name = "bench_binaryToString", .srcs = &.{"bench_binaryToString.c"} }, path);
         processBuildTarget(&context, .{ .name = "bench_json", .srcs = &.{"bench_json.c"} }, path);
@@ -248,7 +248,9 @@ pub fn build(b: *std.Build) void {
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_converter", .srcs = &.{"test_converter.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_duration", .srcs = &.{"test_duration.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_memory", .srcs = &.{"test_memory.cpp"} }, path);
+        processBuildTarget(&context, .{ .link_googletest = true, .name = "test_dynamic_arena_pool", .srcs = &.{"test_dynamic_arena_pool.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_fixed_arena_pool", .srcs = &.{"test_fixed_arena_pool.cpp"} }, path);
+        processBuildTarget(&context, .{ .link_googletest = true, .name = "test_graded_arena_pool", .srcs = &.{"test_graded_arena_pool.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_fixed_ring", .srcs = &.{"test_fixed_ring.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_json_reader", .srcs = &.{"test_json_reader.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_json_writer", .srcs = &.{"test_json_writer.cpp"} }, path);

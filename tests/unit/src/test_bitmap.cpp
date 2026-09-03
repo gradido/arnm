@@ -55,3 +55,30 @@ TEST(Bitmap, TheTwoWidthsAgreeOnEveryMaskBothCanHold) {
     EXPECT_EQ(arnm_ctz(mask), arnm_ctzll(mask)) << "mask 0x" << std::hex << mask;
   }
 }
+
+// promise: the count is the number of set bits, for the masks whose answer is known by
+// construction. The empty mask is tested here where the scans could not be: a count has an
+// answer for it.
+TEST(Bitmap, CountsTheBitsThatAreSet) {
+  EXPECT_EQ(arnm_popcount(0u), 0);
+  EXPECT_EQ(arnm_popcount(UINT32_MAX), 32);
+  for (unsigned position = 0; position < 32u; ++position) {
+    EXPECT_EQ(arnm_popcount(1u << position), 1) << "at " << position;
+    // a mask of the bits below one is what turns a set bit into a dense index
+    EXPECT_EQ(arnm_popcount((1u << position) - 1u), static_cast<int>(position))
+        << "at " << position;
+  }
+  EXPECT_EQ(arnm_popcount(0b1001000100u), 3);
+}
+
+// promise: counting the bits below each set bit of a mask numbers them 0, 1, 2 ... in order --
+// the dense index arnm_graded_arena_pool builds its grade lookup on
+TEST(Bitmap, CountingBelowASetBitNumbersTheBitsDensely) {
+  const uint32_t mask = (1u << 3) | (1u << 7) | (1u << 8) | (1u << 31);
+  const unsigned positions[] = {3, 7, 8, 31};
+  for (unsigned i = 0; i < 4u; ++i) {
+    EXPECT_EQ(arnm_popcount(mask & ((1u << positions[i]) - 1u)), static_cast<int>(i))
+        << "bit " << positions[i];
+  }
+  EXPECT_EQ(arnm_popcount(mask), 4);
+}

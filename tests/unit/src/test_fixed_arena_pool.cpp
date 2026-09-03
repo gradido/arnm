@@ -274,6 +274,18 @@ TEST(FixedArenaPool, FreeRejectsWhatDidNotComeFromHere) {
   arnm *between = reinterpret_cast<arnm *>(reinterpret_cast<uint8_t *>(pool.arenas) + 1);
   EXPECT_EQ(arnm_fixed_arena_pool_free(&pool, between), ARNM_ERROR_INVALID_PARAM);
 
+  // the descriptors end where the buffers begin, and the check ends with them. An address in
+  // the buffer region sits in the same block and lands on a slot boundary, so only the upper
+  // bound tells it apart from an arena -- and taking it in would reset payload bytes as if they
+  // were a descriptor and thread the free list through them.
+  arnm *first_buffer = pool.arenas + pool.arena_count;
+  EXPECT_EQ(arnm_fixed_arena_pool_free(&pool, first_buffer), ARNM_ERROR_INVALID_PARAM);
+  arnm *last_byte_of_block = reinterpret_cast<arnm *>(
+      reinterpret_cast<uint8_t *>(pool.arenas) + arnm_fixed_arena_pool_reserved(&pool) -
+      sizeof(arnm)
+  );
+  EXPECT_EQ(arnm_fixed_arena_pool_free(&pool, last_byte_of_block), ARNM_ERROR_INVALID_PARAM);
+
   // a stack arena is not one of ours however well it is initialized
   alignas(8) uint8_t storage[64];
   arnm stack_arena{};
