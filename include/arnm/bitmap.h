@@ -11,12 +11,14 @@ extern "C" {
 
 /**
  * @defgroup arnm_bitmap arnm_bitmap
- * @brief Bit scans, spelled the same way on every toolchain.
+ * @brief Bit scans and a bit count, spelled the same way on every toolchain.
  *
  * Finding the lowest set bit is one instruction on every architecture arnm targets and a
  * different spelling on every compiler: gcc and clang carry it as `__builtin_ctz`, MSVC as
  * `_BitScanForward`. These wrappers hold that difference in one place, so a caller that walks a
- * mask never learns which toolchain it was built with.
+ * mask never learns which toolchain it was built with. @ref arnm_popcount() answers the other
+ * question a mask is asked -- how many of its bits are set -- and turns a set bit into a dense
+ * index when it is counted over the bits below one.
  *
  * See the gcc reference for the builtins underneath:
  * https://gcc.gnu.org/onlinedocs/gcc/Bit-Operation-Builtins.html
@@ -85,6 +87,41 @@ static inline int arnm_ctzll(unsigned long long bitmap) {
   return (int)index;
 #else
   return __builtin_ctzll(bitmap);
+#endif
+}
+
+/**
+ * @brief How many bits of a 32 bit mask are set.
+ *
+ * Counted over the bits below a position, this is what turns a sparse mask into a dense index:
+ * the number of set bits under bit @c e is the position bit @c e would have in an array that
+ * holds only what the mask names. @ref arnm_graded_arena_pool is where that is used.
+ *
+ * @param[in] bitmap Mask to count; 0 is fine and answers 0. Unlike the scans above there is no
+ *                   undefined case -- a count always has an answer.
+ * @return The number of set bits, 0 to 32.
+ * @whisper How many windows are lit, before asking which
+ */
+static inline int arnm_popcount(unsigned int bitmap) {
+#if defined(_MSC_VER)
+  /*
+   * Not `__popcnt`. MSVC emits the POPCNT instruction for it unconditionally, and POPCNT is an
+   * SSE4.2 instruction -- a binary built with it stops with an illegal instruction on any CPU
+   * older than that, at the call and with nothing said about why. There is no compile time
+   * guard to write either, the way the 64 bit scan above has one: the target architecture is
+   * the same, only the CPU it eventually runs on differs.
+   *
+   * So the count is done in software on MSVC. The pairwise fold below is branchless and its
+   * cost is a handful of ALU operations, which is what a lookup that used to walk an array is
+   * being compared against. gcc and clang need none of this: __builtin_popcount lowers to the
+   * instruction where the target has it and to their own helper where it does not.
+   */
+  bitmap = bitmap - ((bitmap >> 1) & 0x55555555u);
+  bitmap = (bitmap & 0x33333333u) + ((bitmap >> 2) & 0x33333333u);
+  bitmap = (bitmap + (bitmap >> 4)) & 0x0f0f0f0fu;
+  return (int)((bitmap * 0x01010101u) >> 24);
+#else
+  return __builtin_popcount(bitmap);
 #endif
 }
 

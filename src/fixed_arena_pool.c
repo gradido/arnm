@@ -1,5 +1,6 @@
 #include "arnm/fixed_arena_pool.h"
 
+#include "arena_free_list.h"
 #include "memory_intern.h"
 
 #include "arnm/arena.h"
@@ -9,7 +10,6 @@
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <string.h>
 
 /*
  * One allocation holds the whole pool:
@@ -22,19 +22,11 @@
  * rounded up to 8, so every buffer starts 8 byte aligned and arnm_init_arena_borrow() accepts
  * it as it is.
  *
- * The free list threads through the buffers rather than through the descriptors: a free arena's
- * bytes are dead until it is lent out, and its first sizeof(arnm *) of them carry the address
- * of the next free arena. Written and read with memcpy, because a uint8_t buffer is not a
- * arnm * and pretending otherwise is the kind of aliasing a sanitizer is right to complain
- * about. The pointer fits: capacities are rounded up to 8, and the assert below settles that 8
- * is enough on this target.
+ * The free list threads through the buffers rather than through the descriptors; see
+ * src/arena_free_list.h, which the dynamic pool reads the same links out of.
  */
 
-static_assert(
-    sizeof(arnm *) <= 8, "the free list link has to fit in the smallest arena, which is 8 bytes"
-);
 static_assert(sizeof(arnm) <= UINT16_MAX - 1, "arnm has an unreasonable size");
-static_assert(ARNM_ALIGN8(sizeof(arnm)) == sizeof(arnm), "arnm struct must be 8-Byte aligned");
 
 /** Where the buffers begin, measured from the front of the block. */
 static inline uint64_t buffers_offset(uint16_t arena_count) {
@@ -46,30 +38,6 @@ static inline uint64_t block_bytes(const arnm_fixed_arena_pool *pool) {
   if (!pool) { return 0; }
   return buffers_offset(pool->arena_count) + (uint64_t)pool->arena_count * pool->arena_capacity;
 }
-
-/* The link goes into the arena's buffer, never into `arena->bytes` -- that is the descriptor
-   itself, and its first eight bytes are the pointer to the buffer. Writing the link there
-   overwrites exactly what makes the arena an arena, and the first allocation out of it lands
-   on whatever address the link happened to hold. Hence the reach into the private layout. */
-static uint8_t *link_slot(const arnm *arena) {
-  return arnm_intern_of_const(arena)->data;
-}
-
-/** Read the link a free arena carries in the first bytes of its buffer. */
-static arnm *next_free(const arnm *arena) {
-  arnm *next = NULL;
-  memcpy(&next, link_slot(arena), sizeof(arnm *));
-  return next;
-}
-
-/** Write the link into a free arena's buffer. Only ever called on an arena the pool holds. */
-static void set_next_free(arnm *arena, arnm *next) {
-  memcpy(link_slot(arena), &next, sizeof(arnm *));
-}
-
-/* An arena has to be able to carry the link while it is free. _init rounds the capacity up to
-   8 and refuses 0, so the smallest arena a pool can have is exactly wide enough. */
-static_assert(sizeof(arnm *) <= 8, "a free arena's buffer must be able to hold the link");
 
 /** True when @p arena is one of @p pool's, addressed exactly at a slot and not between two. */
 static bool belongs_to(const arnm_fixed_arena_pool *pool, const arnm *arena) {
@@ -128,7 +96,7 @@ arnm_result arnm_fixed_arena_pool_init(
       arnm_free(block, (uint32_t)total, source);
       return result;
     }
-    set_next_free(arena, head);
+    arnm_arena_set_next_free(arena, head);
     head = arena;
   }
 
@@ -208,7 +176,7 @@ arnm_result arnm_fixed_arena_pool_alloc(arnm_fixed_arena_pool *pool, arnm **out)
   if (!pool->free_head) { return ARNM_ERROR_RESOURCE_EXHAUSTED; }
 
   arnm *arena = pool->free_head;
-  pool->free_head = next_free(arena);
+  pool->free_head = arnm_arena_next_free(arena);
   pool->acquired_count++;
 
   // the arena is already empty: _init left it so and _free resets on the way in. The link that
@@ -227,7 +195,7 @@ arnm_result arnm_fixed_arena_pool_free(arnm_fixed_arena_pool *pool, arnm *arena)
 
   // emptied before it rejoins the list, so the next caller gets what the first one got
   arnm_reset(arena);
-  set_next_free(arena, pool->free_head);
+  arnm_arena_set_next_free(arena, pool->free_head);
   pool->free_head = arena;
   pool->acquired_count--;
   return ARNM_SUCCESS;
