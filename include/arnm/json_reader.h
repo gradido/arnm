@@ -614,6 +614,8 @@ arnm_result arnm_json_read_array(
     uint32_t *out_array_size
 );
 
+bool arnm_json_read_is_null(arnm_json_value *json_value);
+
 /** @} */
 
 #ifdef __cplusplus

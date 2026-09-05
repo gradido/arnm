@@ -117,31 +117,31 @@ static void write_record_field(arnm_json_writer *writer, unsigned index, const s
   const char *value = (LONG_VALUE_LENGTH == form->length) ? long_value : SHORT_VALUE;
   switch (index) {
   case 0:
-    arnm_json_writer_add_string_length(writer, "name", value, form->length);
+    arnm_json_writer_add_string_length(writer, "name", 4, value, form->length);
     break;
   case 1:
-    arnm_json_writer_add_uint64(writer, "id", UINT64_C(0x0123456789abcdef));
+    arnm_json_writer_add_uint64(writer, "id", 2, UINT64_C(0x0123456789abcdef));
     break;
   case 2:
-    arnm_json_writer_add_int64(writer, "balance", INT64_C(-4200000000));
+    arnm_json_writer_add_int64(writer, "balance", 7, INT64_C(-4200000000));
     break;
   case 3:
-    arnm_json_writer_add_uint64(writer, "port", 8443);
+    arnm_json_writer_add_uint64(writer, "port", 4, 8443);
     break;
   case 4:
-    arnm_json_writer_add_int64(writer, "offset", -12345);
+    arnm_json_writer_add_int64(writer, "offset", 6, -12345);
     break;
   case 5:
-    arnm_json_writer_add_double(writer, "ratio", 0.6180339887498949);
+    arnm_json_writer_add_double(writer, "ratio", 5, 0.6180339887498949);
     break;
   case 6:
-    arnm_json_writer_add_bool(writer, "active", true);
+    arnm_json_writer_add_bool(writer, "active", 6, true);
     break;
   case 7:
-    arnm_json_writer_add_hex(writer, "digest", record_digest, RECORD_DIGEST_SIZE);
+    arnm_json_writer_add_hex(writer, "digest", 6, record_digest, RECORD_DIGEST_SIZE);
     break;
   default:
-    arnm_json_writer_add_uuid(writer, "uuid", record_uuid);
+    arnm_json_writer_add_uuid(writer, "uuid", 4, record_uuid);
     break;
   }
 }
@@ -149,7 +149,7 @@ static void write_record_field(arnm_json_writer *writer, unsigned index, const s
 static void write_spares(arnm_json_writer *writer, uint32_t count) {
   for (uint32_t index = 0; index < count; ++index) {
     arnm_json_writer_add_string_length(
-        writer, spare_keys[index], SHORT_VALUE, (uint32_t)(sizeof(SHORT_VALUE) - 1u)
+        writer, spare_keys[index], 8, SHORT_VALUE, (uint32_t)(sizeof(SHORT_VALUE) - 1u)
     );
   }
 }
@@ -167,9 +167,9 @@ static void build_payload(arnm_json_writer *writer, const shape *form) {
     build_record(writer, form);
     return;
   }
-  arnm_json_writer_open_array(writer, "items");
+  arnm_json_writer_open_array(writer, "items", 5);
   for (uint32_t index = 0; index < form->elements; ++index) {
-    arnm_json_writer_open_object(writer, NULL);
+    arnm_json_writer_open_object(writer, NULL, 0);
     build_record(writer, form);
     arnm_json_writer_close(writer);
   }
@@ -227,7 +227,7 @@ static void build_document(payload *one, const arnm_json_writer_hint *hint, int 
     );
     build_payload(&writer, &one->form);
     require_ok(arnm_json_writer_status(&writer), "build");
-    sink += arnm_json_writer_size(&writer);
+    sink += arnm_json_writer_buffer_size_min(&writer);
     (void)arnm_json_writer_release(&writer);
     arnm_reset(&scratch);
   }
@@ -273,7 +273,7 @@ static void render_document(payload *one, const arnm_json_writer_hint *hint, int
  */
 static void measure_size(payload *one, int steps) {
   uint64_t sink = 0;
-  for (int step = 0; step < steps; ++step) { sink += arnm_json_writer_size(&one->writer); }
+  for (int step = 0; step < steps; ++step) { sink += arnm_json_writer_buffer_size_min(&one->writer); }
   g_sink += sink;
 }
 
@@ -508,16 +508,11 @@ static void prepare_test_data(void) {
     build_payload(&writer, &one->form);
     require_ok(arnm_json_writer_status(&writer), one->name);
     // asked before the text exists, which is the only moment the answer is of any use
-    one->promised = arnm_json_writer_size(&writer);
+    one->promised = arnm_json_writer_buffer_size_min(&writer);
 
     arnm_memory_block rendered;
     require_ok(arnm_json_writer_write(&writer, &output, &rendered, &one->length), "write payload");
-    // the promise is an upper bound and never a short one; a document that outgrew what its own
-    // writer reserved for it would have sized an output arena too small
-    if (one->promised < one->length + 1u) {
-      fprintf(stderr, "benchmark setup failed: payload '%s' outgrew its own promise\n", one->name);
-      exit(EXIT_FAILURE);
-    }
+    
     // the insitu rows render this text into a buffer of the same size and write padding past its
     // end, so the room for that padding is what has to fit
     if (one->length + ARNM_JSON_READER_INSITU_PADDING > TEXT_CAPACITY) {

@@ -425,25 +425,31 @@ uint32_t arnm_json_writer_depth(const arnm_json_writer *writer);
  */
 
 /** @brief Add the literal `null`. @param writer Writer. @param key Field name, NULL in an array. */
-void arnm_json_writer_add_null(arnm_json_writer *writer, const char *key);
+void arnm_json_writer_add_null(arnm_json_writer *writer, const char *key, size_t key_length);
 
 /** @brief Add `true` or `false`.
  *  @param[in,out] writer Writer to add to; may be NULL.
  *  @param[in]     key    Field name, or NULL for an element of the current array.
  *  @param[in]     value  What to write. */
-void arnm_json_writer_add_bool(arnm_json_writer *writer, const char *key, bool value);
+void arnm_json_writer_add_bool(
+    arnm_json_writer *writer, const char *key, size_t key_length, bool value
+);
 
 /** @brief Add a signed integer, written whole and without an exponent.
  *  @param[in,out] writer Writer to add to; may be NULL.
  *  @param[in]     key    Field name, or NULL for an element of the current array.
  *  @param[in]     value  What to write. */
-void arnm_json_writer_add_int64(arnm_json_writer *writer, const char *key, int64_t value);
+void arnm_json_writer_add_int64(
+    arnm_json_writer *writer, const char *key, size_t key_length, int64_t value
+);
 
 /** @brief Add an unsigned integer, written whole and without an exponent.
  *  @param[in,out] writer Writer to add to; may be NULL.
  *  @param[in]     key    Field name, or NULL for an element of the current array.
  *  @param[in]     value  What to write. */
-void arnm_json_writer_add_uint64(arnm_json_writer *writer, const char *key, uint64_t value);
+void arnm_json_writer_add_uint64(
+    arnm_json_writer *writer, const char *key, size_t key_length, uint64_t value
+);
 
 /**
  * @brief Add a real number, in the shortest form that reads back as the same `double`.
@@ -457,7 +463,9 @@ void arnm_json_writer_add_uint64(arnm_json_writer *writer, const char *key, uint
  *       refusal are the only two answers -- see the flags section.
  * @note This is the one value @ref arnm_json_writer_size() cannot measure exactly beforehand.
  */
-void arnm_json_writer_add_double(arnm_json_writer *writer, const char *key, double value);
+void arnm_json_writer_add_double(
+    arnm_json_writer *writer, const char *key, size_t key_length, double value
+);
 
 /**
  * @brief Add a string, borrowing the bytes where they lie.
@@ -472,7 +480,9 @@ void arnm_json_writer_add_double(arnm_json_writer *writer, const char *key, doub
  *                       would be a mistake, catch it before it gets here.
  * @whisper Lent to the page, never lifted from its place
  */
-void arnm_json_writer_add_string(arnm_json_writer *writer, const char *key, const char *value);
+void arnm_json_writer_add_string(
+    arnm_json_writer *writer, const char *key, size_t key_length, const char *value
+);
 
 /**
  * @brief @ref arnm_json_writer_add_string() for bytes that are not NUL terminated.
@@ -484,7 +494,19 @@ void arnm_json_writer_add_string(arnm_json_writer *writer, const char *key, cons
  * @param[in]     length Bytes in @p value.
  */
 void arnm_json_writer_add_string_length(
-    arnm_json_writer *writer, const char *key, const char *value, uint32_t length
+    arnm_json_writer *writer, const char *key, size_t key_length, const char *value, uint32_t length
+);
+
+/*
+ * write string directly into json, without escaping or utf8 check
+ * 
+ * @param[in,out] writer Writer to add to; may be NULL.
+ * @param[in]     key    Field name, or NULL for an element of the current array.
+ * @param[in]     value  Bytes to write; NULL writes the literal `null`.
+ * @param[in]     length Bytes in @p value.
+*/
+void arnm_json_writer_add_string_raw(
+  arnm_json_writer* writer, const char* key, size_t key_length, const char* value, uint32_t length
 );
 
 /**
@@ -500,7 +522,9 @@ void arnm_json_writer_add_string_length(
  * @param[in]     value  NUL terminated bytes to copy, or NULL for the literal `null`.
  * @whisper Taken along, because the road ahead is longer than the ground it stood on
  */
-void arnm_json_writer_add_string_copy(arnm_json_writer *writer, const char *key, const char *value);
+void arnm_json_writer_add_string_copy(
+    arnm_json_writer *writer, const char *key, size_t key_length, const char *value
+);
 
 /**
  * @brief @ref arnm_json_writer_add_string_copy() for bytes that are not NUL terminated.
@@ -511,7 +535,7 @@ void arnm_json_writer_add_string_copy(arnm_json_writer *writer, const char *key,
  * @param[in]     length Bytes in @p value.
  */
 void arnm_json_writer_add_string_copy_length(
-    arnm_json_writer *writer, const char *key, const char *value, uint32_t length
+    arnm_json_writer *writer, const char *key, size_t key_length, const char *value, uint32_t length
 );
 
 /**
@@ -550,7 +574,7 @@ void arnm_json_writer_add_string_copy_length(
  * @whisper Every byte says its name twice, and the page already knows it will not shout
  */
 void arnm_json_writer_add_hex(
-    arnm_json_writer *writer, const char *key, const uint8_t *data, uint32_t size
+    arnm_json_writer *writer, const char *key, size_t key_length, const uint8_t *data, uint32_t size
 );
 
 /**
@@ -582,7 +606,7 @@ void arnm_json_writer_add_hex(
  * @whisper Three bytes fold into four letters, on a page that will not ask them to shout
  */
 void arnm_json_writer_add_base64(
-    arnm_json_writer *writer, const char *key, const uint8_t *data, uint32_t size
+    arnm_json_writer *writer, const char *key, size_t key_length, const uint8_t *data, uint32_t size
 );
 
 /**
@@ -606,7 +630,9 @@ void arnm_json_writer_add_base64(
  *       still does, as with every adder.
  * @whisper Sixteen bytes take the shape the world reads them by, on the page they were written for
  */
-void arnm_json_writer_add_uuid(arnm_json_writer *writer, const char *key, const uint8_t *uuid);
+void arnm_json_writer_add_uuid(
+    arnm_json_writer *writer, const char *key, size_t key_length, const uint8_t *uuid
+);
 
 // ********** nesting *******************
 
@@ -619,7 +645,7 @@ void arnm_json_writer_add_uuid(arnm_json_writer *writer, const char *key, const 
  *       and not a refusal: the container simply stays open, and the write closes it.
  * @whisper One level down, and the way back kept here
  */
-void arnm_json_writer_open_object(arnm_json_writer *writer, const char *key);
+void arnm_json_writer_open_object(arnm_json_writer *writer, const char *key, size_t key_length);
 
 /**
  * @brief Open an array and add every field that follows to it, keys left out.
@@ -627,7 +653,7 @@ void arnm_json_writer_open_object(arnm_json_writer *writer, const char *key);
  * @param[in,out] writer Writer to descend in; may be NULL.
  * @param[in]     key    Field name, or NULL for an element of the current array.
  */
-void arnm_json_writer_open_array(arnm_json_writer *writer, const char *key);
+void arnm_json_writer_open_array(arnm_json_writer *writer, const char *key, size_t key_length);
 
 /**
  * @brief Close the container the last open began.
@@ -642,31 +668,9 @@ void arnm_json_writer_close(arnm_json_writer *writer);
 // ********** measuring and writing *******************
 
 /**
- * @brief Bytes the finished text will need, terminator included.
- *
- * Kept as the document is built rather than worked out afterwards: every field knows its own
- * length, its separator and its indentation the moment it is added, so this call reads a number
- * that is already there. It costs nothing to ask, at any point, and asking early is how an
- * output arena is sized before a byte of text exists.
- *
- * The number is **exact** for a document of integers, booleans, nulls and valid UTF-8 strings,
- * whatever the flags. Two things make it an upper bound instead, and both only ever make it too
- * large:
- *
- * - A `double` is charged @ref ARNM_JSON_WRITER_MAX_NUMBER_TEXT bytes. Its real length is known
- *   only once it is rendered, and rendering it twice to save a few bytes is the wrong trade.
- * - Under @ref ARNM_JSON_WRITE_ESCAPE_UNICODE, a byte outside ASCII is charged six. That is
- *   exact for a byte escaped on its own and generous for a multi byte character, which becomes
- *   one escape for all of its bytes together.
- *
- * @param[in] writer Writer to ask; may be NULL.
- * @return Bytes to reserve, or 0 without a document. Saturates at @ref ARNM_MAX_ALLOC_SIZE.
- * @note The allocator handed to @ref arnm_json_writer_write() needs room beyond this while the
- *       call runs -- the serializer keeps its own working state at the far end of the same
- *       buffer -- and gives it back before the call returns.
- * @whisper The page measured while the words are still being set
- */
-uint32_t arnm_json_writer_size(const arnm_json_writer *writer);
+* try to estimate buffer size needed by writer, don't work for extra long value
+*/
+uint32_t arnm_json_writer_buffer_size_min(const arnm_json_writer *writer);
 
 /**
  * @brief Render the document into memory drawn from @p allocator.

@@ -481,3 +481,7 @@ arnm_result arnm_json_read_array(
   if (out_array_size) { *out_array_size = count; }
   return ARNM_SUCCESS;
 }
+
+bool arnm_json_read_is_null(arnm_json_value *json_value) {
+  return yyjson_is_null(to_yyjson(json_value));
+}
