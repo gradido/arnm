@@ -1,301 +1,439 @@
-# AGENTS.md – arnm
+# AGENTS.md - arnm
 
-A **C11** library meant to be linked into a program written in something else. One sentence
-carries the whole design: **data lives in memory arenas.** The caller hands over a blob, arnm
-opens its arenas inside it, and the blob goes back unchanged in size and ownership -- the
-library never owns memory it was not given.
+ARNM is a **C11 library designed to be linked into programs written in other languages**.
 
-Everything below follows from that. The **memory contract** and the **commenting standard**
-are not negotiable; the rest is what saves you a wasted afternoon.
+Its central idea comes from the allocator model used by Zig:
 
-----------
+> **The caller chooses where memory comes from. ARNM provides the mechanism without hiding the decision.**
+
+One sentence captures the memory model:
+
+> **Data lives in memory arenas.**
+
+The caller provides the memory or allocator. ARNM manages that memory according to the selected strategy, but never silently takes ownership of memory it was not given.
+
+The same principle extends throughout the library:
+
+* explicit ownership
+* explicit lifetime
+* explicit allocation strategy
+* explicit sizes
+* explicit transformations
+* predictable performance
+* meaningful warnings and errors
+* low mental overhead when reading the code
+
+ARNM abstracts **mechanisms, not decisions**.
+
+---
+
+## Core design principles
+
+### Allocators are explicit
+
+`arnm` is the common allocator handle. The caller can select the allocation strategy without changing code that consumes the allocator.
+
+Do not introduce hidden allocators, global allocation state, thread-local allocation state, or implicit ownership.
+
+`malloc` exists only in `src/memory.c`, on the NULL-allocator path. No other library source may call it.
+
+### Ownership is explicit
+
+ARNM never owns memory it was merely given.
+
+This distinction is especially important for borrowed arena memory and fixed arena pools. A fixed pool, for example, owns the arenas that are currently free; once an arena is handed to the caller, the pool does not track or wrap that arena.
+
+Do not add bookkeeping merely to make ownership implicit.
+
+### Sizes are explicit
+
+Sizes are `uint32_t`: counts, indices and byte sizes alike.
+
+Anything that would overflow `uint32_t` must return `ARNM_ERROR_ARITHMETIC_OVERFLOW` rather than wrap. Where a bound is known at compile time, prefer `static_assert`.
+
+Every allocation is rounded up to an 8-byte boundary.
+
+ARNM does not store per-allocation size bookkeeping. The caller supplies the size again when freeing or resizing.
+
+`arnm_memory_block` exists for cases where keeping pointer and allocated size together is useful:
+
+```c
+typedef struct arnm_memory_block {
+    uint8_t *data;
+    uint32_t size;
+} arnm_memory_block;
+```
+
+The `size` is the **allocated size**, not the logical content length.
+
+### Why the caller tracks the size
+
+Arena memory can only be reclaimed from the tail.
+
+To determine whether an allocation can be released, ARNM needs both:
+
+* the pointer
+* the original allocated size
+
+The allocation is reclaimable when the end of that allocation is exactly the arena's current tail.
+
+Conceptually:
+
+```c
+memory->data + memory->last_index - aligned_size == buffer
+```
+
+If the allocation is buried behind another allocation, the arena cannot reclaim it. The memory remains part of the arena until reset or another appropriate lifetime operation.
+
+This is why replacing explicit size tracking with hidden allocation metadata would work against the fundamental memory model.
+
+---
+
+## Lifetime is part of the abstraction
+
+ARNM provides several deliberately different lifetime models.
+
+* **Arena:** fast bump allocation; reset keeps the memory, release returns it.
+* **Multi-arena:** grows by adding arenas and can release empty trailing arenas.
+* **Fixed arena pool:** reserves a known number of equal-sized arenas and lends them to callers.
+* **Borrowed memory:** ARNM uses caller-owned memory without taking ownership.
+* **Bucket/vector storage:** provides stable element storage according to its bucket model.
+
+These are different abstractions because they express different lifetime and memory requirements.
+
+Do not flatten them into a generic allocator abstraction merely to make their APIs look uniform.
+
+For example, a fixed arena pool deliberately has a known memory ceiling and O(1) acquire/release operations. Its free list lives inside the free arenas themselves, requiring no separate allocation.
+
+A multi-arena deliberately behaves differently: it grows when necessary and `shrink()` only releases empty arenas from the end.
+
+---
+
+## No unnecessary transformations
+
+ARNM favors direct data flow.
+
+If data can be produced directly into its final allocation, do so.
+
+Avoid silently introducing:
+
+* copies
+* intermediate buffers
+* escaping
+* validation
+* normalization
+* ownership transfers
+* unbounded growth
+
+unless the operation explicitly promises that behavior.
+
+The JSON writer is an important example: it renders directly into memory obtained from the supplied allocator, grows there as necessary, and returns that same allocation after shrinking it to the required size. The JSON text is not rendered into an intermediate buffer first.
+
+### JSON writer input semantics
+
+JSON string escaping is a transformation and must therefore be explicit.
+
+The default string-writing semantics do not silently escape strings supplied by the caller.
+
+Likewise, malformed UTF-8 is intentionally written unchecked rather than causing an implicit validation pass.
+
+General rule:
+
+> **Do not silently perform work the caller did not request.**
+
+---
+
+## Result semantics
+
+`arnm_result` distinguishes successful completion, warnings and errors.
+
+`ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED` means:
+
+> The requested operation completed, but the arena could not return those bytes to the available tail.
+
+It is neither ordinary success nor an error.
+
+Handle it explicitly at the call site. Do not hide it behind a generic `ok()` helper because its meaning depends on the operation and caller.
+
+Failures leave outputs untouched.
+
+`ARNM_ERROR_USER_BASE` reserves codes above 1000 for the embedding application; ARNM owns the codes below it.
+
+---
+
+## Performance
+
+Performance is part of ARNM's architecture, not merely an implementation detail.
+
+Consider:
+
+* allocation count
+* memory movement
+* copying
+* cache behavior
+* branches
+* scans
+* function-call overhead
+* bounded versus growing memory
+* compiler optimization
+
+Every function call can have a cost depending on optimization and compiler decisions. Do not assume that a small helper is free merely because it looks like it should inline.
+
+Performance-sensitive paths may therefore use specialized implementations or intentionally duplicate a small amount of code.
+
+Measure performance claims in an optimized build. Benchmarks should use `-Doptimize=ReleaseFast`; debug numbers answer a different question.
+
+---
+
+## Mental overhead
+
+Machine performance is not the only cost.
+
+**Mental overhead while reading the code matters too.**
+
+Prefer code whose actual behavior is immediately visible.
+
+Do not extract a simple one-liner into a separate function merely to remove a line of code if the original expression makes the operation clearer than the resulting function name.
+
+Do not introduce abstractions whose indirection makes data flow, ownership, lifetime or control flow harder to understand.
+
+A small amount of local duplication can be preferable to an abstraction that increases cognitive load.
+
+The goal is:
+
+> **Low machine cost and low mental cost.**
+
+---
+
+## Internal functions
+
+Functions declared `static` inside `.c` files are implementation details.
+
+Their preconditions should reflect the actual internal contract.
+
+Do not repeat defensive checks that the caller has already established.
+
+For example, if an internal caller guarantees:
+
+```c
+buffer != NULL
+aligned_size != 0
+```
+
+the callee does not need to check them again merely for defensive programming.
+
+A check belongs in the internal function when the condition can genuinely occur there.
+
+This keeps hot paths smaller, avoids unnecessary branches and makes the function's actual assumptions visible.
+
+Public API boundaries have different requirements: public functions must validate their documented inputs.
+
+---
+
+## Abstraction and refactoring
+
+Before adding an abstraction, first ask whether the existing ARNM mechanisms already express the required behavior.
+
+Prefer:
+
+1. existing ARNM abstraction
+2. clear local code
+3. new abstraction for a genuinely new concept
+
+Do not create wrappers whose only purpose is renaming a simple operation.
+
+When refactoring, evaluate both:
+
+* runtime cost
+* reader cost
+
+A refactoring is not automatically an improvement because it reduces duplication or produces more layers.
+
+Preserve code that is already clear, direct and efficient.
+
+---
 
 ## Build and test
 
-**`build.zig` is the master build.** It defines the targets, the options and the matrix that
-gets verified; a change to the build belongs there first.
+`build.zig` is the master build configuration. It defines targets, options and the verification matrix.
+
+Typical development commands:
 
 ```bash
-zig build -Dtests=true -Dbenchmarks=true      # host target, resolved by zig
-./run_all.sh                 # every binary in zig-out/bin, one line each
-./run_all.sh --tests         # skip the benchmarks
-./lint.sh                    # format + the two structural checks below
+zig build -Dtests=true -Dbenchmarks=true
+./run_all.sh
+./run_all.sh --tests
+./lint.sh
 ```
 
-`-Dtarget` is for cross compiling and normally not needed — zig resolves the host on its own.
-It doubles as a workaround on a machine whose system headers are incomplete: a target-less
-build reaches into `/usr/include`, while a named target uses zig's own bundled headers. If
-`zig build -Dtests=true` dies on a missing header such as `asm/errno.h` while plain C compiles
-fine, that is the machine, not the project — pass `-Dtarget=x86_64-linux-gnu` and move on
-rather than "fixing" build.zig.
+`-Dtarget=` is normally unnecessary because Zig resolves the host target itself. It can be useful when the system headers are incomplete; use a named target rather than modifying the build to compensate for a machine-specific environment.
 
-`CMakeLists.txt` exists for the one case zig cannot serve: **the MSVC ABI on Windows**, whose
-SDK zig does not ship. It mirrors build.zig — same options under CMake spelling, same target
-set — and never leads it. When the two disagree, build.zig is right and the CMake side is the
-thing to fix. Three files, no deeper nesting: root, `benchmarks/`, `tests/`.
+`CMakeLists.txt` exists specifically for the MSVC ABI on Windows. It mirrors `build.zig` but does not lead it. When they disagree, fix CMake to match `build.zig`.
 
-```bash
-cmake -B build -DENABLE_TESTS=ON -DENABLE_BENCHMARKS=ON
-cmake --build build --config Release
-ctest --test-dir build -C Release
+Supported build options include:
+
+| Option                          | Meaning                  |
+| ------------------------------- | ------------------------ |
+| `-Dtarget=`                     | Cross compilation target |
+| `-Dtests=true`                  | Build tests              |
+| `-Dbenchmarks=true`             | Build benchmarks         |
+| `-Dshared=true`                 | Build a dynamic library  |
+| `-Dsanitize=undefined_behavior` | UBSan                    |
+| `-Dsanitize=thread`             | TSan                     |
+
+Tests must use the repository's memory limit mechanism. Boundary tests must not accidentally reserve unbounded host memory.
+
+When fixing a bug, verify that the new test actually fails without the fix before considering the test sufficient.
+
+---
+
+## Portability
+
+ARNM targets Linux (glibc and musl), Windows and macOS on supported architectures.
+
+Never claim a target that has not actually been built.
+
+### C portability
+
+* Sources are ASCII only.
+* `.c` files use C headers, never C++ headers.
+* Every public header must compile independently as both C and C++.
+* Every `.c` file includes its own header first.
+* Platform-specific code carries the headers required by that branch.
+* POSIX or legacy headers require appropriate platform guards.
+* Compiler extensions should not be introduced when portable C can express the same operation.
+
+The `static_assert` compatibility definition must not interfere with C++:
+
+```c
+#if !defined(__cplusplus) && !defined(static_assert)
+#define static_assert _Static_assert
+#endif
 ```
 
-Adding a source file needs nothing in CMake — all three globs pick up `src/*.c`,
-`benchmarks/src/bench_*.c` and `tests/unit/src/test_*.cpp`. Adding a *build option* means
-touching both files, and build.zig first. A *test binary* is named explicitly in build.zig and
-globbed in CMake, so a new `test_*.cpp` needs one line there and nothing here.
+The portability rules exist so that every toolchain exercises the same implementation wherever practical rather than maintaining an untested special path.
 
-**Nothing in the library may assume clang.** That assumption used to sit in `mono_timer.c` as a
-`__int128` scaling step, which MSVC has no type for. Where a compiler extension looks tempting,
-write the arithmetic so that 64 bit suffices — one path every toolchain exercises beats a
-fallback only MSVC ever runs, which is a fallback nobody here can test.
+---
 
-`lint.sh` walks `src/`, `include/`, `tests/unit/src/` and `benchmarks/src/` with `find`, so it
-covers `.c`, `.h` and `.cpp` at any depth. Do not replace that with a ladder of `src/**/*.c`
-patterns: bash expands `**` like a single `*` unless `globstar` is set, so such a ladder stops
-at a fixed depth and skips anything below it without a word.
+## Dependencies
 
-| Option | Meaning |
-|---|---|
-| `-Dtarget=` | cross compile; defaults to the host. e.g. `x86_64-linux-gnu`, `x86_64-linux-musl`, `x86_64-windows-gnu`, `aarch64-macos` |
-| `-Dtests=true` | build the googletest binaries |
-| `-Dbenchmarks=true` | build the `bench_*` binaries |
-| `-Dshared=true` | dynamic library — what a language binding usually wants |
-| `-Dsanitize=undefined_behavior` | UBSan; `thread` for TSan. AddressSanitizer is not available through zig |
+`third_party/yyjson` is intentionally private to ARNM.
 
-**Benchmarks need `-Doptimize=ReleaseFast`.** In a debug build the hand written digit loop
-loses to `snprintf` by a factor of two, because libc ships optimised and your build does not.
-A benchmark number from a debug build is not wrong, it is answering a different question —
-label it or do not report it.
+No public header exposes it. JSON memory management crosses the internal `src/json_memory.h` seam and routes allocations through ARNM. The vendored files remain unmodified and are kept at the recorded upstream version.
 
-**Tests cap their own memory.** `tests/unit/src/memory_limit.h` sets `RLIMIT_AS` to 2048 MB on
-Linux, skipped under sanitizers. Raise it with `ARNM_TEST_MEMORY_LIMIT_MB=8192`, disable with
-`0`. Include it in every new test binary. It exists because a boundary test once allocated
-64 GB before anyone could reach Ctrl-C.
+Do not turn implementation dependencies into public API dependencies without a strong architectural reason.
 
-----------
-
-## The memory contract
-
-- **`malloc` appears in exactly one file: `src/memory.c`, on the NULL-allocator path.**
-  Nowhere else, ever. `lint.sh` fails if a second one appears, and that check is the point of
-  the library, not a formality.
-- **Sizes are `uint32_t`** — counts, indices, byte sizes alike. Anything that would not fit
-  returns `ARNM_ERROR_ARITHMETIC_OVERFLOW` rather than wrapping. Where a bound is known at
-  compile time, use `static_assert` instead of a runtime check.
-- **Sizes are passed in, never stored.** Freeing and resizing need the size the caller
-  allocated with; a wrong size moves the arena index by the wrong amount and hands the same
-  bytes out twice. `arnm_memory_block` keeps pointer and size together when that bookkeeping
-  should not be the caller's job.
-- **Every size rounds up to a multiple of 8**, which keeps every returned pointer 8 byte
-  aligned.
-- **`ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED` is neither success nor failure**: the
-  operation happened, the memory did not come back. Handle it explicitly at each call site and
-  compare against the exact value. No `if (ok(result))` helper — a reader has to see that this
-  warning can arrive here, and be able to decide anew what it should mean.
-- **Failures leave every output untouched.** Init functions write every field and read none,
-  so uninitialised storage is a valid input.
-- **No hidden state.** No globals holding allocators, no thread-local caches, no atexit
-  handlers. A host may load this library twice into one process.
-
-`ARNM_ERROR_USER_BASE` reserves the code range above 1000 for the embedding project. Codes below
-it belong to arnm and may gain members between releases.
-
-----------
-
-## Portability contract
-
-Targets: Linux (glibc, musl), Windows (MinGW; the MSVC ABI needs the MSVC SDK present), macOS
-on both architectures. Never claim a target you did not build.
-
-- **Sources are ASCII only.** `.c`, `.h` and `.cpp` carry no byte above 0x7F, comments and
-  string literals included. What such a byte means is the compiler's decision, and MSVC reads a
-  file in the system codepage unless handed `/utf-8` — the same source then means something
-  different on another machine, or stops compiling with C4819. `lint.sh` fails on any
-  occurrence; clang-format has no say in it. The stand-ins read the same in a fixed width font:
-  `--` for an em dash, `...` for an ellipsis, `x` for a times sign. Markdown is exempt, being
-  prose no compiler reads.
-- **No C++ headers in C code.** `<cstdint>` in a `.c` file breaks every C compiler; use
-  `<stdint.h>`.
-- **Every public header compiles on its own, as C and as C++.** `lint.sh` checks all of them —
-  a consumer may include exactly one header and nothing else.
-- **The `static_assert` fallback must exclude C++**, where it is a keyword and not a macro:
-  ```c
-  #if !defined(__cplusplus) && !defined(static_assert)
-  #define static_assert _Static_assert
-  #endif
-  ```
-- **No legacy or POSIX-only headers** without a guard. `<memory.h>` is a removed SVID relic;
-  `<unistd.h>` and `<sys/*.h>` need an `#ifdef`.
-- **Platform branches carry their own includes.** A `#ifdef _WIN32` block calling `exit()`
-  needs `<stdlib.h>`; that `windows.h` drags it in is luck, not a contract.
-- **Every `.c` includes its own header first**, so the compiler checks declaration against
-  definition.
-- **One vendored dependency, and it stays hidden.** `third_party/yyjson` is the only one, and
-  it is a copy of two files rather than a submodule. A dependency here becomes a dependency for
-  every host that embeds this, in every language, so the bar stays high — and what got over it
-  lives under three rules:
-  - **No public header names it.** `arnm/json_reader.h` and `arnm/json_writer.h` are plain
-    C11 and install on their own; the yyjson include path is private to the library target in
-    both builds, and `yyjson.h` is included by exactly one place, `src/json_memory.h` -- which
-    is internal, not installed, and holds the allocator seam both `src/json_reader.c` and
-    `src/json_writer.c` cross. A consumer links `arnm` and adds one include path, the same as
-    before there was a parser in the tree.
-  - **Its allocations come back through `arnm`.** Every yyjson entry point is handed an
-    allocator that forwards to `arnm_alloc`/`arnm_realloc`/`arnm_free`, so nothing in it
-    ever reaches libc — yyjson's own default allocator is on no path this library takes.
-    That is what keeps the memory contract true with a parser in the tree, and it is worth
-    re-checking whenever the copy is updated.
-  - **It is not held to our warning flags.** `-Wconversion` is a rule arnm holds itself to,
-    and `yyjson.c` is exempted from it in both builds. `lint.sh` does not walk
-    `third_party/` either, which is deliberate: the `malloc` rule is about arnm's own
-    sources, and the promise it backs is the one above.
-
-  **`src/yyjson.c`, `src/yyjson.h` and `LICENSE` are copied in unmodified**, at release
-  `0.12.0`; `third_party/yyjson/README.md` records the upstream commit and the three commands
-  that move it. Upstream's build files, tests and fuzzers are not here -- the one source is
-  compiled straight into `libarnm` and yyjson is never built as a project of its own.
-
-  It was a submodule until 0.7.2 and stopped being one for a reason that has nothing to do with
-  taste: **`zig fetch` takes the repository tree and nothing under it.** A submodule reaches a
-  consumer as an empty directory, so a project depending on arnm through `build.zig.zon` got a
-  library whose JSON half would not compile, failing on a missing header three layers down --
-  and `--recursive` is not something a dependency can ask of the projects that use it. A copy is
-  what makes fetching arnm fetch all of arnm. Two consequences worth keeping in view: the tree
-  carries ~700 KB it did not before, and a version bump is a copy that nothing checks for you,
-  which is what the pinned commit in that README is for.
-
-  Do not modify the two files. Keeping them byte-identical to the tag is what makes an update a
-  copy instead of a merge, and what everything arnm needs on top of them lives in
-  `src/json_memory.h` for.
-
-----------
+---
 
 ## Naming
 
-Every public symbol starts with `arnm_`, every macro with `ARNM_`. The allocator type is `arnm`
-itself, so its operations read as `arnm_init_arena`, `arnm_alloc`, `arnm_reset`. `arnm_release`
-returns the arena buffer; `arnm_destroy` releases a descriptor that came from `arnm_create`.
+Every public symbol starts with `arnm_`.
 
-----------
+Every public macro starts with `ARNM_`.
 
-## How to work in this repository
+The allocator type itself is `arnm`, giving APIs such as:
 
-- **Never commit, never push.** Leave the work in the working tree, say what is in it, and stop
-  there. `git add`, `git commit`, `git tag` and `git push` belong to the human whose name goes
-  on the change, and an agent that runs them takes away the one moment where a person reads the
-  diff before it becomes history. Reading git is the other half of the same rule and is always
-  fine — `status`, `diff`, `log` and `show` are how you find out what you touched. And being
-  asked to "add it" is a request to finish the work, not to run the command.
-- **Measure before you claim.** Object sizes, timings, "this is faster" — run it, in a release
-  build. A compiler often optimises away exactly the thing you were about to take credit for.
-- **Prove the test bites.** After fixing something, revert the fix, watch the new test fail,
-  then put it back. A test that never failed proves nothing. The same goes for a new lint
-  rule.
-- **Cap the memory before probing a boundary.** `ulimit -v` for a scratch program,
-  `memory_limit.h` for a test binary. Prefer a small static arena over malloc when the point is
-  that a request must be *refused*.
-- **Say what you did not verify.** A target you could not build, a platform you do not have —
-  name it. Silence reads as confirmation.
-- **Keep the diff about the change.** Reformatting, drive-by renames and speculative refactors
-  make review expensive. Format the files you touched; put a reformatting pass in its own
-  commit.
+```c
+arnm_init_arena(...)
+arnm_alloc(...)
+arnm_reset(...)
+arnm_release(...)
+```
 
-----------
+Keep `include/arnm/` flat. A public header such as `arnm/bucket_vector.h` should not be hidden several directories deep.
 
-## C Modules (Doxygen)
+---
 
-- Every public C header MUST define exactly one module using `@defgroup`.
-- The module MUST wrap the API using `@{` … `@}`.
+## Doxygen modules
+
+Every public header defines exactly one top-level Doxygen module using `@defgroup` and wraps its public API with `@{` and `@}`.
+
+Example:
 
 ```c
 /** @defgroup arnm_memory arnm_memory
-  *  @brief Allocator that is either a bump arena or plain malloc/free
-  *  @{
-  */
+ *  @brief Allocator that is either a bump arena or plain malloc/free
+ *  @{
+ */
 
-// API here
+/* API */
 
 /** @} */
 ```
 
-- Every module sits at the top level. There is no parent group and no `@ingroup`: the headers
-  live in one flat directory because everything this library contains is general purpose, and a
-  category that covers all of it separates nothing.
+There are no parent groups and no `@ingroup` hierarchy. The public headers intentionally form one flat namespace.
 
-### Rules
+---
 
-- One module per header
-- All public API must be inside the module block
-- Use flat, stable identifiers (`arnm_memory`)
-- `include/arnm/` stays flat — a header is `arnm/bucket_vector.h`, never a subfolder deep
+## Commenting standard
 
-----------
+ARNM comments use two aligned layers.
 
-## Commenting Guidelines, Poetic Precision – Dual-Layer Commenting Standard
+### Technical layer
 
-All comments consist of two aligned layers.
+This is the ground truth.
 
-### 1. Technical Layer (Ground Truth)
+Document:
 
-Hard, verifiable specification. Must include: parameters, types, constraints, edge cases,
-return behaviour, overflow and limits, deterministic rules. No ambiguity, no metaphor instead
-of facts, and sufficient on its own for an implementation without the poetic layer.
+* parameters
+* types
+* constraints
+* edge cases
+* return behavior
+* overflow and limits
+* deterministic rules
 
-### 2. Semantic Layer (Poetic Precision)
+The technical layer must be sufficient to implement the function without relying on the poetic layer.
 
-Describes system behaviour as natural process perception: flow, cycle, rhythm, transition;
-dissolve, emerge, settle, converge; stream, season, tide, growth, decay.
+### Semantic layer
 
-Constraints: must not change technical meaning, must not introduce moral framing, must not
-replace constraints with imagery, must stay fact-consistent.
+The optional semantic layer describes the same behavior as a natural process: flow, growth, transition, settling, tide, stream, season, decay.
 
-Purpose: reduce cognitive load, improve conceptual continuity, express system behaviour as a
-continuous process.
+It must never alter or weaken the technical meaning.
 
-### Forbidden Transformations
+### `@whisper`
 
-Do NOT convert constraints into metaphors only, limits into value judgements, edge cases into
-poetic ambiguity, or precision into narrative softness.
+`@whisper` is an optional poetic one-liner at the end of a Doxygen comment.
 
-### Writing Principle
+It is particularly suitable for functions with meaningful system behavior and less useful for trivial helpers.
 
-Each comment is **deterministic logic + natural process description**. Never poetry instead of
-specification, never specification without semantic flow.
+Never delete an existing `@whisper` merely for stylistic preference. Rewrite it only when the function's behavior has changed enough that the old line is no longer accurate.
 
-### The `@whisper` Tag – Optional Poetic Signature
+The technical specification always has priority over the poetic description.
 
-An optional, poetic one-liner at the end of a Doxygen comment. Encouraged for functions that
-carry significant meaning, rare for low-level helpers. It must describe the essence of the
-function in calm language, stay subtle, and end without a period. It must never replace
-missing technical documentation, never preach, and never drift into irony.
+---
 
-**Never delete an existing `@whisper`** unless it has become unrelated to the function's
-behaviour. Updating is allowed when the function changed enough that the old line no longer
-fits — rewrite it in the same tone. Do not change one for stylistic preference.
+## Repository workflow
 
-### Standard Comment Structure (Flexible)
+Agents must not commit, tag or push.
 
-```c
-/**
- * @brief One-line summary (poetic but clear).
- *
- * A few sentences explaining what the function does. Use calm, image-rich language.
- * Mention technical details naturally within the flow.
- *
- * @param[in/out] name   Description.
- * @return               Exact return values.
- * @note (optional)      Important constraints.
- * @whisper (optional)   Short poetic line, no period.
- */
+Reading Git is encouraged:
+
+```text
+git status
+git diff
+git log
+git show
 ```
 
-### What to Avoid
+Leave the working tree with the completed changes and report what was changed.
 
-Preaching ("should", "must", "good", "fair"). Exclamation marks. Floating-point illusions.
-Deleting or editing an existing `@whisper` unless the function changed completely.
+Keep diffs focused. Avoid drive-by formatting, unrelated renames and speculative refactoring.
 
-----------
+Format files that are actually touched; a repository-wide formatting change belongs in its own change.
 
-**Remember:** the goal is not perfect technical prose. It is to make reading the code a quiet
-pleasure — accurate, calm, and a little beautiful.
+When something could not be verified, say so explicitly.
+
+Never present an unbuilt platform, unmeasured performance claim or unexecuted test as verified.
+
+---
+
+## Final design rule
+
+When in doubt, remember the ARNM model:
+
+> **Give the caller control over the important decisions. Provide efficient mechanisms for implementing those decisions. Keep ownership, lifetime, memory cost, runtime cost and mental cost visible.**
+
+Or, more compactly:
+
+> **Explicit decisions. Explicit costs. Minimal hidden work.**

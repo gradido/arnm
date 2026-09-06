@@ -573,34 +573,6 @@ static inline bool is_string_escape(arnm_json_writer_string_flags flags) {
   return ARNM_JSON_WRITER_STRING_ESCAPE == (flags & ARNM_JSON_WRITER_STRING_ESCAPE);
 }
 
-/**
- * @brief Tag @p node as the string @p value, under what @p flags asked for.
- *
- * The two bits that reach the tag are the type -- RAW goes into the text untouched, STR is
- * quoted and separated -- and the subtype, which is what the serializer reads to decide whether
- * this string needs the escaping pass at all. NOESC is the default here for the same reason it
- * is the default for keys: a mapper's strings are overwhelmingly plain, and a pass that finds
- * nothing is still a pass over every byte.
- */
-static void set_string(
-    yyjson_mut_val *node,
-    const char *value,
-    size_t value_length,
-    arnm_json_writer_string_flags flags
-) {
-  // a NULL string is the literal null: an optional member that is not there, which is what a
-  // mapper means by it far more often than it means a mistake
-  if (!value) {
-    unsafe_yyjson_set_null(node);
-    return;
-  }
-  unsafe_yyjson_set_tag(
-      node, is_string_raw(flags) ? YYJSON_TYPE_RAW : YYJSON_TYPE_STR,
-      is_string_escape(flags) ? YYJSON_SUBTYPE_NONE : YYJSON_SUBTYPE_NOESC, value_length
-  );
-  ((yyjson_val *)node)->uni.str = value;
-}
-
 void arnm_json_writer_add_string_flags(
     arnm_json_writer *writer,
     const char *key,
@@ -632,7 +604,22 @@ void arnm_json_writer_add_string_flags(
 
   yyjson_mut_val *node = field(writer, key, key_length, escape_key);
   if (!node) { return; }
-  set_string(node, value, value_length, flags);
+
+  // a NULL string is the literal null: an optional member that is not there, which is what a
+  // mapper means by it far more often than it means a mistake
+  if (!value) {
+    unsafe_yyjson_set_null(node);
+    return;
+  }
+
+  // the two bits that reach the tag: the type -- RAW goes into the text untouched, STR is quoted
+  // and separated -- and the subtype the serializer reads to decide whether this string needs
+  // the escaping pass at all
+  unsafe_yyjson_set_tag(
+      node, is_string_raw(flags) ? YYJSON_TYPE_RAW : YYJSON_TYPE_STR,
+      is_string_escape(flags) ? YYJSON_SUBTYPE_NONE : YYJSON_SUBTYPE_NOESC, value_length
+  );
+  ((yyjson_val *)node)->uni.str = value;
 }
 
 void arnm_json_writer_add_string(
@@ -643,12 +630,19 @@ void arnm_json_writer_add_string(
     const char *value,
     size_t value_length
 ) {
-  // the fast track: borrowed and unescaped, which is the default
-  // arnm_json_writer_add_string_flags() would arrive at anyway -- written out here so the common
-  // field costs one call and no branching over flags nobody set
+  // The fast track, and written out rather than routed through the call above: borrowed, quoted
+  // and unescaped is what nearly every field is, and the tag for that is a constant.
   yyjson_mut_val *node = field(writer, key, key_length, escape_key);
   if (!node) { return; }
-  set_string(node, value, value_length, ARNM_JSON_WRITER_STRING_DEFAULT);
+
+  // a NULL string is the literal null: an optional member that is not there, which is what a
+  // mapper means by it far more often than it means a mistake
+  if (!value) {
+    unsafe_yyjson_set_null(node);
+    return;
+  }
+  unsafe_yyjson_set_tag(node, YYJSON_TYPE_STR, YYJSON_SUBTYPE_NOESC, value_length);
+  ((yyjson_val *)node)->uni.str = value;
 }
 
 /**
