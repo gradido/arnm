@@ -127,6 +127,9 @@ uint8_t arnm_uint64_to_string_size(uint64_t value);
  */
 uint8_t arnm_int64_to_string_size(int64_t value);
 
+#define ARNM_HEX_STRING_LENGTH(bin_size) (bin_size * 2 + 1)
+#define ARNM_HEX_BINARY_SIZE(hex_size) (hex_size / 2)
+
 /**
  * @brief Write @p data as lowercase hex into a buffer the caller sized.
  *
@@ -143,7 +146,23 @@ uint8_t arnm_int64_to_string_size(int64_t value);
  * @note Not constant time; see the warning on this group.
  * @whisper Every byte says its name twice, in the same quiet alphabet
  */
-arnm_result arnm_binary_to_hex(char *result_buffer, const arnm_memory_block *data);
+arnm_result arnm_binary_to_hex(char *result_buffer, const uint8_t *data, const uint32_t size);
+
+static inline arnm_result arnm_binary_block_to_hex(
+    char *result_buffer, const arnm_memory_block *data
+) {
+  if (!data) return ARNM_ERROR_NULL_POINTER;
+  return arnm_binary_to_hex(result_buffer, data->data, data->size);
+}
+
+static inline arnm_result arnm_binary_to_hex_alloc(
+    arnm_memory_block *out, const uint8_t *data, const uint32_t size, arnm *allocator
+) {
+  if (!out || !data) return ARNM_ERROR_NULL_POINTER;
+  arnm_result result = arnm_memory_block_alloc(out, ARNM_HEX_STRING_LENGTH(size), allocator);
+  if (result != ARNM_SUCCESS) return result;
+  return arnm_binary_to_hex((char *)out->data, data, size);
+}
 
 /**
  * @brief Read a hex string back into the bytes it spells, over a length the caller already has.
@@ -231,7 +250,23 @@ static inline arnm_result arnm_binary_from_hex(uint8_t *result_buffer, const cha
  * @note Not constant time; see the warning on this group.
  * @whisper Three bytes fold into four letters, and the last group is made whole
  */
-arnm_result arnm_binary_to_base64(char *result_buffer, const arnm_memory_block *data);
+arnm_result arnm_binary_to_base64(char *result_buffer, const uint8_t *data, const uint32_t size);
+
+static inline arnm_result arnm_binary_block_to_base64(
+    char *result_buffer, const arnm_memory_block *data
+) {
+  if (!data) return ARNM_ERROR_NULL_POINTER;
+  return arnm_binary_to_base64(result_buffer, data->data, data->size);
+}
+
+static inline arnm_result arnm_binary_to_base64_alloc(
+    arnm_memory_block *out, const uint8_t *data, const uint32_t size, arnm *allocator
+) {
+  if (!out || !data) return ARNM_ERROR_NULL_POINTER;
+  arnm_result result = arnm_memory_block_alloc(out, ARNM_BASE64_STRING_LENGTH(size), allocator);
+  if (result != ARNM_SUCCESS) return result;
+  return arnm_binary_to_base64((char *)out->data, data, size);
+}
 
 /**
  * @brief Read a base64 string back into the bytes it spells.

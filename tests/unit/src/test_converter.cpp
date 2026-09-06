@@ -146,16 +146,11 @@ static std::string reference_hex(const uint8_t *bytes, size_t count) {
 TEST(HexTest, RejectsNullAndEmptySeparately) {
   uint8_t payload[4] = {1, 2, 3, 4};
   char out[16];
-  arnm_memory_block data{payload, sizeof(payload)};
-  arnm_memory_block empty{payload, 0};
-
-  EXPECT_EQ(arnm_binary_to_hex(nullptr, &data), ARNM_ERROR_NULL_POINTER);
-  EXPECT_EQ(arnm_binary_to_hex(out, nullptr), ARNM_ERROR_NULL_POINTER);
-  EXPECT_EQ(arnm_binary_to_hex(out, &empty), ARNM_ERROR_INVALID_PARAM);
-  EXPECT_EQ(arnm_binary_to_hex(out, &data), ARNM_SUCCESS);
-
-  arnm_memory_block no_data{nullptr, 4};
-  EXPECT_EQ(arnm_binary_to_hex(out, &no_data), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_binary_to_hex(nullptr, payload, sizeof(payload)), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_binary_to_hex(out, nullptr, 0), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_binary_to_hex(out, payload, 0), ARNM_ERROR_INVALID_PARAM);
+  EXPECT_EQ(arnm_binary_to_hex(out, payload, sizeof(payload)), ARNM_SUCCESS);
+  EXPECT_EQ(arnm_binary_to_hex(out, nullptr, 4), ARNM_ERROR_NULL_POINTER);
 }
 
 // promise: the computed digits agree with the printf reference, for every byte value and every
@@ -172,10 +167,9 @@ TEST(HexTest, MatchesTheReferenceForEveryByteValueAndLength) {
     payload[0] = static_cast<uint8_t>(value);
 
     for (size_t length = 1; length <= sizeof(payload); ++length) {
-      arnm_memory_block block{payload, static_cast<uint32_t>(length)};
 
       char ours[sizeof(payload) * 2 + 1];
-      ASSERT_EQ(arnm_binary_to_hex(ours, &block), ARNM_SUCCESS);
+      ASSERT_EQ(arnm_binary_to_hex(ours, payload, static_cast<uint32_t>(length)), ARNM_SUCCESS);
       ASSERT_EQ(std::string(ours), reference_hex(payload, length))
           << "value " << value << " length " << length;
       ASSERT_EQ(strlen(ours), length * 2) << "value " << value << " length " << length;
@@ -190,12 +184,11 @@ TEST(HexTest, MatchesTheReferenceForEveryByteValueAndLength) {
 // promise: the terminator lands right after the digits and nothing is written past it
 TEST(HexTest, WritesTheTerminatorAndNothingBeyondIt) {
   uint8_t payload[7] = {0xde, 0xad, 0xbe, 0xef, 0x00, 0x7f, 0x80};
-  arnm_memory_block block{payload, sizeof(payload)};
 
   char guarded[sizeof(payload) * 2 + 1 + 8];
   memset(guarded, 0x7A, sizeof(guarded));
 
-  ASSERT_EQ(arnm_binary_to_hex(guarded, &block), ARNM_SUCCESS);
+  ASSERT_EQ(arnm_binary_to_hex(guarded, payload, sizeof(payload)), ARNM_SUCCESS);
   EXPECT_STREQ(guarded, "deadbeef007f80");
   EXPECT_EQ(guarded[sizeof(payload) * 2], '\0');
   for (size_t i = sizeof(payload) * 2 + 1; i < sizeof(guarded); ++i) {
@@ -207,10 +200,9 @@ TEST(HexTest, WritesTheTerminatorAndNothingBeyondIt) {
 // is refused rather than answered -- the same way arnm_binary_to_hex() refuses an empty block
 TEST(HexTest, AcceptsBothDigitCasesAndRefusesTheEmptyString) {
   uint8_t payload[8] = {0x00, 0x0f, 0xa5, 0xff, 0x10, 0xde, 0xad, 0xbe};
-  arnm_memory_block block{payload, sizeof(payload)};
 
   char lower[sizeof(payload) * 2 + 1];
-  ASSERT_EQ(arnm_binary_to_hex(lower, &block), ARNM_SUCCESS);
+  ASSERT_EQ(arnm_binary_to_hex(lower, payload, sizeof(payload)), ARNM_SUCCESS);
   for (const char *c = lower; *c; ++c) { ASSERT_FALSE(isupper(static_cast<unsigned char>(*c))); }
 
   std::string upper(lower);
@@ -514,9 +506,8 @@ TEST(UuidTest, TheSameBytesReadTheSameThroughBothConversions) {
     char uuid_form[ARNM_UUID_STRING_LENGTH + 1];
     arnm_uuid_to_string(uuid_form, bytes);
 
-    arnm_memory_block block{bytes, sizeof(bytes)};
     char hex_form[sizeof(bytes) * 2 + 1];
-    ASSERT_EQ(arnm_binary_to_hex(hex_form, &block), ARNM_SUCCESS);
+    ASSERT_EQ(arnm_binary_to_hex(hex_form, bytes, sizeof(bytes)), ARNM_SUCCESS);
 
     std::string without_separators;
     for (size_t i = 0; i < ARNM_UUID_STRING_LENGTH; ++i) {
@@ -629,10 +620,13 @@ namespace {
 
 std::string Base64Of(const std::string &input) {
   std::string out(ARNM_BASE64_STRING_LENGTH(input.size()) + 1u, '\0');
-  const arnm_memory_block block{
-      reinterpret_cast<uint8_t *>(const_cast<char *>(input.data())), (uint32_t)input.size()
-  };
-  EXPECT_EQ(arnm_binary_to_base64(out.data(), &block), ARNM_SUCCESS);
+  EXPECT_EQ(
+      arnm_binary_to_base64(
+          out.data(), reinterpret_cast<uint8_t *>(const_cast<char *>(input.data())),
+          (uint32_t)input.size()
+      ),
+      ARNM_SUCCESS
+  );
   out.resize(std::strlen(out.c_str()));
   return out;
 }
@@ -658,9 +652,10 @@ TEST(Base64, EverySixBitValueMapsToItsCharacterOfTheStandardAlphabet) {
   for (uint32_t value = 0; value < 64u; ++value) {
     // three bytes whose first six bits are the value under test, so it lands in character 0
     const uint8_t bytes[3] = {(uint8_t)(value << 2u), 0, 0};
-    const arnm_memory_block block{const_cast<uint8_t *>(bytes), sizeof(bytes)};
     char text[5];
-    ASSERT_EQ(arnm_binary_to_base64(text, &block), ARNM_SUCCESS);
+    ASSERT_EQ(
+        arnm_binary_to_base64(text, const_cast<uint8_t *>(bytes), sizeof(bytes)), ARNM_SUCCESS
+    );
     EXPECT_EQ(text[0], alphabet[value]) << "six bit value " << value;
   }
 }
@@ -668,9 +663,8 @@ TEST(Base64, EverySixBitValueMapsToItsCharacterOfTheStandardAlphabet) {
 TEST(Base64, BothCharactersOutsideTheAlphanumericRunAreWritten) {
   // 0xFB 0xFF encodes the two groups that reach '+' and '/', which a table can get wrong
   const uint8_t bytes[] = {0xfb, 0xff, 0xbf};
-  const arnm_memory_block block{const_cast<uint8_t *>(bytes), sizeof(bytes)};
   char text[ARNM_BASE64_STRING_LENGTH(sizeof(bytes)) + 1u];
-  ASSERT_EQ(arnm_binary_to_base64(text, &block), ARNM_SUCCESS);
+  ASSERT_EQ(arnm_binary_to_base64(text, const_cast<uint8_t *>(bytes), sizeof(bytes)), ARNM_SUCCESS);
   EXPECT_STREQ(text, "+/+/");
 }
 
@@ -681,8 +675,8 @@ TEST(Base64, EveryLengthSurvivesTheRoundTrip) {
     for (uint32_t i = 0; i < size; ++i) { bytes[i] = (uint8_t)((i * 37u + size) & 0xFFu); }
 
     std::string text(ARNM_BASE64_STRING_LENGTH(size) + 1u, '\0');
-    const arnm_memory_block block{bytes.data(), size};
-    ASSERT_EQ(arnm_binary_to_base64(text.data(), &block), ARNM_SUCCESS) << "size " << size;
+    ASSERT_EQ(arnm_binary_to_base64(text.data(), bytes.data(), size), ARNM_SUCCESS)
+        << "size " << size;
     ASSERT_EQ(std::strlen(text.c_str()), ARNM_BASE64_STRING_LENGTH(size))
         << "the length macro has to be exact, a writer counts a field with it";
 
@@ -696,9 +690,8 @@ TEST(Base64, EveryLengthSurvivesTheRoundTrip) {
 
 TEST(Base64, NoBytesIsRefusedAndAnEmptyStringDecodesToNothing) {
   const uint8_t byte = 0;
-  const arnm_memory_block empty{const_cast<uint8_t *>(&byte), 0};
   char text[8];
-  EXPECT_EQ(arnm_binary_to_base64(text, &empty), ARNM_ERROR_INVALID_PARAM);
+  EXPECT_EQ(arnm_binary_to_base64(text, const_cast<uint8_t *>(&byte), 0), ARNM_ERROR_INVALID_PARAM);
 
   uint8_t out[4] = {1, 2, 3, 4};
   uint32_t written = 99;
@@ -759,8 +752,8 @@ TEST(Base64Insitu, EveryLengthDecodesToWhatTheCopyingCallWrites) {
     for (uint32_t i = 0; i < size; ++i) { bytes[i] = (uint8_t)((i * 37u + size) & 0xFFu); }
 
     std::string text(ARNM_BASE64_STRING_LENGTH(size) + 1u, '\0');
-    const arnm_memory_block block{bytes.data(), size};
-    ASSERT_EQ(arnm_binary_to_base64(text.data(), &block), ARNM_SUCCESS) << "size " << size;
+    ASSERT_EQ(arnm_binary_to_base64(text.data(), bytes.data(), size), ARNM_SUCCESS)
+        << "size " << size;
     const uint32_t length = ARNM_BASE64_STRING_LENGTH(size);
 
     std::string in_place(text);
@@ -780,8 +773,7 @@ TEST(Base64Insitu, TheLongestGroupsAreDecodedWhereTheCharactersOverlapTheBytes) 
   for (uint32_t i = 0; i < size; ++i) { bytes[i] = (uint8_t)((i * 251u + 13u) & 0xFFu); }
 
   std::string text(ARNM_BASE64_STRING_LENGTH(size) + 1u, '\0');
-  const arnm_memory_block block{bytes.data(), size};
-  ASSERT_EQ(arnm_binary_to_base64(text.data(), &block), ARNM_SUCCESS);
+  ASSERT_EQ(arnm_binary_to_base64(text.data(), bytes.data(), size), ARNM_SUCCESS);
 
   uint32_t written = 0;
   ASSERT_EQ(

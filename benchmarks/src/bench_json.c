@@ -117,39 +117,41 @@ static void write_record_field(arnm_json_writer *writer, unsigned index, const s
   const char *value = (LONG_VALUE_LENGTH == form->length) ? long_value : SHORT_VALUE;
   switch (index) {
   case 0:
-    arnm_json_writer_add_string_length(writer, "name", 4, value, form->length);
+    arnm_json_writer_add_string(writer, ARNM_JSON_WRITER_KEY("name"), value, form->length);
     break;
   case 1:
-    arnm_json_writer_add_uint64(writer, "id", 2, UINT64_C(0x0123456789abcdef));
+    arnm_json_writer_add_uint64(writer, ARNM_JSON_WRITER_KEY("id"), UINT64_C(0x0123456789abcdef));
     break;
   case 2:
-    arnm_json_writer_add_int64(writer, "balance", 7, INT64_C(-4200000000));
+    arnm_json_writer_add_int64(writer, ARNM_JSON_WRITER_KEY("balance"), INT64_C(-4200000000));
     break;
   case 3:
-    arnm_json_writer_add_uint64(writer, "port", 4, 8443);
+    arnm_json_writer_add_uint64(writer, ARNM_JSON_WRITER_KEY("port"), 8443);
     break;
   case 4:
-    arnm_json_writer_add_int64(writer, "offset", 6, -12345);
+    arnm_json_writer_add_int64(writer, ARNM_JSON_WRITER_KEY("offset"), -12345);
     break;
   case 5:
-    arnm_json_writer_add_double(writer, "ratio", 5, 0.6180339887498949);
+    arnm_json_writer_add_double(writer, ARNM_JSON_WRITER_KEY("ratio"), 0.6180339887498949);
     break;
   case 6:
-    arnm_json_writer_add_bool(writer, "active", 6, true);
+    arnm_json_writer_add_bool(writer, ARNM_JSON_WRITER_KEY("active"), true);
     break;
   case 7:
-    arnm_json_writer_add_hex(writer, "digest", 6, record_digest, RECORD_DIGEST_SIZE);
+    arnm_json_writer_add_hex(
+        writer, ARNM_JSON_WRITER_KEY("digest"), record_digest, RECORD_DIGEST_SIZE
+    );
     break;
   default:
-    arnm_json_writer_add_uuid(writer, "uuid", 4, record_uuid);
+    arnm_json_writer_add_uuid(writer, ARNM_JSON_WRITER_KEY("uuid"), record_uuid);
     break;
   }
 }
 
 static void write_spares(arnm_json_writer *writer, uint32_t count) {
   for (uint32_t index = 0; index < count; ++index) {
-    arnm_json_writer_add_string_length(
-        writer, spare_keys[index], 8, SHORT_VALUE, (uint32_t)(sizeof(SHORT_VALUE) - 1u)
+    arnm_json_writer_add_string(
+        writer, spare_keys[index], 8, false, SHORT_VALUE, (uint32_t)(sizeof(SHORT_VALUE) - 1u)
     );
   }
 }
@@ -167,9 +169,9 @@ static void build_payload(arnm_json_writer *writer, const shape *form) {
     build_record(writer, form);
     return;
   }
-  arnm_json_writer_open_array(writer, "items", 5);
+  arnm_json_writer_open_array(writer, ARNM_JSON_WRITER_KEY("items"));
   for (uint32_t index = 0; index < form->elements; ++index) {
-    arnm_json_writer_open_object(writer, NULL, 0);
+    arnm_json_writer_open_object(writer, NULL, 0, false);
     build_record(writer, form);
     arnm_json_writer_close(writer);
   }
@@ -556,7 +558,6 @@ static void prepare_test_data(void) {
     build_document(payloads[index], &payloads[index]->hint, 64);
     render_document(payloads[index], NULL, 64);
     render_document(payloads[index], &payloads[index]->hint, 64);
-    measure_size(payloads[index], 64);
     parse_copying(payloads[index], 64);
     parse_insitu(payloads[index], 64);
     refill_only(payloads[index], 64);
@@ -777,22 +778,6 @@ static void (*const walk_rows[LAYOUT_COUNT])(int) = {
     walk_in_order, walk_behind, walk_in_front, walk_reversed
 };
 
-#define BENCH_ASK(id, one)                                                                         \
-  static void ask_##id(int steps) {                                                                \
-    measure_size(one, steps);                                                                      \
-  }
-/* clang-format off */
-BENCH_ASK(in_order, &in_order)
-BENCH_ASK(behind, &behind)
-BENCH_ASK(in_front, &in_front)
-BENCH_ASK(reversed, &reversed)
-BENCH_ASK(nested, &nested)
-BENCH_ASK(text, &text)
-/* clang-format on */
-
-static void (*const ask_rows[PAYLOAD_COUNT])(int) = {ask_in_order, ask_behind, ask_in_front,
-                                                     ask_reversed, ask_nested, ask_text};
-
 static void read_items_nested(int steps) {
   read_items(&nested, steps);
 }
@@ -842,13 +827,6 @@ int main(void) {
   );
   for (size_t index = 0; index < PAYLOAD_COUNT; ++index) {
     report_write_footprint(payloads[index]);
-  }
-
-  bench_section("asking the writer for the size it has been keeping, on a document already built");
-  for (size_t index = 0; index < PAYLOAD_COUNT; ++index) {
-    char name[BENCH_NAME_WIDTH];
-    snprintf(name, sizeof(name), "  %s", payloads[index]->name);
-    bench_step(ask_rows[index], ASK_STEPS, name, "answer");
   }
 
   bench_section("one document parsed, copying against in place, per document");

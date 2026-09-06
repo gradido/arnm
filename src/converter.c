@@ -164,37 +164,60 @@ uint8_t arnm_int64_to_string(char *buffer, uint8_t bufferSize, int64_t value) {
   return arnm_int64_to_string_known_string_size(buffer, value, requiredSize);
 }
 
-/*
- * Bytes to text and back.
- *
- * Both directions compute their digits rather than looking them up. A table would be a gather
- * no vectoriser can follow, while a comparison and an add per nibble lets the compiler fold the
- * conditional into a select and run the loop a vector register at a time. Neither is constant
- * time -- the scalar remainder beside the vector body branches on the nibble, and an
- * unoptimised build has no vector body at all -- so neither belongs on secret material. See the
- * warning on the group in converter.h.
- */
-
-arnm_result arnm_binary_to_hex(char *result_buffer, const arnm_memory_block *data) {
-  if (!result_buffer || !data || !data->data) { return ARNM_ERROR_NULL_POINTER; }
+arnm_result arnm_binary_to_hex(char *result_buffer, const uint8_t *bytes, const uint32_t size) {
+  if (!result_buffer || !bytes) { return ARNM_ERROR_NULL_POINTER; }
   // an empty block is a parameter the caller can fix, not a pointer they forgot
-  if (!data->size) { return ARNM_ERROR_INVALID_PARAM; }
+  if (!size) { return ARNM_ERROR_INVALID_PARAM; }
 
-  // Staying in uint8_t is what lets the vectoriser in: the same expression written over int
-  // costs a sign extension per element and loses it.
-  // Read out of the block before the loop: result_buffer is a char pointer, which is allowed to
-  // alias anything, so a store through it forces the compiler to assume data->size and
-  // data->data may have changed. Reloading them every iteration is what stops it vectorising.
-  const uint8_t *bytes = data->data;
-  const size_t count = data->size;
-
-  for (size_t i = 0; i < count; ++i) {
+  for (size_t i = 0; i < size; ++i) {
     uint8_t high = (uint8_t)(bytes[i] >> 4);
     uint8_t low = (uint8_t)(bytes[i] & 0x0F);
     result_buffer[i * 2] = (char)(uint8_t)(high + (high < 10 ? 48 : 87));
     result_buffer[i * 2 + 1] = (char)(uint8_t)(low + (low < 10 ? 48 : 87));
   }
-  result_buffer[count * 2] = '\0';
+  result_buffer[size * 2] = '\0';
+  return ARNM_SUCCESS;
+}
+
+arnm_result arnm_binary_from_hex_with_known_hex_size(
+    uint8_t *result_buffer, const char *hex, size_t hex_size
+) {
+  if (!result_buffer || !hex) return ARNM_ERROR_NULL_POINTER;
+  if (!hex_size) return ARNM_ERROR_INVALID_PARAM;
+  size_t bin_size = hex_size / 2;
+  // two characters make one byte, so an odd length cannot be hex -- the division above dropped
+  // the stray character and multiplying back reveals it
+  if (bin_size * 2 != hex_size) { return ARNM_ERROR_INVALID_PARAM; }
+
+  // Same reasoning as the encoding direction, with the validity test folded in. Clearing bit 5
+  // maps a lower case letter onto its upper case twin, so one range check covers both; a digit
+  // is its own range. The nibble itself falls out of (c & 0xF) + 9 * (c >> 6), since bit 6 is
+  // set for letters and clear for digits. Invalid characters produce a value here as well --
+  // that is what makes the loop branchless -- and the verdict below throws it away.
+  uint8_t invalid = 0;
+  for (size_t i = 0; i < bin_size; ++i) {
+    uint8_t high_char = (uint8_t)hex[i * 2];
+    uint8_t high_letter = (uint8_t)(high_char & 0xDF);
+    uint8_t high = (uint8_t)((high_char & 0x0F) + 9u * (unsigned)(high_char >> 6));
+
+    invalid |= !(((uint8_t)(high_char - '0') <= 9) | ((uint8_t)(high_letter - 'A') <= 5));
+
+    uint8_t low_char = (uint8_t)hex[i * 2 + 1];
+    uint8_t low_letter = (uint8_t)(low_char & 0xDF);
+    uint8_t low = (uint8_t)((low_char & 0x0F) + 9u * (unsigned)(low_char >> 6));
+
+    invalid |= !(((uint8_t)(low_char - '0') <= 9) | ((uint8_t)(low_letter - 'A') <= 5));
+
+    result_buffer[i] = (uint8_t)((high << 4) | low);
+  }
+
+  // Half converted bytes are worth less than nothing to a caller who overlooks the result code,
+  // so the failure path clears them. It costs nothing where it matters: this runs only when the
+  // string was already rejected.
+  if (invalid) {
+    memset(result_buffer, 0, bin_size);
+    return ARNM_ERROR_DECODE_FAILED;
+  }
   return ARNM_SUCCESS;
 }
 
@@ -495,13 +518,11 @@ static const uint8_t BASE64_VALUE[256] = {
 /** @brief What BASE64_VALUE answers for a character the alphabet does not have. */
 #define BASE64_NO_VALUE 255u
 
-arnm_result arnm_binary_to_base64(char *result_buffer, const arnm_memory_block *data) {
-  if (!result_buffer || !data || !data->data) { return ARNM_ERROR_NULL_POINTER; }
-  if (!data->size) { return ARNM_ERROR_INVALID_PARAM; }
+arnm_result arnm_binary_to_base64(char *result_buffer, const uint8_t *bytes, const uint32_t size) {
+  if (!result_buffer || !bytes) { return ARNM_ERROR_NULL_POINTER; }
+  if (!size) { return ARNM_ERROR_INVALID_PARAM; }
 
-  const uint8_t *bytes = data->data;
-  const uint32_t count = data->size;
-  const uint32_t groups = count / 3u;
+  const uint32_t groups = size / 3u;
 
   // Driven by the group index rather than by two indices walking at 3 and at 4. It reads no
   // worse and it is the form the arithmetic variant above needed to be halfway competitive --
@@ -519,7 +540,7 @@ arnm_result arnm_binary_to_base64(char *result_buffer, const arnm_memory_block *
   }
 
   uint32_t written = groups * 4u;
-  const uint32_t rest = count - groups * 3u;
+  const uint32_t rest = size - groups * 3u;
   if (rest) {
     // the missing bytes are read as zeros, which is what makes the last characters land on the
     // same bit boundaries the whole groups use
@@ -673,48 +694,6 @@ arnm_result arnm_base64_binary_size(const char *base64, uint32_t length, uint32_
   return ARNM_SUCCESS;
 }
 
-arnm_result arnm_binary_from_hex_with_known_hex_size(
-    uint8_t *result_buffer, const char *hex, size_t hex_size
-) {
-  if (!result_buffer || !hex) return ARNM_ERROR_NULL_POINTER;
-  if (!hex_size) return ARNM_ERROR_INVALID_PARAM;
-  size_t bin_size = hex_size / 2;
-  // two characters make one byte, so an odd length cannot be hex -- the division above dropped
-  // the stray character and multiplying back reveals it
-  if (bin_size * 2 != hex_size) { return ARNM_ERROR_INVALID_PARAM; }
-
-  // Same reasoning as the encoding direction, with the validity test folded in. Clearing bit 5
-  // maps a lower case letter onto its upper case twin, so one range check covers both; a digit
-  // is its own range. The nibble itself falls out of (c & 0xF) + 9 * (c >> 6), since bit 6 is
-  // set for letters and clear for digits. Invalid characters produce a value here as well --
-  // that is what makes the loop branchless -- and the verdict below throws it away.
-  uint8_t invalid = 0;
-  for (size_t i = 0; i < bin_size; ++i) {
-    uint8_t high_char = (uint8_t)hex[i * 2];
-    uint8_t low_char = (uint8_t)hex[i * 2 + 1];
-    uint8_t high_letter = (uint8_t)(high_char & 0xDF);
-    uint8_t low_letter = (uint8_t)(low_char & 0xDF);
-
-    invalid |= (uint8_t)(1u - (unsigned)(((high_char >= '0') & (high_char <= '9')) |
-                                         ((high_letter >= 'A') & (high_letter <= 'F'))));
-    invalid |= (uint8_t)(1u - (unsigned)(((low_char >= '0') & (low_char <= '9')) |
-                                         ((low_letter >= 'A') & (low_letter <= 'F'))));
-
-    uint8_t high = (uint8_t)((high_char & 0x0F) + 9u * (unsigned)(high_char >> 6));
-    uint8_t low = (uint8_t)((low_char & 0x0F) + 9u * (unsigned)(low_char >> 6));
-    result_buffer[i] = (uint8_t)((high << 4) | low);
-  }
-
-  // Half converted bytes are worth less than nothing to a caller who overlooks the result code,
-  // so the failure path clears them. It costs nothing where it matters: this runs only when the
-  // string was already rejected.
-  if (invalid) {
-    memset(result_buffer, 0, bin_size);
-    return ARNM_ERROR_DECODE_FAILED;
-  }
-  return ARNM_SUCCESS;
-}
-
 /*
  * A uuid in its canonical 8-4-4-4-12 form.
  *
@@ -759,10 +738,7 @@ arnm_result arnm_uuid_from_string(uint8_t *uuid, const char *uuid_string) {
 
 void arnm_uuid_to_string(char *result_buffer, const uint8_t uuid[ARNM_UUID_BINARY_SIZE]) {
   char hex[ARNM_UUID_BINARY_SIZE * 2u + 1u];
-  const arnm_memory_block block = {
-      (uint8_t *)(uintptr_t)(const void *)uuid, (uint32_t)ARNM_UUID_BINARY_SIZE
-  };
-  (void)arnm_binary_to_hex(hex, &block);
+  (void)arnm_binary_to_hex(hex, uuid, ARNM_UUID_BINARY_SIZE);
   memcpy(result_buffer, hex, 8u);
   result_buffer[8] = '-';
   memcpy(result_buffer + 9, hex + 8, 4u);

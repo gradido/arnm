@@ -165,7 +165,7 @@ TEST(JsonWriter, ACreatedWriterGoesHomeThroughDestroy) {
   ASSERT_NE(writer, nullptr);
   EXPECT_EQ(ArenaMark(&arena) - before, ARNM_ALIGN8(sizeof(arnm_json_writer)));
 
-  arnm_json_writer_add_uint64(writer, "n", 1, 1);
+  arnm_json_writer_add_uint64(writer, ARNM_JSON_WRITER_KEY("n"), 1);
   EXPECT_EQ(arnm_json_writer_status(writer), ARNM_SUCCESS);
 
   // the document sits above the state, so what an arena cannot take back is what it says
@@ -187,17 +187,17 @@ TEST(JsonWriter, NullReachesEveryCallWithoutHarm) {
   EXPECT_EQ(arnm_json_writer_buffer_size_min(nullptr), 0u);
   EXPECT_EQ(arnm_json_writer_depth(nullptr), 0u);
 
-  arnm_json_writer_add_null(nullptr, "a", 1);
-  arnm_json_writer_add_bool(nullptr, "a", 1, true);
-  arnm_json_writer_add_int64(nullptr, "a", 1, 1);
-  arnm_json_writer_add_uint64(nullptr, "a", 1, 1);
-  arnm_json_writer_add_double(nullptr, "a", 1, 1.0);
-  arnm_json_writer_add_string(nullptr, "a", 1, "b");
-  arnm_json_writer_add_string_length(nullptr, "a", 1, "b", 1);
-  arnm_json_writer_add_string_copy(nullptr, "a", 1, "b");
-  arnm_json_writer_add_string_copy_length(nullptr, "a", 1, "b", 1);
-  arnm_json_writer_open_object(nullptr, "a", 1);
-  arnm_json_writer_open_array(nullptr, "a", 1);
+  arnm_json_writer_add_null(nullptr, ARNM_JSON_WRITER_KEY("a"));
+  arnm_json_writer_add_bool(nullptr, ARNM_JSON_WRITER_KEY("a"), true);
+  arnm_json_writer_add_int64(nullptr, ARNM_JSON_WRITER_KEY("a"), 1);
+  arnm_json_writer_add_uint64(nullptr, ARNM_JSON_WRITER_KEY("a"), 1);
+  arnm_json_writer_add_double(nullptr, ARNM_JSON_WRITER_KEY("a"), 1.0);
+  arnm_json_writer_add_string(nullptr, ARNM_JSON_WRITER_KEY("a"), "b", 1);
+  arnm_json_writer_add_string_flags(
+      nullptr, ARNM_JSON_WRITER_KEY("a"), "b", 1, ARNM_JSON_WRITER_STRING_COPY
+  );
+  arnm_json_writer_open_object(nullptr, ARNM_JSON_WRITER_KEY("a"));
+  arnm_json_writer_open_array(nullptr, ARNM_JSON_WRITER_KEY("a"));
   arnm_json_writer_close(nullptr);
 
   arnm_memory_block block{};
@@ -218,11 +218,15 @@ TEST(JsonWriter, AStructGoesOutInOneRunAndIsAskedAboutOnce) {
   } config{"arnm", 8443, -7, true, nullptr};
 
   ArenaWriter owner;
-  arnm_json_writer_add_string(owner.writer(), "name", 4, config.name);
-  arnm_json_writer_add_uint64(owner.writer(), "port", 4, config.port);
-  arnm_json_writer_add_int64(owner.writer(), "offset", 6, config.offset);
-  arnm_json_writer_add_bool(owner.writer(), "debug", 5, config.debug);
-  arnm_json_writer_add_string(owner.writer(), "note", 4, config.note);
+  arnm_json_writer_add_string(
+      owner.writer(), ARNM_JSON_WRITER_KEY("name"), config.name, strlen(config.name)
+  );
+  arnm_json_writer_add_uint64(owner.writer(), ARNM_JSON_WRITER_KEY("port"), config.port);
+  arnm_json_writer_add_int64(owner.writer(), ARNM_JSON_WRITER_KEY("offset"), config.offset);
+  arnm_json_writer_add_bool(owner.writer(), ARNM_JSON_WRITER_KEY("debug"), config.debug);
+  arnm_json_writer_add_string(
+      owner.writer(), ARNM_JSON_WRITER_KEY("note"), config.note, strlen(config.note)
+  );
 
   ASSERT_EQ(arnm_json_writer_status(owner.writer()), ARNM_SUCCESS);
   EXPECT_STREQ(arnm_json_writer_error_field(owner.writer()), "");
@@ -247,10 +251,10 @@ TEST(JsonWriter, AnEmptyDocumentIsStillADocument) {
 TEST(JsonWriter, AnArrayRootTakesItsElementsWithoutNames) {
   ArenaWriter owner;
   ASSERT_EQ(arnm_json_writer_begin_array(owner.writer()), ARNM_SUCCESS);
-  arnm_json_writer_add_uint64(owner.writer(), nullptr, 0, 1);
-  arnm_json_writer_add_string(owner.writer(), nullptr, 0, "two");
-  arnm_json_writer_add_bool(owner.writer(), nullptr, 0, false);
-  arnm_json_writer_add_null(owner.writer(), nullptr, 0);
+  arnm_json_writer_add_uint64(owner.writer(), nullptr, 0, false, 1);
+  arnm_json_writer_add_string(owner.writer(), nullptr, 0, false, "two", 3);
+  arnm_json_writer_add_bool(owner.writer(), nullptr, 0, false, false);
+  arnm_json_writer_add_null(owner.writer(), nullptr, 0, false);
 
   EXPECT_EQ(Write(owner.writer(), owner.arena()), "[1,\"two\",false,null]");
 }
@@ -259,18 +263,20 @@ TEST(JsonWriter, NestingCostsAnOpenAndACloseAndNothingElse) {
   const char *names[] = {"alpha", "beta"};
 
   ArenaWriter owner;
-  arnm_json_writer_add_uint64(owner.writer(), "id", 2, 3);
+  arnm_json_writer_add_uint64(owner.writer(), ARNM_JSON_WRITER_KEY("id"), 3);
 
-  arnm_json_writer_open_object(owner.writer(), "address", 7);
+  arnm_json_writer_open_object(owner.writer(), ARNM_JSON_WRITER_KEY("address"));
   EXPECT_EQ(arnm_json_writer_depth(owner.writer()), 2u);
-  arnm_json_writer_add_string(owner.writer(), "city", 4, "Bern");
+  arnm_json_writer_add_string(owner.writer(), ARNM_JSON_WRITER_KEY("city"), "Bern", 4);
   arnm_json_writer_close(owner.writer());
 
-  arnm_json_writer_open_array(owner.writer(), "peers", 5);
+  arnm_json_writer_open_array(owner.writer(), ARNM_JSON_WRITER_KEY("peers"));
   for (uint32_t index = 0; index < 2; ++index) {
-    arnm_json_writer_open_object(owner.writer(), nullptr, 0);
-    arnm_json_writer_add_string(owner.writer(), "name", 4, names[index]);
-    arnm_json_writer_add_uint64(owner.writer(), "port", 4, index + 1u);
+    arnm_json_writer_open_object(owner.writer(), nullptr, 0, false);
+    arnm_json_writer_add_string(
+        owner.writer(), ARNM_JSON_WRITER_KEY("name"), names[index], strlen(names[index])
+    );
+    arnm_json_writer_add_uint64(owner.writer(), ARNM_JSON_WRITER_KEY("port"), index + 1u);
     arnm_json_writer_close(owner.writer());
   }
   arnm_json_writer_close(owner.writer());
@@ -286,9 +292,9 @@ TEST(JsonWriter, NestingCostsAnOpenAndACloseAndNothingElse) {
 
 TEST(JsonWriter, AnEmptyNestedContainerStaysOnOneLine) {
   ArenaWriter owner(ARNM_JSON_WRITE_PRETTY);
-  arnm_json_writer_open_object(owner.writer(), "empty_object", 12);
+  arnm_json_writer_open_object(owner.writer(), ARNM_JSON_WRITER_KEY("empty_object"));
   arnm_json_writer_close(owner.writer());
-  arnm_json_writer_open_array(owner.writer(), "empty_array", 11);
+  arnm_json_writer_open_array(owner.writer(), ARNM_JSON_WRITER_KEY("empty_array"));
   arnm_json_writer_close(owner.writer());
 
   EXPECT_EQ(
@@ -299,9 +305,9 @@ TEST(JsonWriter, AnEmptyNestedContainerStaysOnOneLine) {
 
 TEST(JsonWriter, PrettyPutsOneValueOnEachLine) {
   ArenaWriter four(ARNM_JSON_WRITE_PRETTY);
-  arnm_json_writer_add_string(four.writer(), "name", 4, "arnm");
-  arnm_json_writer_open_object(four.writer(), "nested", 6);
-  arnm_json_writer_add_uint64(four.writer(), "n", 1, 1);
+  arnm_json_writer_add_string(four.writer(), ARNM_JSON_WRITER_KEY("name"), "arnm", 4);
+  arnm_json_writer_open_object(four.writer(), ARNM_JSON_WRITER_KEY("nested"));
+  arnm_json_writer_add_uint64(four.writer(), ARNM_JSON_WRITER_KEY("n"), 1);
   arnm_json_writer_close(four.writer());
   EXPECT_EQ(
       Write(four.writer(), four.arena()),
@@ -309,10 +315,10 @@ TEST(JsonWriter, PrettyPutsOneValueOnEachLine) {
   );
 
   ArenaWriter two(ARNM_JSON_WRITE_PRETTY_TWO_SPACES);
-  arnm_json_writer_add_string(two.writer(), "name", 4, "arnm");
-  arnm_json_writer_open_array(two.writer(), "list", 4);
-  arnm_json_writer_add_uint64(two.writer(), nullptr, 0, 1);
-  arnm_json_writer_add_uint64(two.writer(), nullptr, 0, 2);
+  arnm_json_writer_add_string(two.writer(), ARNM_JSON_WRITER_KEY("name"), "arnm", 4);
+  arnm_json_writer_open_array(two.writer(), ARNM_JSON_WRITER_KEY("list"));
+  arnm_json_writer_add_uint64(two.writer(), nullptr, 0, false, 1);
+  arnm_json_writer_add_uint64(two.writer(), nullptr, 0, false, 2);
   arnm_json_writer_close(two.writer());
   EXPECT_EQ(
       Write(two.writer(), two.arena()),
@@ -322,7 +328,7 @@ TEST(JsonWriter, PrettyPutsOneValueOnEachLine) {
 
 TEST(JsonWriter, ANewlineAtTheEndComesAheadOfTheTerminator) {
   ArenaWriter owner(ARNM_JSON_WRITE_NEWLINE_AT_END);
-  arnm_json_writer_add_uint64(owner.writer(), "n", 1, 1);
+  arnm_json_writer_add_uint64(owner.writer(), ARNM_JSON_WRITER_KEY("n"), 1);
   EXPECT_EQ(Write(owner.writer(), owner.arena()), "{\"n\":1}\n");
 }
 
@@ -330,8 +336,9 @@ TEST(JsonWriter, AValueLongerThanTheEstimateIsStillWrittenWhole) {
   // one field of prose is already past what the element count guessed, so the serializer grows
   // the buffer it was handed mid-write. What comes back has to be the whole text regardless.
   ArenaWriter owner;
-  arnm_json_writer_add_string_length(
-      owner.writer(), "n", 1, LONG_CONTENT_STRING, sizeof(LONG_CONTENT_STRING) - 1u
+  arnm_json_writer_add_string(
+      owner.writer(), ARNM_JSON_WRITER_KEY("n"), LONG_CONTENT_STRING,
+      sizeof(LONG_CONTENT_STRING) - 1u
   );
 
   const std::string expected = std::string("{\"n\":\"") + LONG_CONTENT_STRING + "\"}";
@@ -341,8 +348,9 @@ TEST(JsonWriter, AValueLongerThanTheEstimateIsStillWrittenWhole) {
 TEST(JsonWriter, AValueLongerThanTheEstimateIsStillWrittenWholeRaw) {
   // the same through the raw adder, which grows the same buffer without the escaping pass
   ArenaWriter owner;
-  arnm_json_writer_add_string_raw(
-      owner.writer(), "n", 1, LONG_CONTENT_STRING_QUOTED, sizeof(LONG_CONTENT_STRING_QUOTED) - 1u
+  arnm_json_writer_add_string_flags(
+      owner.writer(), ARNM_JSON_WRITER_KEY("n"), LONG_CONTENT_STRING_QUOTED,
+      sizeof(LONG_CONTENT_STRING_QUOTED) - 1u, ARNM_JSON_WRITER_STRING_RAW
   );
 
   const std::string expected = std::string("{\"n\":\"") + LONG_CONTENT_STRING + "\"}";
@@ -384,15 +392,6 @@ TEST(JsonWriter, AShorterLengthTruncatesTheKeyRatherThanBeingCaught) {
   ArenaWriter owner;
   arnm_json_writer_add_uint64(owner.writer(), "port", 2, 8443);
   EXPECT_EQ(Write(owner.writer(), owner.arena()), "{\"po\":8443}");
-}
-
-TEST(JsonWriter, AKeyIsEscapedTheSameWayAValueIs) {
-  ArenaWriter owner;
-  arnm_json_writer_add_uint64(owner.writer(), "a\"b", 3, 1);
-  arnm_json_writer_add_uint64(owner.writer(), "a\nb", 3, 2);
-  arnm_json_writer_add_uint64(owner.writer(), "\xC3\xA4", 2, 3);
-
-  EXPECT_EQ(Write(owner.writer(), owner.arena()), "{\"a\\\"b\":1,\"a\\nb\":2,\"\xC3\xA4\":3}");
 }
 
 TEST(JsonWriter, AnEmptyKeyIsAName) {
@@ -862,7 +861,7 @@ TEST(JsonWriter, TheFirstRefusalIsTheOneThatStays) {
   // an element without a name, inside an object that needs one
   arnm_json_writer_add_uint64(owner.writer(), nullptr, 0, 2);
   EXPECT_EQ(arnm_json_writer_status(owner.writer()), ARNM_ERROR_INVALID_PARAM);
-  EXPECT_STREQ(arnm_json_writer_error_field(owner.writer()), "[]")
+  EXPECT_STREQ(arnm_json_writer_error_field(owner.writer()), "Missing key for object container")
       << "a field with no key belongs to no name, and the sentinel is the name it is filed under";
 
   // everything after it does nothing at all, and changes nothing about the verdict
@@ -870,7 +869,7 @@ TEST(JsonWriter, TheFirstRefusalIsTheOneThatStays) {
   arnm_json_writer_open_object(owner.writer(), "deeper", 6);
   arnm_json_writer_close(owner.writer());
   EXPECT_EQ(arnm_json_writer_status(owner.writer()), ARNM_ERROR_INVALID_PARAM);
-  EXPECT_STREQ(arnm_json_writer_error_field(owner.writer()), "[]");
+  EXPECT_STREQ(arnm_json_writer_error_field(owner.writer()), "Missing key for object container");
 
   arnm_memory_block block{};
   EXPECT_EQ(
@@ -891,7 +890,7 @@ TEST(JsonWriter, ANameInsideAnArrayIsRefusedByTheContainer) {
   arnm_json_writer_add_uint64(owner.writer(), "named", 5, 1);
 
   EXPECT_EQ(arnm_json_writer_status(owner.writer()), ARNM_ERROR_INVALID_PARAM);
-  EXPECT_STREQ(arnm_json_writer_error_field(owner.writer()), "named");
+  EXPECT_STREQ(arnm_json_writer_error_field(owner.writer()), "Not null key for array container");
 }
 
 TEST(JsonWriter, ARefusalWithNoKeyIsFiledUnderTheArraySentinel) {
@@ -939,17 +938,6 @@ TEST(JsonWriter, OpeningPastTheLastLevelIsRefused) {
   EXPECT_EQ(arnm_json_writer_status(owner.writer()), ARNM_ERROR_RESOURCE_EXHAUSTED);
   EXPECT_STREQ(arnm_json_writer_error_field(owner.writer()), "one_too_deep");
   EXPECT_EQ(arnm_json_writer_depth(owner.writer()), ARNM_JSON_WRITER_MAX_DEPTH);
-}
-
-TEST(JsonWriter, ALongFieldNameIsKeptAsFarAsItFits) {
-  const std::string key(80, 'k');
-  ArenaWriter owner;
-  arnm_json_writer_open_array(owner.writer(), "list", 4);
-  arnm_json_writer_add_uint64(owner.writer(), key.c_str(), key.size(), 1);
-
-  const std::string recorded = arnm_json_writer_error_field(owner.writer());
-  EXPECT_EQ(recorded.size(), ARNM_JSON_WRITER_FIELD_NAME_SIZE - 1u);
-  EXPECT_EQ(recorded, key.substr(0, recorded.size()));
 }
 
 TEST(JsonWriter, AnArenaWithNoRoomIsRecordedAsOutOfMemory) {

@@ -115,8 +115,8 @@ static int nextVariant(void) {
 
 static void test_binary_to_hex(int stepCount) {
   for (int i = 0; i < stepCount; ++i) {
-    arnm_memory_block block = {payloads[nextVariant()], currentLength};
-    resultSink |= (unsigned)arnm_binary_to_hex(benchHexBuffer, &block);
+    resultSink |=
+        (unsigned)arnm_binary_to_hex(benchHexBuffer, payloads[nextVariant()], currentLength);
   }
 }
 
@@ -129,8 +129,8 @@ static void test_binary_from_hex(int stepCount) {
 
 static void test_binary_to_base64(int stepCount) {
   for (int i = 0; i < stepCount; ++i) {
-    arnm_memory_block block = {payloads[nextVariant()], currentLength};
-    resultSink |= (unsigned)arnm_binary_to_base64(benchBase64Buffer, &block);
+    resultSink |=
+        (unsigned)arnm_binary_to_base64(benchBase64Buffer, payloads[nextVariant()], currentLength);
   }
 }
 
@@ -272,12 +272,11 @@ static void prepare_test_data(void) {
 static void set_length(uint32_t length) {
   currentLength = length;
   for (int v = 0; v < PAYLOAD_VARIANTS; ++v) {
-    arnm_memory_block block = {payloads[v], length};
-    if (ARNM_SUCCESS != arnm_binary_to_hex(hexStrings[v], &block)) {
+    if (ARNM_SUCCESS != arnm_binary_to_hex(hexStrings[v], payloads[v], length)) {
       printf("could not prepare the hex strings\n");
       exit(1);
     }
-    if (ARNM_SUCCESS != arnm_binary_to_base64(base64Strings[v], &block)) {
+    if (ARNM_SUCCESS != arnm_binary_to_base64(base64Strings[v], payloads[v], length)) {
       printf("could not prepare the base64 strings\n");
       exit(1);
     }
@@ -307,9 +306,8 @@ static void set_decode_length(uint32_t length) {
       seed = seed * 1664525u + 1013904223u;
       decodeSink[i] = (uint8_t)(seed >> 24);
     }
-    const arnm_memory_block block = {decodeSink, length};
     if (ARNM_SUCCESS !=
-        arnm_binary_to_base64(decodePool + (size_t)v * decodeStringLength, &block)) {
+        arnm_binary_to_base64(decodePool + (size_t)v * decodeStringLength, decodeSink, length)) {
       printf("could not prepare the base64 pool\n");
       exit(1);
     }

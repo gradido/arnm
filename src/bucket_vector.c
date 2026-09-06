@@ -82,7 +82,8 @@ static inline bool is_state_valid(const arnm_bvec *v) {
   /* tail_index only means something while a bucket is open; with none open it must read 0.  */
   /* _grow leaves exactly that behind when the index array grew but the bucket alloc failed. */
   if (v->tail ? v->tail_index >= bucket_count : v->tail_index != 0) return false;
-  if (v->size > bucket_count * bucket_capacity(v->bucket_capacity_max_log2)) return false;
+  if (v->size > (uint32_t)(bucket_count * bucket_capacity(v->bucket_capacity_max_log2)))
+    return false;
 
   return true;
 }
