@@ -264,11 +264,11 @@ field, strings borrowed rather than copied, and one check at the end.
 #include "arnm/json_writer.h"
 
 arnm_json_writer writer;
-arnm_json_writer_init(&writer, scratch, ARNM_JSON_WRITE_DEFAULT);   // or ..._PRETTY
+arnm_json_writer_init(&writer, scratch, ARNM_JSON_WRITE_DEFAULT, NULL);   // or ..._PRETTY
 
-arnm_json_writer_add_string(&writer, "host", 4, config.host);   // the key, and its length
-arnm_json_writer_add_uint64(&writer, "port", 4, config.port);
-arnm_json_writer_add_bool(&writer, "debug", 5, config.debug);
+arnm_json_writer_add_string(&writer, ARNM_JSON_WRITER_KEY("host"), config.host, host_length);
+arnm_json_writer_add_uint64(&writer, ARNM_JSON_WRITER_KEY("port"), config.port);
+arnm_json_writer_add_bool(&writer, ARNM_JSON_WRITER_KEY("debug"), config.debug);
 
 arnm_memory_block text;
 if (ARNM_SUCCESS == arnm_json_writer_write(&writer, output, &text, NULL)) {
@@ -284,37 +284,51 @@ the result above stands in for a check after every field —
 `arnm_json_writer_status()` and `arnm_json_writer_error_field()` are there when you want the
 verdict earlier.
 
-**Every key goes in with its own length.** The writer never walks a key looking for a
-terminator — in a mapper the key is a literal whose length the compiler already knows, so the
-one `strlen` per field that nothing asked for simply stops happening. Where that reads badly by
-hand, a one-line macro says it once:
+**Every key goes in with its own length, and says whether it needs escaping.** The writer never
+walks a key — not for a terminator, and not for a character JSON cannot hold literally. In a
+mapper the key is a literal whose length the compiler already knows and whose bytes are a plain
+name, so both passes that nothing asked for simply stop happening. `ARNM_JSON_WRITER_KEY()`
+spells the three arguments out of a literal:
 
 ```c
-#define KEY(literal) literal, sizeof(literal) - 1u
-
-arnm_json_writer_add_uint64(&writer, KEY("port"), config.port);
-arnm_json_writer_add_string(&writer, name, name_length, value);   // a name from elsewhere
+arnm_json_writer_add_uint64(&writer, ARNM_JSON_WRITER_KEY("port"), config.port);
+arnm_json_writer_add_uint64(&writer, "port", 4, false, config.port);      // the same thing
+arnm_json_writer_add_string(&writer, name, name_length, true, value, value_length);
 ```
 
-The length is taken at its word and never checked against the key, so a wrong one is a wrong
-name in the document rather than a refusal.
+Both are taken at their word and neither is checked against the key: a wrong length is a wrong
+name in the document rather than a refusal, and `false` for a key that does hold a quote writes
+a name the far side cannot parse. `ARNM_JSON_WRITER_ESCAPE_KEY()` is the macro for that case.
 
-`arnm_json_writer_add_string()` keeps the pointer it is given and nothing else. Every string and
-every key therefore has to stay where it is until the write, which is what makes serialising a
-struct cost almost nothing: the payload is read once, at the end, straight out of your own
-memory. `arnm_json_writer_add_string_copy()` is there for a value that will not stand still that
-long, and `arnm_json_writer_add_string_raw()` for bytes that are already JSON — a cached
-fragment, a number formatted by hand — laid into the text unquoted, unescaped and unchecked.
+`arnm_json_writer_add_string()` keeps the pointer it is given and nothing else — no copy, no
+escaping pass. Every string and every key therefore has to stay where it is until the write,
+which is what makes serialising a struct cost almost nothing: the payload is read once, at the
+end, straight out of your own memory. The same rule as for keys applies to the escaping: a value
+from source is fine as it stands, a value from input needs the flag, or it writes a document the
+far side cannot parse.
+
+`arnm_json_writer_add_string_flags()` is where any of those three defaults changes:
+
+```c
+arnm_json_writer_add_string_flags(&writer, ARNM_JSON_WRITER_KEY("note"), note, note_length,
+                                  ARNM_JSON_WRITER_STRING_COPY |     // will not stand still
+                                  ARNM_JSON_WRITER_STRING_ESCAPE);   // came from input
+```
+
+`ARNM_JSON_WRITER_STRING_RAW` is the third: bytes that are already JSON — a cached fragment, a
+number formatted by hand — laid into the text unquoted, unescaped and unchecked. It also decides
+what the serializer reserves for the field, one byte a character against the six a quoted string
+is charged in case every one of them escapes, which is why the hex and base64 adders write raw.
 
 Nesting is an open and a close, and the writer keeps the levels itself — up to
 `ARNM_JSON_WRITER_MAX_DEPTH`, past which it records `ARNM_ERROR_RESOURCE_EXHAUSTED` rather than
 reaching for memory mid-field. A key of `NULL` means "an element of the current array".
 
 ```c
-arnm_json_writer_open_array(&writer, "peers", 5);
+arnm_json_writer_open_array(&writer, ARNM_JSON_WRITER_KEY("peers"));
 for (uint32_t i = 0; i < config.peer_count; ++i) {
-  arnm_json_writer_open_object(&writer, NULL, 0);
-  arnm_json_writer_add_string(&writer, "name", 4, config.peers[i].name);
+  arnm_json_writer_open_object(&writer, NULL, 0, false);
+  arnm_json_writer_add_string(&writer, ARNM_JSON_WRITER_KEY("name"), peer->name, peer->name_length);
   arnm_json_writer_close(&writer);
 }
 arnm_json_writer_close(&writer);

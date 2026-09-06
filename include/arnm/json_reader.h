@@ -111,6 +111,12 @@ extern "C" {
  *
  * Opaque by construction -- the bytes carry a layout that lives entirely in `json_reader.c`.
  *
+ * The union is not a choice between members but an alignment floor. The layout behind these
+ * bytes holds pointers, so the storage has to be aligned for one -- and a bare `uint8_t[]` is
+ * aligned for nothing. Without this a reader placed in a struct behind an odd number of chars,
+ * which is exactly what `bench_json` does, sits on an address the implementation then reads a
+ * pointer from. The same floor is what @ref arnm_json_writer carries, for the same reason.
+ *
  * A reader may not be moved once it has been initialized. The document keeps its own copy of the
  * allocator hooks, and those hooks point back into this storage; copying the struct to another
  * address leaves the document calling into where it used to be.
@@ -120,7 +126,11 @@ extern "C" {
  * @ref ARNM_ERROR_NOT_INITIALIZED.
  */
 typedef struct arnm_json_reader {
-  uint8_t opaqu[ARNM_JSON_READER_SIZE]; /**< Opaque; never read these directly. */
+  union {
+    uint8_t opaqu[ARNM_JSON_READER_SIZE]; /**< Opaque; never read these directly. */
+    void *alignment_pointer;              /**< Never read. Present for its alignment alone. */
+    uint64_t alignment_integer;           /**< Never read. Present for its alignment alone. */
+  } opaque;                               /**< The storage itself. Never named by a caller. */
 } arnm_json_reader;
 
 /**

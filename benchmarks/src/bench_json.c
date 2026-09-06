@@ -386,7 +386,10 @@ static void refill_only(payload *one, int steps) {
 static void walk_record(payload *one, int steps) {
   uint64_t sink = 0;
   for (int step = 0; step < steps; ++step) {
-    record_target into;
+    // zeroed, not merely declared: read_record() fills only the members the payload holds, and
+    // digest_of() reads every one of them -- an absent `active` is otherwise a bool loaded from
+    // whatever was on the stack, which is undefined behaviour the sanitiser build traps on
+    record_target into = {0};
     uint64_t found = 0;
     require_ok(read_record(one->root, &into, &found), "walk");
     sink += digest_of(&into) + found;
@@ -433,7 +436,7 @@ static void traverse_whole(payload *one, int steps) {
     uint32_t count = 0;
     require_ok(arnm_json_read_array(items, elements, ARRAY_ELEMENTS, &count), "array");
     for (uint32_t index = 0; index < count; ++index) {
-      record_target into;
+      record_target into = {0}; /* as in walk_record(): the walk fills only what is there */
       require_ok(read_record(elements[index], &into, NULL), "walk");
       sink += digest_of(&into);
     }

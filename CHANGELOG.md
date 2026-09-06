@@ -25,18 +25,23 @@ what the commits show rather than what was noted at the time.
 `arnm/json_writer.h` stops counting the text it is about to write. Every call site that adds a
 field has to be edited, so this is the release to read before upgrading.
 
-**Every adder takes the key's length beside the key.** `arnm_json_writer_add_string(&writer,
-"host", config.host)` is now `arnm_json_writer_add_string(&writer, "host", 4, config.host)`, and
-the same `size_t key_length` sits after `key` in every adder, in `_open_object()` and in
-`_open_array()`. Nothing walks a key any more. In a mapper the key is a literal whose length the
-compiler already knows, so the one `strlen` per field that nothing asked for stops happening;
-where writing it out reads badly, `#define KEY(l) l, sizeof(l) - 1u` says it once. The length is
-taken at its word and never checked against the key -- too short writes a truncated name into
-the document, too long reads past it. A NULL key still means "an element of the current array",
-and its length is ignored.
+**Every adder takes the key's length and an escape flag beside the key.**
+`arnm_json_writer_add_string(&writer, "host", config.host)` is now
+`arnm_json_writer_add_string(&writer, "host", 4, false, config.host, host_length)`, and the same
+`size_t key_length, bool escape_key` sits after `key` in every adder, in `_open_object()` and in
+`_open_array()`. `ARNM_JSON_WRITER_KEY("host")` spells the first three out of a literal, and
+`ARNM_JSON_WRITER_ESCAPE_KEY()` is the same for a name that does need escaping.
+
+Nothing walks a key any more, for either question. In a mapper the key is a literal whose length
+the compiler already knows and whose bytes are a plain name, so the `strlen` and the escaping
+pass that nothing asked for both stop happening. Both are taken at their word and neither is
+checked against the key: a length too short writes a truncated name and one too long reads past
+it, and `false` for a key that does hold a quote or a control character writes a name the far
+side cannot parse. A NULL key still means "an element of the current array", and its length and
+flag are both ignored.
 
 This is a compile error at every call site and not a silent change of behaviour, which is the
-kind that is cheap to answer. The one below is not.
+kind that is cheap to answer. The two below are not.
 
 **`arnm_json_writer_size()` is gone, and `arnm_json_writer_buffer_size_min()` is not a
 replacement.** The old call answered a number the writer had been keeping all along, exact for a
@@ -59,13 +64,44 @@ shrunk to fit before it returns -- where it used to be rendered into a scratch b
 into a block reserved against the measurement. `ARNM_ERROR_ARITHMETIC_OVERFLOW` moved with it:
 a document whose text outgrows a `uint32_t` is refused at the write rather than at the field.
 
-**`arnm_json_writer_add_string_raw()`**, for bytes that are already JSON. The fragment is laid
-into the text exactly as it stands -- not quoted, not escaped, not checked -- which is the way
-to place a cached object, a payload that arrived as JSON and is going straight back out, or a
-number formatted to a precision no flag here can ask for. A string has to arrive carrying its
-own quotes. Nothing in this header can tell valid JSON from anything else, so bytes that are not
-a well formed value produce a document that is not one either, and the reader on the far side is
-what finds out. The bytes are borrowed, as with every other string, and there is no copying form.
+**A string carries its own length, and is no longer escaped unless asked.**
+`arnm_json_writer_add_string()` takes `value_length` beside `value`, so the value is never walked
+looking for a terminator -- an embedded NUL is a character like any other and a slice of a larger
+buffer goes in as it stands. A NULL value is still the literal `null`, and its length is ignored.
+
+The escaping went with it. The serializer used to walk every value rewriting what JSON cannot
+hold literally; it now writes the bytes through untouched unless the field asks otherwise. **This
+one does not announce itself at the call site**: a value that does hold a quote, a backslash or a
+control character now writes a document the far side cannot parse, where before it was escaped.
+The rule is the same as for keys -- a string that came from source is fine as it is, a string that
+came from input needs the flag. `WithoutTheEscapeFlagTheBytesReachTheTextUnchanged` pins what
+that costs.
+
+**`arnm_json_writer_add_string_flags()`** is where anything but those defaults is asked for.
+`arnm_json_writer_add_string()` is borrowed, quoted and unescaped; each of the three changes
+through a bit:
+
+- `ARNM_JSON_WRITER_STRING_COPY` takes a copy into the writer's allocator, for a value that will
+  not stand still until the write. It replaces `arnm_json_writer_add_string_copy()`.
+- `ARNM_JSON_WRITER_STRING_ESCAPE` puts the escaping pass back on the value.
+- `ARNM_JSON_WRITER_STRING_RAW` lays the bytes into the text exactly as they stand -- not quoted,
+  not escaped, not checked -- which is the way to place a cached object, a payload that arrived as
+  JSON and is going straight back out, or a number formatted to a precision no flag here can ask
+  for. A string has to arrive carrying its own quotes. Nothing in this header can tell valid JSON
+  from anything else, so bytes that are not a well formed value produce a document that is not one
+  either, and the reader on the far side is what finds out. It replaces
+  `arnm_json_writer_add_string_raw()`.
+
+The bit also decides what the serializer reserves against the field: a quoted string is asked for
+at six bytes a character, in case every one of them escapes to `\uXXXX`, and a raw value at one.
+That is why `arnm_json_writer_add_hex()` and `arnm_json_writer_add_base64()` write raw, and why a
+large payload placed by hand should too.
+
+**`arnm_binary_to_hex()` and `arnm_binary_to_base64()` take a pointer and a size** rather than an
+`arnm_memory_block *`, which is what lets them encode a slice, or format straight into storage
+that is not a block. `arnm_binary_block_to_hex()` and `arnm_binary_block_to_base64()` are the old
+shape kept as one-line wrappers; `arnm_binary_to_hex_alloc()` and `arnm_binary_to_base64_alloc()`
+draw the buffer themselves.
 
 **`arnm_json_read_is_null()`** in `arnm/json_reader.h`. `null` was the one JSON type a table
 entry could not ask about: every other type is named by the entry that reads it, but `null` is
@@ -75,13 +111,37 @@ member as a handle with `ARNM_JSON_FIELD_VALUE()`, ask here, and name its type o
 answer says there is one. A NULL handle answers false -- a member that is not there and a member
 that is `null` are different things, and the mask from the walk is what tells them apart.
 
-**Two fixes found while the docs were brought back in line.** A refusal at a field with no key
-was recorded under the empty string rather than the `"[]"` sentinel
+**`arnm` and `arnm_json_reader` carry an alignment floor.** Both were a bare `uint8_t[]`, which
+is aligned for nothing, while the layout behind either holds pointers. A handle that happened to
+land on an 8-byte boundary worked and every other one was undefined behaviour -- `bench_json`
+puts a reader in a struct behind an odd-sized `char[]` and `bench_binaryToString` puts an `arnm`
+among statics, and both trapped under `-Dsanitize=undefined_behavior`. They now hold the same
+three-member union `arnm_json_writer` always had. `sizeof` is unchanged at 32 and 72, so nothing
+that only passed these around has to be rebuilt; anything that placed one by hand should be.
+
+**Fixes found while the docs were brought back in line.** A refusal at a field with no key was
+recorded under the empty string rather than the `"[]"` sentinel
 `arnm_json_writer_error_field()` documents, which folded it together with a refusal belonging to
-no field at all. And the size estimate read `ARNM_JSON_WRITE_PRETTY` against the serializer's
-own flag set rather than this header's -- the two agree on that bit by coincidence and not on
+no field at all. The size estimate read `ARNM_JSON_WRITE_PRETTY` against the serializer's own
+flag set rather than this header's -- the two agree on that bit by coincidence and not on
 `ARNM_JSON_WRITE_PRETTY_TWO_SPACES`, so a two-space document was estimated as if it were
-minified.
+minified. `arnm_json_writer_add_string_flags()` read a failed copy as an absent member and wrote
+`null` where it should have recorded `ARNM_ERROR_OUT_OF_MEMORY`. `arnm_json_writer_add_uuid()`
+set its value through the unchecked setter, so a uuid given a key inside an array dereferenced
+NULL rather than recording `ARNM_ERROR_INVALID_PARAM`. And the adders that reach into the state
+before `field()` does -- the copies, the hex, the base64, the uuid, both opens -- had lost the
+NULL check `field()` makes, so a NULL writer reached them as a dereference instead of doing
+nothing.
+
+**An uninitialized writer is undefined on the adders, and answered everywhere else.** The magic
+that tells a writer from any other 280 bytes is read by `_init()`, `_begin_*()`, `_release()`,
+`_destroy()`, `_write()`, `_status()`, `_error_field()`, `_clear_error()`, `_depth()` and
+`_buffer_size_min()` -- once per document, or once per question. It is deliberately not read by
+`add_*`, `open_*` or `close()`: those are the per-field path, and a check nobody can fail does
+not belong in front of a field. A NULL writer is still answered for on all of them, because a
+mapper writing an optional sub-document has a real reason to hold one. Everything else is what
+`_init()` established, and `AnUninitializedWriterAnswersEveryQuestionAskedAboutIt` says in the
+test file which calls are on which side of that line.
 
 ## 0.7.6 -- 2026-08-31
 

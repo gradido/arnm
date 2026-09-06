@@ -24,12 +24,27 @@
  * The flags, which are ours and pinned by the public header, translated one by one so that a
  * bit nobody defined is refused rather than arriving somewhere as a feature nobody asked for.
  *
- * And the length of the text, which is the one thing yyjson cannot be asked for in advance. It
- * is kept here instead, a field at a time: every value knows its own rendered length, its
- * separator and its indentation the moment it is added, so the total is always current and
- * arnm_json_writer_size() reads rather than works. What that costs is one pass over each string
- * to count what escaping will do to it -- the same pass the serializer will make later, done
- * once more so the answer can exist before the text does.
+ * And the size of the text, which is the one thing yyjson cannot be asked for in advance. It
+ * used to be kept exactly, a field at a time, which cost one pass over every string to count
+ * what escaping would do to it -- the same pass the serializer makes later, done once more so
+ * the answer could exist before the text did. Nothing asked for that answer often enough to be
+ * worth a table lookup per string byte on every document, so it is gone. What is counted now is
+ * elements, which is an increment, and arnm_json_writer_buffer_size_min() turns that count into
+ * a guess. The serializer grows its own buffer where the guess falls short.
+ *
+ * ### Why the adders reach past yyjson's public API
+ *
+ * A field goes in as one unsafe_yyjson_mut_val() for the key and the value together and a tag
+ * written by hand, rather than as yyjson_mut_obj_add_str() and the pair of allocations behind
+ * it. What that buys is the pool touched once per field instead of twice, and a key that is
+ * tagged NOESC where the caller says it needs no escaping -- which is nearly always, since a
+ * key in a mapper is a literal somebody typed.
+ *
+ * The price is that the unsafe_ calls check nothing, NULL included. Every adder therefore does
+ * its own checking first, and the two places it happens are worth knowing apart: field() is
+ * where a NULL writer, a recorded error and a container/key mismatch are caught, and everything
+ * that draws from a pool before calling field() -- the copies, the hex, the base64, the uuid --
+ * repeats the writer check at its own top, because it dereferences the state first.
  */
 
 /* C11 static assert fallback; in C++ the keyword is already there */
@@ -60,10 +75,9 @@
 /**
  * @brief The layout behind the opaque @ref arnm_json_writer.
  *
- * @c size is the running length of the text, terminator and trailing newline excluded. It is
- * kept rather than computed because every part of it is known where it arrives and nowhere
- * else: the indent depends on the level the field went in at, the comma on whether anything was
- * there before it, and both are gone by the time a walk would come looking.
+ * @c elements is how many values have gone in, the keys counted among them. It is the only
+ * thing left of what used to be an exact running length: an increment per field rather than a
+ * pass over every string, and arnm_json_writer_buffer_size_min() is the one call that reads it.
  *
  * @c stack holds the containers standing open, the root at index 0. A fixed depth and not an
  * allocation: a writer that reaches for memory in the middle of a field can fail in the middle
@@ -75,7 +89,7 @@ typedef struct json_writer_state {
   yyjson_mut_doc *doc;             /**< The document being built, or NULL. */
   yyjson_write_flag write_flags;   /**< The public flags, translated once at init. */
   uint32_t depth;                  /**< Containers open, the root counted. */
-  uint32_t elements;               /**< Element counts, used for size estimation. */
+  uint32_t elements;               /**< Values added, keys counted; the estimate's whole input. */
   uint32_t /*arnm_result*/ status; /**< First error since the document began, or ARNM_SUCCESS. */
   uint32_t magic;                  /**< JSON_WRITER_MAGIC once initialized. */
   uint32_t hint_values;            /**< Values a document is expected to hold, or 0 for none. */
@@ -107,7 +121,13 @@ static size_t field_name_length(const char *key, size_t key_length) {
   return key ? key_length : sizeof(JSON_ELEMENT_FIELD_NAME) - 1u;
 }
 
-/** @brief The state behind a writer, or NULL when there is none to speak of. */
+/**
+ * @brief The state behind a writer, or NULL when there is none to speak of.
+ *
+ * The magic is a real read of a real field, so this belongs to the calls a document pays for
+ * once -- init, begin, release, write, and the four that answer a question about the writer
+ * rather than adding to it. The per-field path casts instead; see the note at field().
+ */
 static json_writer_state *state_of(const arnm_json_writer *writer) {
   if (!writer) { return NULL; }
   json_writer_state *state = (json_writer_state *)(void *)(uintptr_t)(const void *)writer;
@@ -266,6 +286,20 @@ static arnm_result begin_document(json_writer_state *state, bool is_array) {
   return ARNM_SUCCESS;
 }
 
+/**
+ * @brief Make room for one member of @p container and answer where its value goes.
+ *
+ * The key and the value are one allocation of two slots rather than two of one: they always
+ * arrive together, they are always freed together, and asking the pool once is the whole reason
+ * this reaches past yyjson_mut_obj_add() to do it by hand.
+ *
+ * The key is tagged rather than copied. @p escape_key says whether the serializer has to look
+ * at it -- NOESC where the caller knows it is a plain name, which a literal in a mapper always
+ * is, and that is what takes the escaping pass off every key in the document.
+ *
+ * @return Where the value belongs, or NULL when the pool had nothing left; recorded under
+ *         @p key in that case.
+ */
 static yyjson_mut_val *field_obj(
     yyjson_mut_val *container,
     json_writer_state *state,
@@ -291,6 +325,14 @@ static yyjson_mut_val *field_obj(
   return node + 1;
 }
 
+/**
+ * @brief Make room for one element of @p container and answer where it goes.
+ *
+ * One slot rather than the two a member needs, because an element of an array has no name --
+ * which is also why a refusal here is filed under the sentinel and not under a key.
+ *
+ * @return Where the element belongs, or NULL when the pool had nothing left.
+ */
 static yyjson_mut_val *field_array(yyjson_mut_val *container, json_writer_state *state) {
   yyjson_mut_val *node = unsafe_yyjson_mut_val(state->doc, 1u);
   if (!node) {
@@ -305,6 +347,33 @@ static yyjson_mut_val *field_array(yyjson_mut_val *container, json_writer_state 
   return node;
 }
 
+/**
+ * @brief The one gate every adder passes through: where a field is refused or given a slot.
+ *
+ * Four questions, in the order that makes the later ones safe to ask: is there a writer at all,
+ * is it still counting, is there a document -- the first field opens one -- and does the
+ * container standing open want a name or refuse one.
+ *
+ * The `unsafe_` calls below this point check nothing, so this is the only place that does -- and
+ * it checks what a document can actually arrive at.
+ *
+ * ### Why this casts instead of calling state_of()
+ *
+ * Everything from here down is the path a document pays for per field, and state_of() would add
+ * the magic to it: a read of a field nobody can get wrong between two adders. A document is a
+ * run of these between one init and one write, so that check would be priced against the field
+ * it precedes, on the one path whose whole purpose is that writing a struct costs almost
+ * nothing.
+ *
+ * NULL is still answered for, because a mapper writing an optional sub-document has a real
+ * reason to hold a writer that may not be there. Being initialized at all is not: that is what
+ * init established, arnm_json_writer_status() is where it is asked about, and the header says
+ * to ask once. The same reasoning holds for the five adders that read the state before calling
+ * here -- they cast for the same reason and repeat the same two questions.
+ *
+ * @return Where the value belongs, or NULL -- in which case the refusal is already recorded and
+ *         the caller has nothing left to do.
+ */
 static yyjson_mut_val *field(
     arnm_json_writer *writer, const char *key, size_t key_length, bool escape_key
 ) {
@@ -314,7 +383,7 @@ static yyjson_mut_val *field(
   if (0 == state->depth) {
     record_error(
         state, ARNM_ERROR_INVALID_STATE, ERROR_INVALID_DEPTH_MESSAGE,
-        sizeof(ERROR_INVALID_DEPTH_MESSAGE)
+        sizeof(ERROR_INVALID_DEPTH_MESSAGE) - 1u
     );
     return NULL;
   }
@@ -434,27 +503,26 @@ arnm_result arnm_json_writer_begin_array(arnm_json_writer *writer) {
 // ********** what the writer carries *******************
 
 arnm_result arnm_json_writer_status(const arnm_json_writer *writer) {
-  if (!writer) return ARNM_ERROR_NOT_INITIALIZED;
-  const json_writer_state *state = (const json_writer_state *)writer;
-  if (state->magic != JSON_WRITER_MAGIC) return ARNM_ERROR_NOT_INITIALIZED;
-  return state->status;
+  const json_writer_state *state = state_of(writer);
+  return state ? (arnm_result)state->status : ARNM_ERROR_NOT_INITIALIZED;
 }
 
 const char *arnm_json_writer_error_field(const arnm_json_writer *writer) {
-  const json_writer_state *state = (const json_writer_state *)writer;
+  const json_writer_state *state = state_of(writer);
   return state ? state->error_field : "";
 }
 
 arnm_result arnm_json_writer_clear_error(arnm_json_writer *writer) {
   if (!writer) { return ARNM_ERROR_NULL_POINTER; }
-  json_writer_state *state = (json_writer_state *)writer;
+  json_writer_state *state = state_of(writer);
+  if (!state) { return ARNM_ERROR_NOT_INITIALIZED; }
   state->status = ARNM_SUCCESS;
   state->error_field[0] = '\0';
   return ARNM_SUCCESS;
 }
 
 uint32_t arnm_json_writer_depth(const arnm_json_writer *writer) {
-  const json_writer_state *state = (const json_writer_state *)writer;
+  const json_writer_state *state = state_of(writer);
   return state ? state->depth : 0u;
 }
 
@@ -505,6 +573,34 @@ static inline bool is_string_escape(arnm_json_writer_string_flags flags) {
   return ARNM_JSON_WRITER_STRING_ESCAPE == (flags & ARNM_JSON_WRITER_STRING_ESCAPE);
 }
 
+/**
+ * @brief Tag @p node as the string @p value, under what @p flags asked for.
+ *
+ * The two bits that reach the tag are the type -- RAW goes into the text untouched, STR is
+ * quoted and separated -- and the subtype, which is what the serializer reads to decide whether
+ * this string needs the escaping pass at all. NOESC is the default here for the same reason it
+ * is the default for keys: a mapper's strings are overwhelmingly plain, and a pass that finds
+ * nothing is still a pass over every byte.
+ */
+static void set_string(
+    yyjson_mut_val *node,
+    const char *value,
+    size_t value_length,
+    arnm_json_writer_string_flags flags
+) {
+  // a NULL string is the literal null: an optional member that is not there, which is what a
+  // mapper means by it far more often than it means a mistake
+  if (!value) {
+    unsafe_yyjson_set_null(node);
+    return;
+  }
+  unsafe_yyjson_set_tag(
+      node, is_string_raw(flags) ? YYJSON_TYPE_RAW : YYJSON_TYPE_STR,
+      is_string_escape(flags) ? YYJSON_SUBTYPE_NONE : YYJSON_SUBTYPE_NOESC, value_length
+  );
+  ((yyjson_val *)node)->uni.str = value;
+}
+
 void arnm_json_writer_add_string_flags(
     arnm_json_writer *writer,
     const char *key,
@@ -514,29 +610,29 @@ void arnm_json_writer_add_string_flags(
     size_t value_length,
     arnm_json_writer_string_flags flags
 ) {
+  // the copy draws from the string pool before field() has looked at anything, so the two
+  // questions field() would ask are asked here instead
   json_writer_state *state = (json_writer_state *)writer;
-  if (!state->doc && ARNM_SUCCESS != begin_document(state, false)) { return; }
+  if (!state || ARNM_SUCCESS != state->status) { return; }
 
-  // is copy
-  if (is_string_copy(flags)) {
+  // The copy happens before the field, because a copy that cannot be made is a field that must
+  // not be added: a failed copy left as a NULL value would go in as the literal null, and an
+  // absent member and a member the allocator could not hold are not the same answer.
+  if (value && is_string_copy(flags)) {
+    if (!state->doc && ARNM_SUCCESS != begin_document(state, false)) { return; }
     char *copied = unsafe_yyjson_mut_strncpy(state->doc, value, value_length);
+    if (!copied) {
+      record_error(
+          state, ARNM_ERROR_OUT_OF_MEMORY, field_name(key), field_name_length(key, key_length)
+      );
+      return;
+    }
     value = copied;
   }
+
   yyjson_mut_val *node = field(writer, key, key_length, escape_key);
   if (!node) { return; }
-
-  // a NULL string is the literal null: an optional member that is not there, which is what a
-  // mapper means by it far more often than it means a mistake
-  if (!value) {
-    unsafe_yyjson_set_null(node);
-    return;
-  }
-
-  unsafe_yyjson_set_tag(
-      node, is_string_raw(flags) ? YYJSON_TYPE_RAW : YYJSON_TYPE_STR,
-      is_string_escape(flags) ? YYJSON_SUBTYPE_NONE : YYJSON_SUBTYPE_NOESC, value_length
-  );
-  ((yyjson_val *)node)->uni.str = value;
+  set_string(node, value, value_length, flags);
 }
 
 void arnm_json_writer_add_string(
@@ -547,17 +643,12 @@ void arnm_json_writer_add_string(
     const char *value,
     size_t value_length
 ) {
+  // the fast track: borrowed and unescaped, which is the default
+  // arnm_json_writer_add_string_flags() would arrive at anyway -- written out here so the common
+  // field costs one call and no branching over flags nobody set
   yyjson_mut_val *node = field(writer, key, key_length, escape_key);
   if (!node) { return; }
-
-  // a NULL string is the literal null: an optional member that is not there, which is what a
-  // mapper means by it far more often than it means a mistake
-  if (!value) {
-    unsafe_yyjson_set_null(node);
-    return;
-  }
-  unsafe_yyjson_set_tag(node, YYJSON_TYPE_STR, YYJSON_SUBTYPE_NOESC, value_length);
-  ((yyjson_val *)node)->uni.str = value;
+  set_string(node, value, value_length, ARNM_JSON_WRITER_STRING_DEFAULT);
 }
 
 /**
@@ -566,6 +657,8 @@ void arnm_json_writer_add_string(
  * Two characters per byte, plus the quotes this writes around them, plus the NUL the string
  * pool wants behind every entry.
  */
+#define JSON_HEX_MAX_BYTES ((ARNM_MAX_ALLOC_SIZE - 3u) / 2u)
+
 void arnm_json_writer_add_hex(
     arnm_json_writer *writer,
     const char *key,
@@ -574,8 +667,10 @@ void arnm_json_writer_add_hex(
     const uint8_t *data,
     uint32_t size
 ) {
+  // as in arnm_json_writer_add_string_flags(): the text is formatted into the string pool
+  // before field() runs, so the same two questions are asked here instead
   json_writer_state *state = (json_writer_state *)writer;
-  if (!state->doc && ARNM_SUCCESS != begin_document(state, false)) { return; }
+  if (!state || ARNM_SUCCESS != state->status) { return; }
 
   // an empty block is the empty string and not `null`: it says the field was there and held
   // nothing, which is what the block itself said
@@ -583,6 +678,15 @@ void arnm_json_writer_add_hex(
     yyjson_mut_set_raw(field(writer, key, key_length, escape_key), "\"\"", 2u);
     return;
   }
+  // refused for what it would be rather than attempted and found out at the allocator, so the
+  // answer names the reason the header names
+  if (size > JSON_HEX_MAX_BYTES) {
+    record_error(
+        state, ARNM_ERROR_RESOURCE_SIZE_EXCEED, field_name(key), field_name_length(key, key_length)
+    );
+    return;
+  }
+  if (!state->doc && ARNM_SUCCESS != begin_document(state, false)) { return; }
 
   // The text is written straight into the document's string pool -- no buffer of the caller's
   // to format in and no copy out of it afterwards. The quotes are part of what is written,
@@ -626,7 +730,7 @@ void arnm_json_writer_add_base64(
     uint32_t size
 ) {
   json_writer_state *state = (json_writer_state *)writer;
-  if (!state->doc && ARNM_SUCCESS != begin_document(state, false)) { return; }
+  if (!state || ARNM_SUCCESS != state->status) { return; }
 
   // an empty block is the empty string and not `null`: it says the field was there and held
   // nothing, which is what the block itself said
@@ -634,6 +738,13 @@ void arnm_json_writer_add_base64(
     yyjson_mut_set_raw(field(writer, key, key_length, escape_key), "\"\"", 2u);
     return;
   }
+  if (size > JSON_BASE64_MAX_BYTES) {
+    record_error(
+        state, ARNM_ERROR_RESOURCE_SIZE_EXCEED, field_name(key), field_name_length(key, key_length)
+    );
+    return;
+  }
+  if (!state->doc && ARNM_SUCCESS != begin_document(state, false)) { return; }
 
   const uint32_t text_length = ARNM_BASE64_STRING_LENGTH(size) + 2u;
   char *text = unsafe_yyjson_mut_str_alc(state->doc, text_length);
@@ -669,7 +780,7 @@ void arnm_json_writer_add_uuid(
     const uint8_t *uuid
 ) {
   json_writer_state *state = (json_writer_state *)writer;
-  if (!state->doc && ARNM_SUCCESS != begin_document(state, false)) { return; }
+  if (!state || ARNM_SUCCESS != state->status) { return; }
 
   // sixteen bytes or nothing at all -- there is no size here that could make an absent uuid an
   // empty one, so NULL is the member that is not there
@@ -677,6 +788,7 @@ void arnm_json_writer_add_uuid(
     yyjson_mut_set_null(field(writer, key, key_length, escape_key));
     return;
   }
+  if (!state->doc && ARNM_SUCCESS != begin_document(state, false)) { return; }
 
   char *text = unsafe_yyjson_mut_str_alc(state->doc, JSON_UUID_TEXT_LENGTH);
   if (!text) {
@@ -691,18 +803,29 @@ void arnm_json_writer_add_uuid(
   text[JSON_UUID_TEXT_LENGTH - 1u] = '"';
   text[JSON_UUID_TEXT_LENGTH] = '\0';
 
-  unsafe_yyjson_set_raw(field(writer, key, key_length, escape_key), text, JSON_UUID_TEXT_LENGTH);
+  // the checked setter and not unsafe_yyjson_set_raw(): field() answers NULL for a key inside
+  // an array, and the unsafe form would take that at its word
+  yyjson_mut_set_raw(field(writer, key, key_length, escape_key), text, JSON_UUID_TEXT_LENGTH);
 }
 
 // ********** nesting *******************
 
-/** @brief The shared body of the two opens. */
+/**
+ * @brief The shared body of the two opens.
+ *
+ * The level is checked before the field is taken, so a refusal costs nothing from the pool -- a
+ * container that cannot be entered must not leave a value behind in the document either.
+ */
 static void open_container(
     arnm_json_writer *writer, const char *key, size_t key_length, bool escape_key, bool is_array
 ) {
+  // the depth is read before field() would look at anything, so the check happens here
   json_writer_state *state = (json_writer_state *)writer;
+  if (!state || ARNM_SUCCESS != state->status) { return; }
   if (state->depth >= ARNM_JSON_WRITER_MAX_DEPTH) {
-    record_error(state, ARNM_ERROR_RESOURCE_EXHAUSTED, key, key_length);
+    record_error(
+        state, ARNM_ERROR_RESOURCE_EXHAUSTED, field_name(key), field_name_length(key, key_length)
+    );
     return;
   }
   yyjson_mut_val *node = field(writer, key, key_length, escape_key);
@@ -711,9 +834,10 @@ static void open_container(
   // an empty container is its tag and nothing else, exactly as yyjson_mut_obj() leaves one
   node->tag =
       is_array ? (YYJSON_TYPE_ARR | YYJSON_SUBTYPE_NONE) : (YYJSON_TYPE_OBJ | YYJSON_SUBTYPE_NONE);
-  // the empty form is charged now; the first field that lands inside pays the difference
   state->stack[state->depth] = node;
   state->depth += 1u;
+  // field() already counted this node as the value it is; the extra one is the brackets around
+  // what goes inside, which is text no element of its own will be charged for
   state->elements++;
 }
 
@@ -730,7 +854,8 @@ void arnm_json_writer_open_array(
 }
 
 void arnm_json_writer_close(arnm_json_writer *writer) {
-  json_writer_state *state = state_of(writer);
+  // one per container, so it belongs to the same path the opens do
+  json_writer_state *state = (json_writer_state *)writer;
   if (!state || ARNM_SUCCESS != state->status) { return; }
 
   if (state->depth <= 1u) {

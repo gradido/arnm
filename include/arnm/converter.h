@@ -127,8 +127,10 @@ uint8_t arnm_uint64_to_string_size(uint64_t value);
  */
 uint8_t arnm_int64_to_string_size(int64_t value);
 
-#define ARNM_HEX_STRING_LENGTH(bin_size) (bin_size * 2 + 1)
-#define ARNM_HEX_BINARY_SIZE(hex_size) (hex_size / 2)
+/** @brief Characters the hex of @p bin_size bytes takes, its terminator counted. */
+#define ARNM_HEX_STRING_LENGTH(bin_size) ((bin_size) * 2u + 1u)
+/** @brief Bytes the hex string of @p hex_size characters spells, terminator not counted. */
+#define ARNM_HEX_BINARY_SIZE(hex_size) ((hex_size) / 2u)
 
 /**
  * @brief Write @p data as lowercase hex into a buffer the caller sized.
@@ -137,17 +139,24 @@ uint8_t arnm_int64_to_string_size(int64_t value);
  * allocated and nothing is remembered: the bytes flow through and the buffer holds what is
  * left.
  *
- * @param[out] result_buffer Expected to hold data->size * 2 + 1 bytes. Not checkable from
- *                           here -- sizing it is the caller's part of the contract.
- * @param[in]  data          Block to encode; not NULL and not empty.
+ * The size is passed beside the pointer rather than carried in a block, which is what lets a
+ * caller encode a slice of a larger buffer, or -- as arnm_json_writer_add_hex() does -- format
+ * straight into storage that is not a block at all.
+ *
+ * @param[out] result_buffer Expected to hold @ref ARNM_HEX_STRING_LENGTH(size) bytes. Not
+ *                           checkable from here -- sizing it is the caller's part of the
+ *                           contract.
+ * @param[in]  data          Bytes to encode; not NULL.
+ * @param[in]  size          How many; not 0.
  * @retval ARNM_SUCCESS             Hex written, terminator included.
- * @retval ARNM_ERROR_NULL_POINTER  @p result_buffer, @p data or its data pointer is NULL.
- * @retval ARNM_ERROR_INVALID_PARAM @p data holds no bytes.
+ * @retval ARNM_ERROR_NULL_POINTER  @p result_buffer or @p data is NULL.
+ * @retval ARNM_ERROR_INVALID_PARAM @p size is 0.
  * @note Not constant time; see the warning on this group.
  * @whisper Every byte says its name twice, in the same quiet alphabet
  */
 arnm_result arnm_binary_to_hex(char *result_buffer, const uint8_t *data, const uint32_t size);
 
+/** @brief @ref arnm_binary_to_hex() for bytes that already travel as a block. */
 static inline arnm_result arnm_binary_block_to_hex(
     char *result_buffer, const arnm_memory_block *data
 ) {
@@ -155,6 +164,16 @@ static inline arnm_result arnm_binary_block_to_hex(
   return arnm_binary_to_hex(result_buffer, data->data, data->size);
 }
 
+/**
+ * @brief @ref arnm_binary_to_hex() with the buffer drawn from @p allocator rather than passed in.
+ *
+ * @param[out]    out       Receives the hex, terminator included; give it back with
+ *                          `arnm_memory_block_free()`. Untouched unless the call succeeds.
+ * @param[in]     data      Bytes to encode; not NULL.
+ * @param[in]     size      How many; not 0.
+ * @param[in,out] allocator Where the buffer comes from, or NULL for the host.
+ * @return As @ref arnm_binary_to_hex(), plus what the allocation answered.
+ */
 static inline arnm_result arnm_binary_to_hex_alloc(
     arnm_memory_block *out, const uint8_t *data, const uint32_t size, arnm *allocator
 ) {
@@ -240,18 +259,23 @@ static inline arnm_result arnm_binary_from_hex(uint8_t *result_buffer, const cha
  * Reach for hex instead where a person will compare the value against another tool's output --
  * a key, a hash, a transaction id.
  *
- * @param[out] result_buffer Expected to hold ARNM_BASE64_STRING_LENGTH(data->size) + 1 bytes.
+ * As @ref arnm_binary_to_hex(), the size travels beside the pointer rather than inside a block,
+ * so a slice encodes as readily as a whole buffer.
+ *
+ * @param[out] result_buffer Expected to hold @ref ARNM_BASE64_STRING_LENGTH(size) + 1 bytes.
  *                           Not checkable from here -- sizing it is the caller's part of the
  *                           contract.
- * @param[in]  data          Block to encode; not NULL and not empty.
+ * @param[in]  data          Bytes to encode; not NULL.
+ * @param[in]  size          How many; not 0.
  * @retval ARNM_SUCCESS             Base64 written, terminator included.
- * @retval ARNM_ERROR_NULL_POINTER  @p result_buffer, @p data or its data pointer is NULL.
- * @retval ARNM_ERROR_INVALID_PARAM @p data holds no bytes.
+ * @retval ARNM_ERROR_NULL_POINTER  @p result_buffer or @p data is NULL.
+ * @retval ARNM_ERROR_INVALID_PARAM @p size is 0.
  * @note Not constant time; see the warning on this group.
  * @whisper Three bytes fold into four letters, and the last group is made whole
  */
 arnm_result arnm_binary_to_base64(char *result_buffer, const uint8_t *data, const uint32_t size);
 
+/** @brief @ref arnm_binary_to_base64() for bytes that already travel as a block. */
 static inline arnm_result arnm_binary_block_to_base64(
     char *result_buffer, const arnm_memory_block *data
 ) {
@@ -259,6 +283,16 @@ static inline arnm_result arnm_binary_block_to_base64(
   return arnm_binary_to_base64(result_buffer, data->data, data->size);
 }
 
+/**
+ * @brief @ref arnm_binary_to_base64() with the buffer drawn from @p allocator.
+ *
+ * @param[out]    out       Receives the base64, terminator included; give it back with
+ *                          `arnm_memory_block_free()`. Untouched unless the call succeeds.
+ * @param[in]     data      Bytes to encode; not NULL.
+ * @param[in]     size      How many; not 0.
+ * @param[in,out] allocator Where the buffer comes from, or NULL for the host.
+ * @return As @ref arnm_binary_to_base64(), plus what the allocation answered.
+ */
 static inline arnm_result arnm_binary_to_base64_alloc(
     arnm_memory_block *out, const uint8_t *data, const uint32_t size, arnm *allocator
 ) {
