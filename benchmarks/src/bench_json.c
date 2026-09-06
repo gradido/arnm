@@ -20,10 +20,10 @@
  *
  * The writer has two moving parts: the building, where a field at a time goes into a document
  * held in the arena, and the rendering, where that document becomes text. They are timed apart
- * because a caller pays them apart -- the size is asked for between the two, and that is what an
- * output arena is sized by. Both are timed a second time with the writer told up front how big
- * the document will be, because that hint is the one knob its header offers and a row beside the
- * one without it is the only honest way to say what turning it is worth.
+ * because a caller pays them apart -- the size estimate is asked for between the two, and that
+ * is what an output arena is opened at. Both are timed a second time with the writer told up front
+ * how big the document will be, because that hint is the one knob its header offers and a row
+ * beside the one without it is the only honest way to say what turning it is worth.
  *
  * The reader has three moving parts: a parse, a walk over an object, and a read of an array.
  * Everything a consumer does is some arrangement of those, so each is measured on its own and
@@ -101,8 +101,8 @@ typedef struct payload {
   arnm_json_reader reader;    /**< Parsed once and held, for the rows that are not about parsing. */
   arnm_json_value *root;      /**< That document's way in. */
   arnm_json_writer_hint hint; /**< This document's own size, for the rows that are told it. */
-  uint32_t promised;          /**< What the writer said the text would take, before it wrote it. */
-  arnm_json_writer writer;    /**< Built once and held, for the row that only asks it a question. */
+  uint32_t estimate;       /**< What the writer guessed the text would take, before it wrote it. */
+  arnm_json_writer writer; /**< Built once and held, for the row that only asks it a question. */
 } payload;
 
 #define SHORT_VALUE "a string value of an ordinary length"
@@ -263,17 +263,19 @@ static void render_document(payload *one, const arnm_json_writer_hint *hint, int
 }
 
 /**
- * @brief The one question a writer answers without doing anything: how long the text will be.
+ * @brief The one question a writer answers without doing anything: roughly how long the text is.
  *
- * A field read, not a walk -- the number is kept as the document is built. The row exists to say
- * that in a figure, because it is what lets an output arena be sized before there is any text to
- * size it against, and a caller only does that if asking is free. Timed on the writer that
- * stands for the whole run rather than on one built inside the loop, which would time the
- * building instead.
+ * An arithmetic answer over a count the adders already kept -- no walk, no string measured, and
+ * nothing rendered. The row exists to say that in a figure, because sizing an output arena
+ * before there is any text to size it against is only worth doing if asking is free. Timed on
+ * the writer that stands for the whole run rather than on one built inside the loop, which
+ * would time the building instead.
  */
 static void measure_size(payload *one, int steps) {
   uint64_t sink = 0;
-  for (int step = 0; step < steps; ++step) { sink += arnm_json_writer_buffer_size_min(&one->writer); }
+  for (int step = 0; step < steps; ++step) {
+    sink += arnm_json_writer_buffer_size_min(&one->writer);
+  }
   g_sink += sink;
 }
 
@@ -508,11 +510,11 @@ static void prepare_test_data(void) {
     build_payload(&writer, &one->form);
     require_ok(arnm_json_writer_status(&writer), one->name);
     // asked before the text exists, which is the only moment the answer is of any use
-    one->promised = arnm_json_writer_buffer_size_min(&writer);
+    one->estimate = arnm_json_writer_buffer_size_min(&writer);
 
     arnm_memory_block rendered;
     require_ok(arnm_json_writer_write(&writer, &output, &rendered, &one->length), "write payload");
-    
+
     // the insitu rows render this text into a buffer of the same size and write padding past its
     // end, so the room for that padding is what has to fit
     if (one->length + ARNM_JSON_READER_INSITU_PADDING > TEXT_CAPACITY) {
@@ -805,22 +807,23 @@ int main(void) {
   prepare_test_data();
   bench_prepared(time_used);
 
-  // "promised" is what the writer answered before the text existed, terminator counted, and
-  // "over" is how much of that the text did not need. Every record here carries a double, and a
-  // double is charged its longest possible rendering because its real length is not known until
-  // it has been rendered -- so the promise is a bound on all six, and the last column is one
-  // record's worth of that overcharge times the number of records.
+  // "estimate" is what the writer guessed from its element count before the text existed,
+  // terminator counted, and "off by" is how far that guess landed from the text -- positive
+  // where it was generous, negative where the text ran past it. It is a guess and not a bound
+  // in either direction, so both signs are expected here: a payload of short values comes out
+  // under the estimate, and one carrying a long string comes out over it.
   printf("\nthe payloads\n");
   printf(
-      "  %-12s %8s %8s %10s %10s %8s\n", "payload", "bytes", "nodes", "records", "promised", "over"
+      "  %-12s %8s %8s %10s %10s %8s\n", "payload", "bytes", "nodes", "records", "estimate",
+      "off by"
   );
   for (size_t index = 0; index < PAYLOAD_COUNT; ++index) {
     payload *one = payloads[index];
     printf(
-        "  %-12s %8u %8u %10u %10u %8u\n", one->name, (unsigned)one->length,
+        "  %-12s %8u %8u %10u %10u %+8lld\n", one->name, (unsigned)one->length,
         (unsigned)arnm_json_reader_value_count(&one->reader),
-        (unsigned)(one->form.elements ? one->form.elements : 1u), (unsigned)one->promised,
-        (unsigned)(one->promised - (one->length + 1u))
+        (unsigned)(one->form.elements ? one->form.elements : 1u), (unsigned)one->estimate,
+        (long long)one->estimate - ((long long)one->length + 1)
     );
   }
 

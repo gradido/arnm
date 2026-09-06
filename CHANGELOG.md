@@ -20,6 +20,69 @@ next build.
 Entries before 0.4.0 were reconstructed from the git history after the fact, so they summarise
 what the commits show rather than what was noted at the time.
 
+## 0.8.0 -- unreleased
+
+`arnm/json_writer.h` stops counting the text it is about to write. Every call site that adds a
+field has to be edited, so this is the release to read before upgrading.
+
+**Every adder takes the key's length beside the key.** `arnm_json_writer_add_string(&writer,
+"host", config.host)` is now `arnm_json_writer_add_string(&writer, "host", 4, config.host)`, and
+the same `size_t key_length` sits after `key` in every adder, in `_open_object()` and in
+`_open_array()`. Nothing walks a key any more. In a mapper the key is a literal whose length the
+compiler already knows, so the one `strlen` per field that nothing asked for stops happening;
+where writing it out reads badly, `#define KEY(l) l, sizeof(l) - 1u` says it once. The length is
+taken at its word and never checked against the key -- too short writes a truncated name into
+the document, too long reads past it. A NULL key still means "an element of the current array",
+and its length is ignored.
+
+This is a compile error at every call site and not a silent change of behaviour, which is the
+kind that is cheap to answer. The one below is not.
+
+**`arnm_json_writer_size()` is gone, and `arnm_json_writer_buffer_size_min()` is not a
+replacement.** The old call answered a number the writer had been keeping all along, exact for a
+document of integers, booleans, nulls and valid UTF-8 strings, and `write()` reserved exactly
+that many bytes before copying the text into them. Keeping it exact cost a table lookup per
+string byte, on every string of every document, whether the number was ever asked for -- paid by
+every caller to serve the few who needed it to the byte.
+
+The new call estimates instead: a flat charge per element, more of one under a pretty layout,
+plus a floor. It is a **guess and not a bound in either direction**. A document holding one long
+string, one large hex blob or a run of `\uXXXX` escapes runs past it; a document of short
+integers comes out well under. **A caller that sized a buffer by `arnm_json_writer_size()` and
+copied into it must not do the same with this one** -- that is a write past the end, and the
+compiler cannot see it. Ask `write()` for the text and read the length it reports back.
+
+Nothing inside the library relies on the number any more, which is what made the trade
+available. `arnm_json_writer_write()` hands the caller's allocator to the serializer and lets it
+grow there as it goes, so the text is rendered once, in the block that is handed back, and
+shrunk to fit before it returns -- where it used to be rendered into a scratch buffer and copied
+into a block reserved against the measurement. `ARNM_ERROR_ARITHMETIC_OVERFLOW` moved with it:
+a document whose text outgrows a `uint32_t` is refused at the write rather than at the field.
+
+**`arnm_json_writer_add_string_raw()`**, for bytes that are already JSON. The fragment is laid
+into the text exactly as it stands -- not quoted, not escaped, not checked -- which is the way
+to place a cached object, a payload that arrived as JSON and is going straight back out, or a
+number formatted to a precision no flag here can ask for. A string has to arrive carrying its
+own quotes. Nothing in this header can tell valid JSON from anything else, so bytes that are not
+a well formed value produce a document that is not one either, and the reader on the far side is
+what finds out. The bytes are borrowed, as with every other string, and there is no copying form.
+
+**`arnm_json_read_is_null()`** in `arnm/json_reader.h`. `null` was the one JSON type a table
+entry could not ask about: every other type is named by the entry that reads it, but `null` is
+the member saying it holds no value, so a typed entry refuses it with
+`ARNM_ERROR_INVALID_ENUM_TYPE` and every field behind it in the table goes unread. Take the
+member as a handle with `ARNM_JSON_FIELD_VALUE()`, ask here, and name its type only once the
+answer says there is one. A NULL handle answers false -- a member that is not there and a member
+that is `null` are different things, and the mask from the walk is what tells them apart.
+
+**Two fixes found while the docs were brought back in line.** A refusal at a field with no key
+was recorded under the empty string rather than the `"[]"` sentinel
+`arnm_json_writer_error_field()` documents, which folded it together with a refusal belonging to
+no field at all. And the size estimate read `ARNM_JSON_WRITE_PRETTY` against the serializer's
+own flag set rather than this header's -- the two agree on that bit by coincidence and not on
+`ARNM_JSON_WRITE_PRETTY_TWO_SPACES`, so a two-space document was estimated as if it were
+minified.
+
 ## 0.7.6 -- 2026-08-31
 
 `arnm/fixed_ring.h`, a bounded queue. Elements enter at the back and leave at the front, in one

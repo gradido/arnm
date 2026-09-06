@@ -33,9 +33,9 @@ extern "C" {
  * arnm_json_writer writer;
  * arnm_json_writer_init(&writer, scratch, ARNM_JSON_WRITE_DEFAULT, NULL);
  *
- * arnm_json_writer_add_string(&writer, "host", config.host);
- * arnm_json_writer_add_uint64(&writer, "port", config.port);
- * arnm_json_writer_add_bool(&writer, "debug", config.debug);
+ * arnm_json_writer_add_string(&writer, "host", 4, config.host);
+ * arnm_json_writer_add_uint64(&writer, "port", 4, config.port);
+ * arnm_json_writer_add_bool(&writer, "debug", 5, config.debug);
  *
  * arnm_memory_block text;
  * if (ARNM_SUCCESS == arnm_json_writer_write(&writer, output, &text, NULL)) {
@@ -57,14 +57,14 @@ extern "C" {
  * ### Nesting, and why it counts its own levels
  *
  * @code
- * arnm_json_writer_open_object(&writer, "address");
- * arnm_json_writer_add_string(&writer, "city", config.city);
+ * arnm_json_writer_open_object(&writer, "address", 7);
+ * arnm_json_writer_add_string(&writer, "city", 4, config.city);
  * arnm_json_writer_close(&writer);
  *
- * arnm_json_writer_open_array(&writer, "peers");
+ * arnm_json_writer_open_array(&writer, "peers", 5);
  * for (uint32_t i = 0; i < config.peer_count; ++i) {
- *   arnm_json_writer_open_object(&writer, NULL);          // NULL key: an array element
- *   arnm_json_writer_add_string(&writer, "name", config.peers[i].name);
+ *   arnm_json_writer_open_object(&writer, NULL, 0);       // NULL key: an array element
+ *   arnm_json_writer_add_string(&writer, "name", 4, config.peers[i].name);
  *   arnm_json_writer_close(&writer);
  * }
  * arnm_json_writer_close(&writer);
@@ -78,6 +78,27 @@ extern "C" {
  * A key of NULL means "an element of the current array", exactly as a NULL key means "the value
  * itself" on the reading side. Naming a key inside an array, or leaving it out inside an
  * object, is @ref ARNM_ERROR_INVALID_PARAM.
+ *
+ * ### Every key carries its own length
+ *
+ * The key and its length go in side by side, and the length is the one that counts: the key is
+ * never walked looking for a terminator, and it does not have to have one. In a mapper a key is
+ * almost always a literal, where its length is a constant the compiler already knows -- so the
+ * one `strlen` per field that nothing asked for simply stops happening.
+ *
+ * @code
+ * #define KEY(literal) literal, sizeof(literal) - 1u
+ *
+ * arnm_json_writer_add_uint64(&writer, KEY("port"), config.port);   // or "port", 4
+ * arnm_json_writer_add_string(&writer, name, name_length, value);   // a name from elsewhere
+ * @endcode
+ *
+ * A length that is not the key's real length is not caught: too short writes a truncated name
+ * into the document, too long reads past the key. Where the key comes from a table or a builder
+ * rather than a literal, pass the length that came with it.
+ *
+ * With a NULL key the length is ignored; pass 0. The name a refusal is recorded under is
+ * `"[]"` there, and the writer measures that sentinel itself.
  *
  * ### Strings are borrowed
  *
@@ -137,8 +158,9 @@ extern "C" {
  * significant digits behind `-0.00000` is twenty-five -- `-0.0000018498776203445192` is one such
  * `double`, and nothing a `double` can hold is longer than that.
  *
- * @ref arnm_json_writer_size() charges this for every real number it cannot know the length of
- * in advance, which is where its answer stops being exact.
+ * Nothing measures with it any more -- @ref arnm_json_writer_buffer_size_min() estimates from
+ * the element count and the serializer grows its own buffer -- but it is still the honest
+ * ceiling for a caller sizing a field of its own around one rendered `double`.
  */
 #define ARNM_JSON_WRITER_MAX_NUMBER_TEXT 25
 
@@ -385,9 +407,9 @@ const char *arnm_json_writer_error_field(const arnm_json_writer *writer);
 /**
  * @brief Forget the recorded error and let the writing count again.
  *
- * The document, the open levels and the size already accounted for are all untouched; only the
- * verdict is cleared. What a refused field would have written is not there and does not come
- * back -- clearing says "go on from here", not "try that again".
+ * The document and the open levels are untouched; only the verdict is cleared. What a refused field
+ * would have written is not there and does not come back -- clearing says "go on from here", not
+ * "try that again".
  *
  * @param[in,out] writer Writer to clear; not NULL and initialized.
  * @retval ARNM_SUCCESS               Cleared, whether or not there was anything to clear.
@@ -410,43 +432,55 @@ uint32_t arnm_json_writer_depth(const arnm_json_writer *writer);
 
 /*
  * Every call below adds one field to the container currently open, under @p key when that is an
- * object and with @p key NULL when it is an array. None of them returns anything: what could
- * have gone wrong is recorded under @p key and asked about once, and the first of these is what
- * stays.
+ * object and with @p key NULL when it is an array. Each one takes @p key_length beside the key
+ * and reads exactly that many bytes of it -- see "Every key carries its own length" above. None
+ * of them returns anything: what could have gone wrong is recorded under @p key and asked about
+ * once, and the first of these is what stays.
  *
  *   ARNM_ERROR_INVALID_PARAM        a key inside an array, or none inside an object
  *   ARNM_ERROR_OUT_OF_MEMORY        the allocator had nothing left
- *   ARNM_ERROR_ARITHMETIC_OVERFLOW  the text would grow past what a uint32_t can measure
+ *   ARNM_ERROR_RESOURCE_SIZE_EXCEED a hex or base64 block whose text would pass ARNM_MAX_ALLOC_SIZE
  *   ARNM_ERROR_RESOURCE_EXHAUSTED   more levels open than ARNM_JSON_WRITER_MAX_DEPTH allows
  *   ARNM_ERROR_INVALID_STATE        every level is closed and the document is finished
+ *
+ * A document whose text outgrows what a uint32_t can measure is not refused here -- nothing on
+ * this side counts the text any more -- but at @ref arnm_json_writer_write(), which answers
+ * @ref ARNM_ERROR_ARITHMETIC_OVERFLOW.
  *
  * Once anything is recorded the writer stops building, so a run of calls after a failure costs
  * nothing and changes nothing.
  */
 
-/** @brief Add the literal `null`. @param writer Writer. @param key Field name, NULL in an array. */
+/** @brief Add the literal `null`.
+ *  @param[in,out] writer     Writer to add to; may be NULL.
+ *  @param[in]     key        Field name, or NULL for an element of the current array.
+ *  @param[in]     key_length Bytes of @p key to read; ignored when @p key is NULL.
+ */
 void arnm_json_writer_add_null(arnm_json_writer *writer, const char *key, size_t key_length);
 
 /** @brief Add `true` or `false`.
- *  @param[in,out] writer Writer to add to; may be NULL.
- *  @param[in]     key    Field name, or NULL for an element of the current array.
- *  @param[in]     value  What to write. */
+ *  @param[in,out] writer     Writer to add to; may be NULL.
+ *  @param[in]     key        Field name, or NULL for an element of the current array.
+ *  @param[in]     key_length Bytes of @p key to read; ignored when @p key is NULL.
+ *  @param[in]     value      What to write. */
 void arnm_json_writer_add_bool(
     arnm_json_writer *writer, const char *key, size_t key_length, bool value
 );
 
 /** @brief Add a signed integer, written whole and without an exponent.
- *  @param[in,out] writer Writer to add to; may be NULL.
- *  @param[in]     key    Field name, or NULL for an element of the current array.
- *  @param[in]     value  What to write. */
+ *  @param[in,out] writer     Writer to add to; may be NULL.
+ *  @param[in]     key        Field name, or NULL for an element of the current array.
+ *  @param[in]     key_length Bytes of @p key to read; ignored when @p key is NULL.
+ *  @param[in]     value      What to write. */
 void arnm_json_writer_add_int64(
     arnm_json_writer *writer, const char *key, size_t key_length, int64_t value
 );
 
 /** @brief Add an unsigned integer, written whole and without an exponent.
- *  @param[in,out] writer Writer to add to; may be NULL.
- *  @param[in]     key    Field name, or NULL for an element of the current array.
- *  @param[in]     value  What to write. */
+ *  @param[in,out] writer     Writer to add to; may be NULL.
+ *  @param[in]     key        Field name, or NULL for an element of the current array.
+ *  @param[in]     key_length Bytes of @p key to read; ignored when @p key is NULL.
+ *  @param[in]     value      What to write. */
 void arnm_json_writer_add_uint64(
     arnm_json_writer *writer, const char *key, size_t key_length, uint64_t value
 );
@@ -454,14 +488,16 @@ void arnm_json_writer_add_uint64(
 /**
  * @brief Add a real number, in the shortest form that reads back as the same `double`.
  *
- * @param[in,out] writer Writer to add to; may be NULL.
- * @param[in]     key    Field name, or NULL for an element of the current array.
- * @param[in]     value  What to write.
+ * @param[in,out] writer     Writer to add to; may be NULL.
+ * @param[in]     key        Field name, or NULL for an element of the current array.
+ * @param[in]     key_length Bytes of @p key to read; ignored when @p key is NULL.
+ * @param[in]     value      What to write.
  * @note A non-finite value needs @ref ARNM_JSON_WRITE_INF_AND_NAN_AS_NULL, which writes it as
  *       `null`; without it the write refuses the whole document rather than this one field.
  *       This build has no way to spell `Infinity` or `NaN` in the output at all, so `null` or a
  *       refusal are the only two answers -- see the flags section.
- * @note This is the one value @ref arnm_json_writer_size() cannot measure exactly beforehand.
+ * @note This is the one value whose rendered length is not known until it is rendered;
+ *       @ref ARNM_JSON_WRITER_MAX_NUMBER_TEXT is the ceiling it cannot pass.
  */
 void arnm_json_writer_add_double(
     arnm_json_writer *writer, const char *key, size_t key_length, double value
@@ -473,11 +509,12 @@ void arnm_json_writer_add_double(
  * Nothing is copied and nothing is measured beyond its length: @p value and @p key both have to
  * stay unchanged and in place until @ref arnm_json_writer_write() has run.
  *
- * @param[in,out] writer Writer to add to; may be NULL.
- * @param[in]     key    Field name, or NULL for an element of the current array.
- * @param[in]     value  NUL terminated bytes to write, or NULL for the literal `null` -- which
- *                       is what an absent optional member usually means. Where a NULL pointer
- *                       would be a mistake, catch it before it gets here.
+ * @param[in,out] writer     Writer to add to; may be NULL.
+ * @param[in]     key        Field name, or NULL for an element of the current array.
+ * @param[in]     key_length Bytes of @p key to read; ignored when @p key is NULL.
+ * @param[in]     value      NUL terminated bytes to write, or NULL for the literal `null` -- which
+ *                           is what an absent optional member usually means. Where a NULL
+ *                           pointer would be a mistake, catch it before it gets here.
  * @whisper Lent to the page, never lifted from its place
  */
 void arnm_json_writer_add_string(
@@ -487,26 +524,55 @@ void arnm_json_writer_add_string(
 /**
  * @brief @ref arnm_json_writer_add_string() for bytes that are not NUL terminated.
  *
- * @param[in,out] writer Writer to add to; may be NULL.
- * @param[in]     key    Field name, or NULL for an element of the current array.
- * @param[in]     value  Bytes to write; NULL writes the literal `null`. An embedded NUL is
- *                       carried through as `\\u0000`, which is what @p length is for.
- * @param[in]     length Bytes in @p value.
+ * @param[in,out] writer     Writer to add to; may be NULL.
+ * @param[in]     key        Field name, or NULL for an element of the current array.
+ * @param[in]     key_length Bytes of @p key to read; ignored when @p key is NULL.
+ * @param[in]     value      Bytes to write; NULL writes the literal `null`. An embedded NUL is
+ *                           carried through as `\\u0000`, which is what @p length is for.
+ * @param[in]     length     Bytes in @p value.
  */
 void arnm_json_writer_add_string_length(
     arnm_json_writer *writer, const char *key, size_t key_length, const char *value, uint32_t length
 );
 
-/*
- * write string directly into json, without escaping or utf8 check
- * 
- * @param[in,out] writer Writer to add to; may be NULL.
- * @param[in]     key    Field name, or NULL for an element of the current array.
- * @param[in]     value  Bytes to write; NULL writes the literal `null`.
- * @param[in]     length Bytes in @p value.
-*/
+/**
+ * @brief Add bytes that are already JSON, copied into the text exactly as they stand.
+ *
+ * The escape hatch under @ref arnm_json_writer_add_string_length(): @p value is not quoted, not
+ * escaped and not looked at, it is laid into the output verbatim. That makes it the way to put
+ * a fragment somebody else already rendered where a value goes -- a cached object, a number
+ * formatted by hand to a precision this header has no flag for, a payload that came in as JSON
+ * and is going straight back out.
+ *
+ * Because nothing is added, a string has to arrive already carrying its own quotes:
+ *
+ * @code
+ * arnm_json_writer_add_string_raw(&writer, "cached", 6, "{\"a\":1}", 7);  // -> "cached":{"a":1}
+ * arnm_json_writer_add_string_raw(&writer, "name", 4, "\"arnm\"", 6);     // -> "name":"arnm"
+ * arnm_json_writer_add_string_raw(&writer, "name", 4, "arnm", 4);        // -> "name":arnm, broken
+ * @endcode
+ *
+ * @param[in,out] writer     Writer to add to; may be NULL.
+ * @param[in]     key        Field name, or NULL for an element of the current array.
+ * @param[in]     key_length Bytes of @p key to read; ignored when @p key is NULL.
+ * @param[in]     value      Bytes to write through untouched; NULL writes the literal `null`.
+ * @param[in]     length     Bytes in @p value.
+ * @warning The bytes are borrowed, exactly as @ref arnm_json_writer_add_string() borrows them,
+ *          and have to stay in place until @ref arnm_json_writer_write() has run.
+ * @warning Nothing here can tell valid JSON from anything else. Bytes that are not a well
+ *          formed JSON value produce a document that is not one either, and no call in this
+ *          header will say so -- the reader on the far side is what finds out. Everything the
+ *          writer normally does for a string, it does not do here: no quoting, no escaping of
+ *          `"` or `\`, no control character escapes, no UTF-8 check, and neither
+ *          @ref ARNM_JSON_WRITE_ESCAPE_UNICODE nor @ref ARNM_JSON_WRITE_ESCAPE_SLASHES
+ *          reaches these bytes. Use it where the fragment is already trusted JSON, and
+ *          @ref arnm_json_writer_add_string_length() everywhere else.
+ * @note There is no copying form. A raw fragment is borrowed or it is not written; where it
+ *       will not stand still, copy it into the caller's own storage first.
+ * @whisper Handed through the gate unread, on the word of whoever brought it
+ */
 void arnm_json_writer_add_string_raw(
-  arnm_json_writer* writer, const char* key, size_t key_length, const char* value, uint32_t length
+    arnm_json_writer *writer, const char *key, size_t key_length, const char *value, uint32_t length
 );
 
 /**
@@ -517,9 +583,10 @@ void arnm_json_writer_add_string_raw(
  * document and goes back with it. The key is still borrowed -- a key is almost always a
  * literal, and the one that is not can be copied by the caller.
  *
- * @param[in,out] writer Writer to add to; may be NULL.
- * @param[in]     key    Field name, or NULL for an element of the current array.
- * @param[in]     value  NUL terminated bytes to copy, or NULL for the literal `null`.
+ * @param[in,out] writer     Writer to add to; may be NULL.
+ * @param[in]     key        Field name, or NULL for an element of the current array.
+ * @param[in]     key_length Bytes of @p key to read; ignored when @p key is NULL.
+ * @param[in]     value      NUL terminated bytes to copy, or NULL for the literal `null`.
  * @whisper Taken along, because the road ahead is longer than the ground it stood on
  */
 void arnm_json_writer_add_string_copy(
@@ -529,10 +596,11 @@ void arnm_json_writer_add_string_copy(
 /**
  * @brief @ref arnm_json_writer_add_string_copy() for bytes that are not NUL terminated.
  *
- * @param[in,out] writer Writer to add to; may be NULL.
- * @param[in]     key    Field name, or NULL for an element of the current array.
- * @param[in]     value  Bytes to copy; NULL writes the literal `null`.
- * @param[in]     length Bytes in @p value.
+ * @param[in,out] writer     Writer to add to; may be NULL.
+ * @param[in]     key        Field name, or NULL for an element of the current array.
+ * @param[in]     key_length Bytes of @p key to read; ignored when @p key is NULL.
+ * @param[in]     value      Bytes to copy; NULL writes the literal `null`.
+ * @param[in]     length     Bytes in @p value.
  */
 void arnm_json_writer_add_string_copy_length(
     arnm_json_writer *writer, const char *key, size_t key_length, const char *value, uint32_t length
@@ -561,13 +629,14 @@ void arnm_json_writer_add_string_copy_length(
  * the bytes are a key, a hash, a signature or a payload -- which is nearly everywhere a binary
  * field meets JSON.
  *
- * @param[in,out] writer Writer to add to; may be NULL.
- * @param[in]     key    Field name, or NULL for an element of the current array.
- * @param[in]     data   Bytes to render; NULL writes the empty string.
- * @param[in]     size   How many, 0 writing the empty string. Past
- *                       `(ARNM_MAX_ALLOC_SIZE - 3) / 2` the field is refused with
- *                       @ref ARNM_ERROR_RESOURCE_SIZE_EXCEED, which
- *                       @ref arnm_json_writer_status() answers with.
+ * @param[in,out] writer     Writer to add to; may be NULL.
+ * @param[in]     key        Field name, or NULL for an element of the current array.
+ * @param[in]     key_length Bytes of @p key to read; ignored when @p key is NULL.
+ * @param[in]     data       Bytes to render; NULL writes the empty string.
+ * @param[in]     size       How many, 0 writing the empty string. Past
+ *                           `(ARNM_MAX_ALLOC_SIZE - 3) / 2` the field is refused with
+ *                           @ref ARNM_ERROR_RESOURCE_SIZE_EXCEED, which
+ *                           @ref arnm_json_writer_status() answers with.
  * @note @p data is read here and never again: unlike the value
  *       @ref arnm_json_writer_add_string() takes, it does not have to stay standing until the
  *       write. @p key still does -- every adder borrows the key, as the group note above says.
@@ -594,13 +663,14 @@ void arnm_json_writer_add_hex(
  * transaction id. This where it is a payload nobody reads directly and its length is what
  * matters.
  *
- * @param[in,out] writer Writer to add to; may be NULL.
- * @param[in]     key    Field name, or NULL for an element of the current array.
- * @param[in]     data   Bytes to encode; NULL writes the empty string.
- * @param[in]     size   How many, 0 writing the empty string. Past
- *                       `((ARNM_MAX_ALLOC_SIZE - 3) / 4) * 3` the field is refused with
- *                       @ref ARNM_ERROR_RESOURCE_SIZE_EXCEED, which
- *                       @ref arnm_json_writer_status() answers with.
+ * @param[in,out] writer     Writer to add to; may be NULL.
+ * @param[in]     key        Field name, or NULL for an element of the current array.
+ * @param[in]     key_length Bytes of @p key to read; ignored when @p key is NULL.
+ * @param[in]     data       Bytes to encode; NULL writes the empty string.
+ * @param[in]     size       How many, 0 writing the empty string. Past
+ *                           `((ARNM_MAX_ALLOC_SIZE - 3) / 4) * 3` the field is refused with
+ *                           @ref ARNM_ERROR_RESOURCE_SIZE_EXCEED, which
+ *                           @ref arnm_json_writer_status() answers with.
  * @note @p data is read here and never again and does not have to outlive the call. @p key
  *       still does, as with every adder.
  * @whisper Three bytes fold into four letters, on a page that will not ask them to shout
@@ -620,12 +690,13 @@ void arnm_json_writer_add_base64(
  * Nothing is validated -- any 16 bytes are a uuid here, as they are in arnm_uuid_to_string();
  * version and variant are the caller's business.
  *
- * @param[in,out] writer Writer to add to; may be NULL.
- * @param[in]     key    Field name, or NULL for an element of the current array.
- * @param[in]     uuid   The 16 bytes, or NULL for the literal `null`. There is no size here
- *                       that could make an absent uuid an empty one, which is why NULL is the
- *                       member that is not there rather than the empty string
- *                       @ref arnm_json_writer_add_hex() writes for a block of no bytes.
+ * @param[in,out] writer     Writer to add to; may be NULL.
+ * @param[in]     key        Field name, or NULL for an element of the current array.
+ * @param[in]     key_length Bytes of @p key to read; ignored when @p key is NULL.
+ * @param[in]     uuid       The 16 bytes, or NULL for the literal `null`. There is no size
+ *                           here that could make an absent uuid an empty one, which is why
+ *                           NULL is the member that is not there rather than the empty string
+ *                           @ref arnm_json_writer_add_hex() writes for a block of no bytes.
  * @note @p uuid is read here and never again and does not have to outlive the call. @p key
  *       still does, as with every adder.
  * @whisper Sixteen bytes take the shape the world reads them by, on the page they were written for
@@ -639,8 +710,9 @@ void arnm_json_writer_add_uuid(
 /**
  * @brief Open an object and add every field that follows to it.
  *
- * @param[in,out] writer Writer to descend in; may be NULL.
- * @param[in]     key    Field name, or NULL for an element of the current array.
+ * @param[in,out] writer     Writer to descend in; may be NULL.
+ * @param[in]     key        Field name, or NULL for an element of the current array.
+ * @param[in]     key_length Bytes of @p key to read; ignored when @p key is NULL.
  * @note Every open needs a @ref arnm_json_writer_close(). One that is missing is not an error
  *       and not a refusal: the container simply stays open, and the write closes it.
  * @whisper One level down, and the way back kept here
@@ -650,8 +722,9 @@ void arnm_json_writer_open_object(arnm_json_writer *writer, const char *key, siz
 /**
  * @brief Open an array and add every field that follows to it, keys left out.
  *
- * @param[in,out] writer Writer to descend in; may be NULL.
- * @param[in]     key    Field name, or NULL for an element of the current array.
+ * @param[in,out] writer     Writer to descend in; may be NULL.
+ * @param[in]     key        Field name, or NULL for an element of the current array.
+ * @param[in]     key_length Bytes of @p key to read; ignored when @p key is NULL.
  */
 void arnm_json_writer_open_array(arnm_json_writer *writer, const char *key, size_t key_length);
 
@@ -668,8 +741,34 @@ void arnm_json_writer_close(arnm_json_writer *writer);
 // ********** measuring and writing *******************
 
 /**
-* try to estimate buffer size needed by writer, don't work for extra long value
-*/
+ * @brief A rough guess at the bytes the finished text will need, terminator included.
+ *
+ * The writer used to keep a running length that was exact, and paid one table lookup per string
+ * byte for the privilege -- on every string, on every document, whether anyone ever asked. It
+ * no longer counts anything. What it keeps instead is how many values have gone in, and this
+ * call turns that count into a number: a flat charge per element, more of one under a pretty
+ * layout than under a minified one, plus a floor so the smallest documents are not guessed down
+ * to nothing.
+ *
+ * That makes it a **guess and not a bound in either direction**. It says nothing about a
+ * document holding one long string, one large hex blob or a run of `\uXXXX` escapes, all of
+ * which run past it; and it is generous about a document of short integers, which comes out
+ * well under. Nothing in this header relies on it -- @ref arnm_json_writer_write() no longer
+ * reserves against it, and the serializer grows its own buffer as the text needs.
+ *
+ * What it is for is the one thing a guess is good for: opening an arena at roughly the right
+ * size, so the common document is written without a grow and an uncommon one costs one. A
+ * caller that has to know the exact length has to write the text and read it back from
+ * @ref arnm_json_writer_write().
+ *
+ * @param[in] writer Writer to ask; may be NULL.
+ * @return The estimate, or 0 without a document and for NULL. Saturates at
+ *         @ref ARNM_MAX_ALLOC_SIZE.
+ * @note Free to ask, at any point: the count is already there and the document is never walked.
+ * @warning Never size a fixed buffer by this and copy the text into it. It is a hint, not a
+ *          promise, and the text is regularly longer.
+ * @whisper A glance at the pile, not a count of the pages
+ */
 uint32_t arnm_json_writer_buffer_size_min(const arnm_json_writer *writer);
 
 /**
@@ -678,6 +777,11 @@ uint32_t arnm_json_writer_buffer_size_min(const arnm_json_writer *writer);
  * Every open container is closed, the text is rendered under the flags the writer was
  * initialized with, and what comes back is a plain arnm allocation the caller owns: NUL
  * terminated, and shrunk to exactly what the text needed before it is handed over.
+ *
+ * The serializer renders straight into @p allocator and grows there as it goes, so the text is
+ * never written twice: what @p out points at is the buffer it was built in, shrunk to fit. The
+ * serializer keeps its own working state at the far end of that buffer while the call runs and
+ * gives it back before returning, which is what the shrink reclaims.
  *
  * A writer carrying an error writes nothing and answers that error, so this one result stands
  * in for a check after every field.
@@ -697,6 +801,9 @@ uint32_t arnm_json_writer_buffer_size_min(const arnm_json_writer *writer);
  * @retval ARNM_ERROR_NOT_INITIALIZED     @p writer was never initialized.
  * @retval ARNM_ERROR_INVALID_STATE       No document was ever begun.
  * @retval ARNM_ERROR_OUT_OF_MEMORY       @p allocator had nothing left.
+ * @retval ARNM_ERROR_ARITHMETIC_OVERFLOW The text is longer than a uint32_t can measure. The
+ *                                        bytes were rendered and are dropped; nothing is
+ *                                        written to @p out.
  * @retval ARNM_ERROR_ENCODE_FAILED       A non-finite number without
  *                                        @ref ARNM_JSON_WRITE_INF_AND_NAN_AS_NULL. Malformed
  *                                        UTF-8 does not reach this: it is written through

@@ -14,12 +14,20 @@
 #include <vector>
 
 // The writer is opaque from here on purpose: these tests only ever see what a consumer sees.
-// Two things are checked over and over. That a struct written field by field comes out as the
-// text it should, byte for byte -- and that arnm_json_writer_size() knew that length before a
-// byte of it existed.
+// What is checked over and over is that a struct written field by field comes out as the text
+// it should, byte for byte, under every layout the flags allow.
+//
+// The sizing is deliberately *not* checked that way any more. arnm_json_writer_buffer_size_min()
+// replaced a running length that was exact with a guess made from the element count, so there
+// is no promise left to hold it to -- the tests below pin what it still claims (it grows, it
+// follows the layout, it is free to ask) and one of them pins that it is not a bound.
 
-#define LONG_CONTENT_STRING "A well-written JSON document is like a well-written program: every brace has a purpose, every comma has a place, and nothing should escape without being properly encoded."
-#define LONG_CONTENT_STRING_QUOTED "\"A well-written JSON document is like a well-written program: every brace has a purpose, every comma has a place, and nothing should escape without being properly encoded.\""
+#define LONG_CONTENT_STRING                                                                        \
+  "A well-written JSON document is like a well-written program: every brace has a purpose, every " \
+  "comma has a place, and nothing should escape without being properly encoded."
+#define LONG_CONTENT_STRING_QUOTED                                                                 \
+  "\"A well-written JSON document is like a well-written program: every brace has a purpose, "     \
+  "every comma has a place, and nothing should escape without being properly encoded.\""
 
 namespace {
 
@@ -65,10 +73,10 @@ uintptr_t ArenaMark(arnm *arena) {
 }
 
 /**
- * Write, hand back the text, and check the promise the size call made about it.
+ * Write and hand back the text, checking what still holds for every document.
  *
- * Every test that writes goes through here, so the measurement is not something a few tests
- * remember to check -- it is checked on every document any of them ever builds.
+ * Every test that writes goes through here, so the terminator and the reported length are
+ * agreed on once rather than in the tests that remember to ask.
  */
 std::string Write(arnm_json_writer *writer, arnm *allocator) {
   arnm_memory_block block{};
@@ -77,10 +85,9 @@ std::string Write(arnm_json_writer *writer, arnm *allocator) {
   EXPECT_EQ(result, ARNM_SUCCESS);
   if (ARNM_SUCCESS != result) { return {}; }
 
-
   EXPECT_EQ(std::strlen(reinterpret_cast<const char *>(block.data)), length)
       << "JSON never holds a NUL byte, so the terminator and the length have to agree";
-  
+
   std::string text(reinterpret_cast<const char *>(block.data), length);
   EXPECT_EQ(arnm_memory_block_free(&block, allocator), ARNM_SUCCESS);
   return text;
@@ -228,11 +235,12 @@ TEST(JsonWriter, AStructGoesOutInOneRunAndIsAskedAboutOnce) {
 TEST(JsonWriter, AnEmptyDocumentIsStillADocument) {
   ArenaWriter owner;
   ASSERT_EQ(arnm_json_writer_begin_object(owner.writer()), ARNM_SUCCESS);
-  EXPECT_EQ(arnm_json_writer_buffer_size_min(owner.writer()), 96u) << "{} and the terminator";
+  EXPECT_EQ(arnm_json_writer_buffer_size_min(owner.writer()), 96u)
+      << "the root counts as one element, and the floor is what the rest of this is";
   EXPECT_EQ(Write(owner.writer(), owner.arena()), "{}");
 
   ASSERT_EQ(arnm_json_writer_begin_array(owner.writer()), ARNM_SUCCESS);
-  EXPECT_EQ(arnm_json_writer_buffer_size_min(owner.writer()), 96u) << "[] and the terminator";
+  EXPECT_EQ(arnm_json_writer_buffer_size_min(owner.writer()), 96u) << "and the same for an array";
   EXPECT_EQ(Write(owner.writer(), owner.arena()), "[]");
 }
 
@@ -312,34 +320,99 @@ TEST(JsonWriter, PrettyPutsOneValueOnEachLine) {
   );
 }
 
-TEST(JsonWriter, ANewlineAtTheEndIsMeasuredToo) {
+TEST(JsonWriter, ANewlineAtTheEndComesAheadOfTheTerminator) {
   ArenaWriter owner(ARNM_JSON_WRITE_NEWLINE_AT_END);
   arnm_json_writer_add_uint64(owner.writer(), "n", 1, 1);
   EXPECT_EQ(Write(owner.writer(), owner.arena()), "{\"n\":1}\n");
 }
 
-TEST(JsonWriter, BigContentTriggerRealocate) {
+TEST(JsonWriter, AValueLongerThanTheEstimateIsStillWrittenWhole) {
+  // one field of prose is already past what the element count guessed, so the serializer grows
+  // the buffer it was handed mid-write. What comes back has to be the whole text regardless.
   ArenaWriter owner;
   arnm_json_writer_add_string_length(
-      owner.writer(), "n", 1,
-    LONG_CONTENT_STRING, sizeof(LONG_CONTENT_STRING)-1
+      owner.writer(), "n", 1, LONG_CONTENT_STRING, sizeof(LONG_CONTENT_STRING) - 1u
   );
-  std::string result = "{\"n\":\"";
-  result += LONG_CONTENT_STRING;
-  result += "\"}";
-  EXPECT_EQ(Write(owner.writer(), owner.arena()), result);
+
+  const std::string expected = std::string("{\"n\":\"") + LONG_CONTENT_STRING + "\"}";
+  EXPECT_EQ(Write(owner.writer(), owner.arena()), expected);
 }
 
-TEST(JsonWriter, BigContentTriggerRealocateRaw) {
+TEST(JsonWriter, AValueLongerThanTheEstimateIsStillWrittenWholeRaw) {
+  // the same through the raw adder, which grows the same buffer without the escaping pass
   ArenaWriter owner;
   arnm_json_writer_add_string_raw(
-    owner.writer(), "n", 1,
-    LONG_CONTENT_STRING_QUOTED, sizeof(LONG_CONTENT_STRING_QUOTED)-1
+      owner.writer(), "n", 1, LONG_CONTENT_STRING_QUOTED, sizeof(LONG_CONTENT_STRING_QUOTED) - 1u
   );
-  std::string result = "{\"n\":\"";
-  result += LONG_CONTENT_STRING;
-  result += "\"}";
-  EXPECT_EQ(Write(owner.writer(), owner.arena()), result);
+
+  const std::string expected = std::string("{\"n\":\"") + LONG_CONTENT_STRING + "\"}";
+  EXPECT_EQ(Write(owner.writer(), owner.arena()), expected);
+}
+
+// ---------------------------------------------------------------------------
+// keys carry their own length
+// ---------------------------------------------------------------------------
+
+TEST(JsonWriter, AKeyIsReadForExactlyItsLengthAndNotToATerminator) {
+  // the whole reason the length is a parameter: the writer never walks the key. A name that
+  // sits inside a larger buffer is written from where it starts for as far as it was told,
+  // and the bytes behind it are none of its business.
+  const char names[] = "hostportdebug";
+
+  ArenaWriter owner;
+  arnm_json_writer_add_string(owner.writer(), names + 0, 4, "arnm");
+  arnm_json_writer_add_uint64(owner.writer(), names + 4, 4, 8443);
+  arnm_json_writer_add_bool(owner.writer(), names + 8, 5, true);
+
+  EXPECT_EQ(
+      Write(owner.writer(), owner.arena()), "{\"host\":\"arnm\",\"port\":8443,\"debug\":true}"
+  );
+}
+
+TEST(JsonWriter, AKeyNeedsNoTerminatorAtAll) {
+  // no NUL anywhere in this buffer; a writer that reached for one would run into the next test
+  const char key[3] = {'k', 'e', 'y'};
+
+  ArenaWriter owner;
+  arnm_json_writer_add_uint64(owner.writer(), key, sizeof(key), 1);
+  EXPECT_EQ(Write(owner.writer(), owner.arena()), "{\"key\":1}");
+}
+
+TEST(JsonWriter, AShorterLengthTruncatesTheKeyRatherThanBeingCaught) {
+  // the length is taken at its word. Nothing checks it against the key, so a wrong one is a
+  // wrong name in the document and not a refusal -- which is what the header warns about.
+  ArenaWriter owner;
+  arnm_json_writer_add_uint64(owner.writer(), "port", 2, 8443);
+  EXPECT_EQ(Write(owner.writer(), owner.arena()), "{\"po\":8443}");
+}
+
+TEST(JsonWriter, AKeyIsEscapedTheSameWayAValueIs) {
+  ArenaWriter owner;
+  arnm_json_writer_add_uint64(owner.writer(), "a\"b", 3, 1);
+  arnm_json_writer_add_uint64(owner.writer(), "a\nb", 3, 2);
+  arnm_json_writer_add_uint64(owner.writer(), "\xC3\xA4", 2, 3);
+
+  EXPECT_EQ(Write(owner.writer(), owner.arena()), "{\"a\\\"b\":1,\"a\\nb\":2,\"\xC3\xA4\":3}");
+}
+
+TEST(JsonWriter, AnEmptyKeyIsAName) {
+  // "" is a legal member name in JSON, and it is not the same thing as NULL -- one names a
+  // member, the other says the container has no names at all
+  ArenaWriter owner;
+  arnm_json_writer_add_uint64(owner.writer(), "", 0, 1);
+  EXPECT_EQ(Write(owner.writer(), owner.arena()), "{\"\":1}");
+}
+
+TEST(JsonWriter, AKeyIsBorrowedLikeEveryOtherString) {
+  char key[] = "first";
+
+  ArenaWriter owner;
+  arnm_json_writer_add_uint64(owner.writer(), key, 5, 1);
+  // nothing was copied, so the name is read at the write and not at the add
+  std::memcpy(key, "SECON", 5);
+
+  EXPECT_EQ(Write(owner.writer(), owner.arena()), "{\"SECON\":1}")
+      << "a copied value does not make its key a copy too";
 }
 
 // ---------------------------------------------------------------------------
@@ -381,7 +454,82 @@ TEST(JsonWriter, AStringMayHoldAnEmbeddedNul) {
   );
 }
 
-TEST(JsonWriter, EveryEscapeIsMeasuredBeforeItIsWritten) {
+// ---------------------------------------------------------------------------
+// raw: bytes that are already JSON
+// ---------------------------------------------------------------------------
+
+TEST(JsonWriter, RawBytesGoIntoTheTextExactlyAsTheyStand) {
+  // nothing is quoted and nothing is escaped, so a fragment arrives carrying whatever it needs
+  // to be a JSON value on its own -- an object, an array, a number, or a string with its quotes
+  ArenaWriter owner;
+  arnm_json_writer_add_string_raw(owner.writer(), "object", 6, "{\"a\":1}", 7);
+  arnm_json_writer_add_string_raw(owner.writer(), "array", 5, "[1,2]", 5);
+  arnm_json_writer_add_string_raw(owner.writer(), "number", 6, "1.50000", 7);
+  arnm_json_writer_add_string_raw(owner.writer(), "text", 4, "\"arnm\"", 6);
+
+  EXPECT_EQ(
+      Write(owner.writer(), owner.arena()),
+      "{\"object\":{\"a\":1},\"array\":[1,2],\"number\":1.50000,\"text\":\"arnm\"}"
+  ) << "a number written by hand keeps the precision no flag in this header could ask for";
+}
+
+TEST(JsonWriter, RawTakesItsPlaceInArraysAndUnderPretty) {
+  ArenaWriter owner(ARNM_JSON_WRITE_PRETTY_TWO_SPACES);
+  arnm_json_writer_open_array(owner.writer(), "cached", 6);
+  arnm_json_writer_add_string_raw(owner.writer(), nullptr, 0, "{\"a\":1}", 7);
+  arnm_json_writer_add_string_raw(owner.writer(), nullptr, 0, "2", 1);
+  arnm_json_writer_close(owner.writer());
+
+  // the fragment is laid down whole: the layout puts it on its own line but does not reach
+  // inside it, so the object it holds stays minified
+  EXPECT_EQ(
+      Write(owner.writer(), owner.arena()), "{\n  \"cached\": [\n    {\"a\":1},\n    2\n  ]\n}"
+  );
+}
+
+TEST(JsonWriter, RawBorrowsItsBytesLikeEveryOtherString) {
+  char fragment[] = "\"first\"";
+
+  ArenaWriter owner;
+  arnm_json_writer_add_string_raw(owner.writer(), "value", 5, fragment, 7);
+  std::memcpy(fragment + 1, "SECON", 5);
+
+  EXPECT_EQ(Write(owner.writer(), owner.arena()), "{\"value\":\"SECON\"}")
+      << "there is no copying form of the raw adder, so the fragment has to stand still";
+}
+
+TEST(JsonWriter, RawOfNothingIsTheLiteralNull) {
+  // the same reading a NULL gets everywhere else in this header: an optional member that is
+  // not there, and not an empty fragment
+  ArenaWriter owner;
+  arnm_json_writer_add_string_raw(owner.writer(), "value", 5, nullptr, 0);
+  EXPECT_EQ(Write(owner.writer(), owner.arena()), "{\"value\":null}");
+}
+
+TEST(JsonWriter, RawIsNotCheckedAndWillWriteADocumentThatIsNotJson) {
+  // pinned rather than left implied. The header warns that nothing here can tell JSON from
+  // anything else, and this is what that costs: the writer succeeds, the text is garbage, and
+  // the reader on the far side is the first thing that notices.
+  ArenaWriter owner;
+  arnm_json_writer_add_string_raw(owner.writer(), "text", 4, "arnm", 4);
+  ASSERT_EQ(arnm_json_writer_status(owner.writer()), ARNM_SUCCESS);
+
+  const std::string written = Write(owner.writer(), owner.arena());
+  EXPECT_EQ(written, "{\"text\":arnm}") << "unquoted, because nothing added the quotes";
+
+  arnm reading{};
+  ASSERT_EQ(arnm_init_arena(&reading, kArenaCapacity), ARNM_SUCCESS);
+  arnm_json_reader reader{};
+  ASSERT_EQ(arnm_json_reader_init(&reader, &reading), ARNM_SUCCESS);
+  arnm_json_value *root = nullptr;
+  EXPECT_NE(
+      arnm_json_reader_parse(&reader, written.c_str(), written.size(), false, &root), ARNM_SUCCESS
+  ) << "the writer let it through; the reader is where it stops";
+  arnm_json_reader_release(&reader);
+  arnm_release(&reading);
+}
+
+TEST(JsonWriter, EveryEscapeIsWrittenTheWayJsonSpellsIt) {
   ArenaWriter owner;
   arnm_json_writer_add_string(owner.writer(), "quote", 5, "a\"b");
   arnm_json_writer_add_string(owner.writer(), "slash", 5, "a\\b");
@@ -402,9 +550,9 @@ TEST(JsonWriter, ASlashIsEscapedOnlyWhenAskedFor) {
   EXPECT_EQ(Write(owner.writer(), owner.arena()), "{\"path\":\"\\/usr\\/bin\"}");
 }
 
-TEST(JsonWriter, UnicodeIsCopiedThroughAndMeasuredExactly) {
+TEST(JsonWriter, UnicodeIsCopiedThroughRatherThanEscaped) {
   // two bytes, three bytes and four bytes of UTF-8, copied rather than escaped: every byte of
-  // the input is one byte of the output, which is a length the measurement knows exactly
+  // the input is one byte of the output
   const char *value = "\xC3\xA4\xE2\x82\xAC\xF0\x9F\x98\x80";
 
   ArenaWriter owner;
@@ -413,17 +561,14 @@ TEST(JsonWriter, UnicodeIsCopiedThroughAndMeasuredExactly) {
   EXPECT_EQ(written, std::string("{\"text\":\"") + value + "\"}");
 }
 
-TEST(JsonWriter, EscapedUnicodeIsMeasuredGenerously) {
+TEST(JsonWriter, EscapedUnicodeBecomesTheSurrogatePairsThatSpellIt) {
   const char *value = "\xC3\xA4\xF0\x9F\x98\x80";
 
   ArenaWriter owner(ARNM_JSON_WRITE_ESCAPE_UNICODE);
   arnm_json_writer_add_string(owner.writer(), "text", 4, value);
-  // six bytes charged for every byte outside ASCII: exact for one escaped alone, and more than
-  // enough for a character whose bytes become a single escape
-  EXPECT_EQ(
-      Write(owner.writer(), owner.arena()),
-      "{\"text\":\"\\u00E4\\uD83D\\uDE00\"}"
-  );
+  // one escape per code point, and a code point past the basic plane spells itself as the
+  // surrogate pair JSON has for it -- two escapes for the four bytes that went in
+  EXPECT_EQ(Write(owner.writer(), owner.arena()), "{\"text\":\"\\u00E4\\uD83D\\uDE00\"}");
 }
 
 // ---------------------------------------------------------------------------
@@ -717,14 +862,15 @@ TEST(JsonWriter, TheFirstRefusalIsTheOneThatStays) {
   // an element without a name, inside an object that needs one
   arnm_json_writer_add_uint64(owner.writer(), nullptr, 0, 2);
   EXPECT_EQ(arnm_json_writer_status(owner.writer()), ARNM_ERROR_INVALID_PARAM);
-  EXPECT_STREQ(arnm_json_writer_error_field(owner.writer()), "");
+  EXPECT_STREQ(arnm_json_writer_error_field(owner.writer()), "[]")
+      << "a field with no key belongs to no name, and the sentinel is the name it is filed under";
 
   // everything after it does nothing at all, and changes nothing about the verdict
   arnm_json_writer_add_string(owner.writer(), "later", 5, "value");
   arnm_json_writer_open_object(owner.writer(), "deeper", 6);
   arnm_json_writer_close(owner.writer());
   EXPECT_EQ(arnm_json_writer_status(owner.writer()), ARNM_ERROR_INVALID_PARAM);
-  EXPECT_STREQ(arnm_json_writer_error_field(owner.writer()), "");
+  EXPECT_STREQ(arnm_json_writer_error_field(owner.writer()), "[]");
 
   arnm_memory_block block{};
   EXPECT_EQ(
@@ -746,6 +892,28 @@ TEST(JsonWriter, ANameInsideAnArrayIsRefusedByTheContainer) {
 
   EXPECT_EQ(arnm_json_writer_status(owner.writer()), ARNM_ERROR_INVALID_PARAM);
   EXPECT_STREQ(arnm_json_writer_error_field(owner.writer()), "named");
+}
+
+TEST(JsonWriter, ARefusalWithNoKeyIsFiledUnderTheArraySentinel) {
+  // A field added to an array has no name to record a refusal under, so the writer supplies
+  // one. It is the sentinel and not the empty string, because the empty string is what a
+  // refusal belonging to no field at all wears -- and the two say different things.
+  ArenaWriter deep;
+  arnm_json_writer_open_array(deep.writer(), "list", 4);
+  for (uint32_t level = 2; level < ARNM_JSON_WRITER_MAX_DEPTH; ++level) {
+    arnm_json_writer_open_array(deep.writer(), nullptr, 0);
+  }
+  arnm_json_writer_open_array(deep.writer(), nullptr, 0);
+  EXPECT_EQ(arnm_json_writer_status(deep.writer()), ARNM_ERROR_RESOURCE_EXHAUSTED);
+  EXPECT_STREQ(arnm_json_writer_error_field(deep.writer()), "[]");
+
+  // one close too many belongs to no field, and reads as the empty string
+  ArenaWriter closed;
+  arnm_json_writer_open_object(closed.writer(), "inner", 5);
+  arnm_json_writer_close(closed.writer());
+  arnm_json_writer_close(closed.writer());
+  EXPECT_EQ(arnm_json_writer_status(closed.writer()), ARNM_ERROR_INVALID_STATE);
+  EXPECT_STREQ(arnm_json_writer_error_field(closed.writer()), "");
 }
 
 TEST(JsonWriter, OneCloseTooManyIsRecordedRatherThanSwallowed) {
@@ -822,25 +990,25 @@ TEST(JsonWriter, ANonFiniteNumberIsRefusedOrWrittenAsNull) {
 
   ArenaWriter nan_as_null(ARNM_JSON_WRITE_INF_AND_NAN_AS_NULL);
   arnm_json_writer_add_double(nan_as_null.writer(), "n", 1, infinity - infinity);
-  EXPECT_EQ(
-      Write(nan_as_null.writer(), nan_as_null.arena()), "{\"n\":null}"
-  );
+  EXPECT_EQ(Write(nan_as_null.writer(), nan_as_null.arena()), "{\"n\":null}");
 }
 
 // ---------------------------------------------------------------------------
 // measuring the output before it exists
 // ---------------------------------------------------------------------------
 
-TEST(JsonWriter, TheSizeIsKnownBeforeAByteOfTextExists) {
+TEST(JsonWriter, TheEstimateIsThereBeforeAByteOfTextExists) {
   ArenaWriter owner;
   arnm_json_writer_add_string(owner.writer(), "name", 4, "arnm");
   arnm_json_writer_add_uint64(owner.writer(), "port", 4, 8443);
 
+  // free to ask, and answered from a count the adders already kept -- the document is never
+  // walked and no string is ever measured
   EXPECT_EQ(arnm_json_writer_buffer_size_min(owner.writer()), 160u);
   EXPECT_EQ(Write(owner.writer(), owner.arena()).size(), 27u);
 }
 
-TEST(JsonWriter, TheSizeGrowsWithEveryFieldAndNeverWalksTheDocument) {
+TEST(JsonWriter, TheEstimateGrowsWithEveryFieldAndNeverWalksTheDocument) {
   ArenaWriter owner;
   ASSERT_EQ(arnm_json_writer_begin_object(owner.writer()), ARNM_SUCCESS);
 
@@ -853,13 +1021,14 @@ TEST(JsonWriter, TheSizeGrowsWithEveryFieldAndNeverWalksTheDocument) {
     previous = now;
   }
   ASSERT_EQ(arnm_json_writer_status(owner.writer()), ARNM_SUCCESS);
-  // Buffer size is greater than actually string size
+  // a document of short keys and short integers is where the flat charge per element is
+  // generous, so here the guess comes out above the text -- which is one direction of two
   EXPECT_GT(previous, Write(owner.writer(), owner.arena()).size() + 1u);
 }
 
-TEST(JsonWriter, EveryShapeAndEveryLayoutIsMeasuredExactly) {
-  // the same document under every layout the flags allow, checked through Write() -- which
-  // compares the promise against the text on each one
+TEST(JsonWriter, EveryShapeAndEveryLayoutComesOutWhole) {
+  // the same document under every layout the flags allow: every one of them writes, and every
+  // one of them comes back terminated at the length it reported
   const arnm_json_write_flags layouts[] = {
       ARNM_JSON_WRITE_DEFAULT,
       ARNM_JSON_WRITE_PRETTY,
@@ -948,8 +1117,8 @@ TEST(JsonWriter, TheLongestRealNumberStillFitsItsCharge) {
     arnm_json_writer_add_double(owner.writer(), nullptr, 0, value);
     ASSERT_EQ(arnm_json_writer_status(owner.writer()), ARNM_SUCCESS);
 
-    // Write() itself refuses a measurement that comes out shorter than the text, which is what
-    // a ceiling set too low looks like from here -- a copy past the end of the caller's block.
+    // nothing copies against this ceiling any more, but it is still the number a caller sizes
+    // a buffer of its own by, so a double that renders longer than it would be a lie
     const std::string text = Write(owner.writer(), owner.arena());
     ASSERT_GE(text.size(), 2u);
     EXPECT_LE(text.size() - 2u, ARNM_JSON_WRITER_MAX_NUMBER_TEXT)
@@ -979,10 +1148,10 @@ TEST(JsonWriter, TheCeilingIsReachedByADoubleAndNotMerelyGuessedAt) {
       << "the longest of them rendered as " << longest_text;
 }
 
-TEST(JsonWriter, ADocumentOfLongRealsStaysInsideTheBlockItWasMeasuredFor) {
-  // One double short of its charge is a byte; a document of nothing but those is a byte per
-  // field, and the copy into the caller's block is what runs off the end. The arena puts
-  // something of its own right behind that block, so an overrun lands in it.
+TEST(JsonWriter, ADocumentOfLongRealsIsWrittenWholeWhateverTheEstimateSaid) {
+  // A run of doubles that each render near the ceiling is where the old exact measurement was
+  // at its tightest. Nothing reserves against the estimate any more, so what is checked here is
+  // the part that matters: the text comes out whole and terminated at the length it reports.
   ArenaWriter owner;
   for (int round = 0; round < 8; ++round) {
     for (double value : kCeilingReals) {
@@ -991,14 +1160,50 @@ TEST(JsonWriter, ADocumentOfLongRealsStaysInsideTheBlockItWasMeasuredFor) {
   }
   ASSERT_EQ(arnm_json_writer_status(owner.writer()), ARNM_SUCCESS);
 
-  const uint32_t promised = arnm_json_writer_buffer_size_min(owner.writer());
-
   arnm_memory_block block{};
   uint32_t length = 0;
   ASSERT_EQ(arnm_json_writer_write(owner.writer(), owner.arena(), &block, &length), ARNM_SUCCESS);
-  EXPECT_GE(promised, length + 1u) << "the text did not fit what was reserved for it";
   EXPECT_EQ(std::strlen(reinterpret_cast<const char *>(block.data)), length);
+  EXPECT_GE(block.size, length + 1u) << "the block has to hold the text and its terminator";
   EXPECT_EQ(arnm_memory_block_free(&block, owner.arena()), ARNM_SUCCESS);
+}
+
+TEST(JsonWriter, TheEstimateIsAGuessAndNotABound) {
+  // The one property the old arnm_json_writer_size() had and this call deliberately does not.
+  // Pinned rather than left implied: a caller that sizes a fixed buffer by this number and
+  // copies into it is writing past the end, and the header says so for a reason.
+  ArenaWriter owner;
+  arnm_json_writer_add_string_length(
+      owner.writer(), "n", 1, LONG_CONTENT_STRING, sizeof(LONG_CONTENT_STRING) - 1u
+  );
+
+  const uint32_t estimate = arnm_json_writer_buffer_size_min(owner.writer());
+  const std::string text = Write(owner.writer(), owner.arena());
+  EXPECT_GT(text.size() + 1u, estimate)
+      << "one string of ordinary prose already runs past the guess, which is the point";
+}
+
+TEST(JsonWriter, TheEstimateFollowsTheLayoutItWasAskedFor) {
+  // A pretty document carries an indent and a newline per element that a minified one does not,
+  // and the estimate charges for them. Both pretty spellings count, which is worth its own
+  // check: the flags the writer keeps are the serializer's and not this header's, and the two
+  // do not put PRETTY_TWO_SPACES on the same bit.
+  const arnm_json_write_flags layouts[] = {
+      ARNM_JSON_WRITE_PRETTY,
+      ARNM_JSON_WRITE_PRETTY_TWO_SPACES,
+  };
+
+  ArenaWriter minified(ARNM_JSON_WRITE_DEFAULT);
+  arnm_json_writer_add_uint64(minified.writer(), "a", 1, 1);
+  arnm_json_writer_add_uint64(minified.writer(), "b", 1, 2);
+  const uint32_t flat = arnm_json_writer_buffer_size_min(minified.writer());
+
+  for (arnm_json_write_flags flags : layouts) {
+    ArenaWriter owner(flags);
+    arnm_json_writer_add_uint64(owner.writer(), "a", 1, 1);
+    arnm_json_writer_add_uint64(owner.writer(), "b", 1, 2);
+    EXPECT_GT(arnm_json_writer_buffer_size_min(owner.writer()), flat) << "flags " << flags;
+  }
 }
 
 TEST(JsonWriter, TheTextIsShrunkToWhatItActuallyNeeded) {
@@ -1021,6 +1226,34 @@ TEST(JsonWriter, TheTextIsShrunkToWhatItActuallyNeeded) {
   EXPECT_EQ(ArenaMark(owner.arena()), before) << "and it all comes back";
 }
 
+TEST(JsonWriter, TheTextComesFromTheAllocatorItWasAskedOfAndNotTheWritersOwn) {
+  // The document is built in one arena and the text is rendered into another, which is the
+  // split the header describes. The serializer now grows the output buffer in place rather
+  // than copying out of a scratch one, so the arena the text lands in is the only one that
+  // moves for it.
+  arnm output{};
+  ASSERT_EQ(arnm_init_arena(&output, kArenaCapacity), ARNM_SUCCESS);
+
+  ArenaWriter owner;
+  arnm_json_writer_add_string(owner.writer(), "name", 4, "arnm");
+
+  const uintptr_t document_before = ArenaMark(owner.arena());
+  const uintptr_t output_before = ArenaMark(&output);
+
+  arnm_memory_block block{};
+  uint32_t length = 0;
+  ASSERT_EQ(arnm_json_writer_write(owner.writer(), &output, &block, &length), ARNM_SUCCESS);
+  EXPECT_STREQ(reinterpret_cast<const char *>(block.data), "{\"name\":\"arnm\"}");
+
+  EXPECT_EQ(ArenaMark(owner.arena()), document_before)
+      << "the writer's own arena carries the document and nothing of the text";
+  EXPECT_EQ(ArenaMark(&output) - output_before, ARNM_ALIGN8(length + 1u))
+      << "and the output arena holds the text, shrunk to what it needed";
+
+  EXPECT_EQ(arnm_memory_block_free(&block, &output), ARNM_SUCCESS);
+  EXPECT_EQ(ArenaMark(&output), output_before);
+  arnm_release(&output);
+}
 
 TEST(JsonWriter, TheHostCanCarryTheTextJustAsWell) {
   ArenaWriter owner;

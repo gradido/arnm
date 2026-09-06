@@ -65,16 +65,16 @@
  * of a field, and there is no good answer to half a field.
  */
 typedef struct json_writer_state {
-  json_alc_context alc_context;  /**< Where the document comes from, and what an arena kept. */
-  yyjson_alc alc;                /**< yyjson's hooks, bound to alc_context. */
-  yyjson_mut_doc *doc;           /**< The document being built, or NULL. */
-  yyjson_write_flag write_flags; /**< The public flags, translated once at init. */
-  uint32_t depth;                /**< Containers open, the root counted. */
-  uint32_t elements;             /**< Element counts, used for size estimation. */
-  uint32_t /*arnm_result*/ status;            /**< First error since the document began, or ARNM_SUCCESS. */
-  uint32_t magic;                /**< JSON_WRITER_MAGIC once initialized. */
-  uint32_t hint_values;          /**< Values a document is expected to hold, or 0 for none. */
-  uint32_t hint_string_bytes;    /**< Copied string bytes expected, or 0 for none. */
+  json_alc_context alc_context;    /**< Where the document comes from, and what an arena kept. */
+  yyjson_alc alc;                  /**< yyjson's hooks, bound to alc_context. */
+  yyjson_mut_doc *doc;             /**< The document being built, or NULL. */
+  yyjson_write_flag write_flags;   /**< The public flags, translated once at init. */
+  uint32_t depth;                  /**< Containers open, the root counted. */
+  uint32_t elements;               /**< Element counts, used for size estimation. */
+  uint32_t /*arnm_result*/ status; /**< First error since the document began, or ARNM_SUCCESS. */
+  uint32_t magic;                  /**< JSON_WRITER_MAGIC once initialized. */
+  uint32_t hint_values;            /**< Values a document is expected to hold, or 0 for none. */
+  uint32_t hint_string_bytes;      /**< Copied string bytes expected, or 0 for none. */
   char error_field[ARNM_JSON_WRITER_FIELD_NAME_SIZE]; /**< Field name of @c status, or empty. */
   yyjson_mut_val *stack[ARNM_JSON_WRITER_MAX_DEPTH];  /**< Open containers, root first. */
 } json_writer_state;
@@ -89,6 +89,17 @@ static_assert(
 /** @brief The name a refusal at @p key is recorded under. */
 static const char *field_name(const char *key) {
   return key ? key : JSON_ELEMENT_FIELD_NAME;
+}
+
+/**
+ * @brief The length that goes with @ref field_name(), the sentinel's own included.
+ *
+ * An element of an array has no key and therefore no length, but it is still recorded under a
+ * name -- and a name recorded with a length of zero is no name at all. The sentinel measures
+ * itself here, on the error path only, so nothing on the way through pays for it.
+ */
+static size_t field_name_length(const char *key, size_t key_length) {
+  return key ? key_length : sizeof(JSON_ELEMENT_FIELD_NAME) - 1u;
 }
 
 /** @brief The state behind a writer, or NULL when there is none to speak of. */
@@ -249,65 +260,84 @@ static arnm_result begin_document(json_writer_state *state, bool is_array) {
 }
 
 /**
- * @brief The container a field would go into, opening a document first where none was begun.
+ * @brief Make the next field and hand back the value node to fill.
  *
- * An object root is what a writer opens on its own, so a mapper that only ever writes objects
- * never names a beginning at all.
+ * One step where there were two. The container is found, and the key and the value come out of
+ * the document's pool in a single reservation and land next to each other -- which is what
+ * yyjson's own adders do, and what the serializer walking the pair afterwards wants to find.
  *
- * @param[in,out] state Writer state; not NULL and carrying no error.
- * @param[in]     key   Field name, for the record if the opening fails.
- * @return The open container, or NULL with the refusal recorded.
+ * Hanging the pair in reads nothing but the container and the two @c next pointers, so the
+ * value's type is written afterwards, by the caller. That is the one thing that differs between
+ * an int and a string, and it is then the only thing left to do.
+ *
+ * A document is begun where none was: an object root is what a writer opens on its own, so a
+ * mapper that only ever writes objects never names a beginning at all.
+ *
+ * @param[in,out] state      Writer state, or NULL.
+ * @param[in]     key        Field name, NULL for an element of the open array.
+ * @param[in]     key_length Bytes of @p key; ignored when @p key is NULL.
+ * @return The value node to fill, or NULL with the refusal recorded.
  */
-static yyjson_mut_val *container_for(json_writer_state *state, const char *key, size_t key_length) {
-  if (ARNM_SUCCESS != state->status) { return NULL; }
+static yyjson_mut_val *field(json_writer_state *state, const char *key, size_t key_length) {
+  if (!state || ARNM_SUCCESS != state->status) { return NULL; }
   if (!state->doc && ARNM_SUCCESS != begin_document(state, false)) { return NULL; }
   if (0 == state->depth) {
-    record_error(state, ARNM_ERROR_INVALID_STATE, field_name(key), key_length);
+    record_error(
+        state, ARNM_ERROR_INVALID_STATE, field_name(key), field_name_length(key, key_length)
+    );
     return NULL;
   }
-  return state->stack[state->depth - 1u];
-}
 
-static bool attach(
-    json_writer_state *state,
-    const char *key,
-    size_t key_length,
-    yyjson_mut_val *value
-) {
-  yyjson_mut_val *container = container_for(state, key, key_length);
-  if (!container) { return false; }
-  if (!value) {
-    record_error(state, ARNM_ERROR_OUT_OF_MEMORY, field_name(key), key_length);
-    return false;
-  }
-
+  yyjson_mut_val *container = state->stack[state->depth - 1u];
   const bool is_object = unsafe_yyjson_is_obj(container);
   if (is_object != (NULL != key)) {
     // a key inside an array names nothing, and a field without one inside an object cannot be
     // found again; both are the mapper looking at the wrong container
-    record_error(state, ARNM_ERROR_INVALID_PARAM, field_name(key), key_length);
-    return false;
+    record_error(
+        state, ARNM_ERROR_INVALID_PARAM, field_name(key), field_name_length(key, key_length)
+    );
+    return NULL;
   }
- 
-  if (is_object) {
-    yyjson_mut_val *key_value = unsafe_yyjson_mut_val(state->doc, 1);
-    // yyjson_mut_val *key_value = yyjson_mut_strn(state->doc, key, key_length);
-    if (!key_value) {
-      record_error(state, ARNM_ERROR_OUT_OF_MEMORY, key, key_length);
-      return false;
-    }
-    unsafe_yyjson_set_strn(key_value, key, key_length);
-    size_t object_size = unsafe_yyjson_get_len(container);
-    unsafe_yyjson_mut_obj_add(container, key_value, value, object_size);
-    state->elements += 2u;
-  } else {
-    if (!yyjson_mut_arr_append(container, value)) {
-      record_error(state, ARNM_ERROR_OUT_OF_MEMORY, key, key_length);
-      return false;
-    }
+
+  yyjson_mut_val *node = unsafe_yyjson_mut_val(state->doc, is_object ? 2u : 1u);
+  if (!node) {
+    record_error(
+        state, ARNM_ERROR_OUT_OF_MEMORY, field_name(key), field_name_length(key, key_length)
+    );
+    return NULL;
+  }
+
+  if (!is_object) {
+    (void)yyjson_mut_arr_append(container, node);
     state->elements += 1u;
+    return node;
   }
-  return true;
+  unsafe_yyjson_set_strn(node, key, key_length);
+  unsafe_yyjson_mut_obj_add(container, node, node + 1, unsafe_yyjson_get_len(container));
+  state->elements += 2u;
+  return node + 1;
+}
+
+/**
+ * @brief What a field becomes when it is already in the document and cannot be finished.
+ *
+ * @ref field() hangs the pair in before the value has a type, so a refusal after that point
+ * leaves a node behind. It is set to the literal `null` rather than left with no type at all:
+ * the refusal is what the caller reads, and the document stays one a serializer could walk.
+ *
+ * The name it is filed under is the field's own, or the array sentinel where there is no key --
+ * a refusal that belongs to a field always names one, and the empty string stays what a refusal
+ * belonging to no field at all wears.
+ */
+static void abandon_field(
+    json_writer_state *state,
+    yyjson_mut_val *node,
+    arnm_result result,
+    const char *key,
+    size_t key_length
+) {
+  unsafe_yyjson_set_null(node);
+  record_error(state, result, field_name(key), field_name_length(key, key_length));
 }
 
 // ********** manage the writer itself *******************
@@ -426,53 +456,36 @@ uint32_t arnm_json_writer_depth(const arnm_json_writer *writer) {
 // ********** adding a field, one line per struct member *******************
 
 void arnm_json_writer_add_null(arnm_json_writer *writer, const char *key, size_t key_length) {
-  json_writer_state *state = state_of(writer);
-  if (!state || ARNM_SUCCESS != state->status) { return; }
-  if (!container_for(state, key, key_length)) { return; }
-  (void)attach(state, key, key_length, yyjson_mut_null(state->doc));
+  yyjson_mut_val *node = field(state_of(writer), key, key_length);
+  if (node) { unsafe_yyjson_set_null(node); }
 }
 
 void arnm_json_writer_add_bool(
     arnm_json_writer *writer, const char *key, size_t key_length, bool value
 ) {
-  json_writer_state *state = state_of(writer);
-  if (!state || ARNM_SUCCESS != state->status) { return; }
-  if (!container_for(state, key, key_length)) { return; }
-  (void)attach(state, key, key_length, yyjson_mut_bool(state->doc, value));
+  yyjson_mut_val *node = field(state_of(writer), key, key_length);
+  if (node) { unsafe_yyjson_set_bool(node, value); }
 }
 
 void arnm_json_writer_add_int64(
     arnm_json_writer *writer, const char *key, size_t key_length, int64_t value
 ) {
-  json_writer_state *state = state_of(writer);
-  if (!state || ARNM_SUCCESS != state->status) { return; }
-  if (!container_for(state, key, key_length)) { return; }
-  (void)attach(
-      state, key, key_length, yyjson_mut_sint(state->doc, value)
-  );
+  yyjson_mut_val *node = field(state_of(writer), key, key_length);
+  if (node) { unsafe_yyjson_set_sint(node, value); }
 }
 
 void arnm_json_writer_add_uint64(
     arnm_json_writer *writer, const char *key, size_t key_length, uint64_t value
 ) {
-  json_writer_state *state = state_of(writer);
-  if (!state || ARNM_SUCCESS != state->status) { return; }
-  if (!container_for(state, key, key_length)) { return; }
-  (void)attach(
-      state, key, key_length, yyjson_mut_uint(state->doc, value)
-  );
+  yyjson_mut_val *node = field(state_of(writer), key, key_length);
+  if (node) { unsafe_yyjson_set_uint(node, value); }
 }
 
 void arnm_json_writer_add_double(
     arnm_json_writer *writer, const char *key, size_t key_length, double value
 ) {
-  json_writer_state *state = state_of(writer);
-  if (!state || ARNM_SUCCESS != state->status) { return; }
-  if (!container_for(state, key, key_length)) { return; }
-  // the one length that is only known once it is rendered, so the longest one is charged
-  (void)attach(
-      state, key, key_length, yyjson_mut_real(state->doc, value)
-  );
+  yyjson_mut_val *node = field(state_of(writer), key, key_length);
+  if (node) { unsafe_yyjson_set_real(node, value); }
 }
 
 /** @brief The shared body of the four string adders. */
@@ -482,39 +495,32 @@ static void add_string(
     size_t key_length,
     const char *value,
     uint32_t length,
-    bool copy, bool raw
+    bool copy,
+    bool raw
 ) {
   json_writer_state *state = state_of(writer);
-  if (!state || ARNM_SUCCESS != state->status) { return; }
-  if (!container_for(state, key, key_length)) { return; }
+  yyjson_mut_val *node = field(state, key, key_length);
+  if (!node) { return; }
 
-  yyjson_mut_val *value_node = unsafe_yyjson_mut_val(state->doc, 1);
-  if (!value_node) {
-    record_error(state, ARNM_ERROR_OUT_OF_MEMORY, key, key_length);
-    return;
-  }
   // a NULL string is the literal null: an optional member that is not there, which is what a
   // mapper means by it far more often than it means a mistake
   if (!value) {
-    unsafe_yyjson_set_null(value_node);
-    (void)attach(state, key, key_length, value_node);
+    unsafe_yyjson_set_null(node);
     return;
   }
-  char* new_str = NULL;
   if (copy) {
-    new_str = unsafe_yyjson_mut_strncpy(state->doc, value, length);
-    if (yyjson_unlikely(!new_str)) {
-      record_error(state, ARNM_ERROR_OUT_OF_MEMORY, key, key_length);
+    char *copied = unsafe_yyjson_mut_strncpy(state->doc, value, length);
+    if (yyjson_unlikely(!copied)) {
+      abandon_field(state, node, ARNM_ERROR_OUT_OF_MEMORY, key, key_length);
       return;
-    }    
+    }
+    value = copied;
   }
   if (raw) {
-    unsafe_yyjson_set_raw(value_node, new_str ? new_str : value, length);
+    unsafe_yyjson_set_raw(node, value, length);
+  } else {
+    unsafe_yyjson_set_strn(node, value, length);
   }
-  else {
-    unsafe_yyjson_set_strn(value_node, new_str ? new_str : value, length);
-  }
-  (void)attach(state, key, key_length, value_node);
 }
 
 void arnm_json_writer_add_string(
@@ -532,7 +538,7 @@ void arnm_json_writer_add_string_length(
 }
 
 void arnm_json_writer_add_string_raw(
-  arnm_json_writer* writer, const char* key, size_t key_length, const char* value, uint32_t length
+    arnm_json_writer *writer, const char *key, size_t key_length, const char *value, uint32_t length
 ) {
   add_string(writer, key, key_length, value, length, false, true);
 }
@@ -563,17 +569,17 @@ void arnm_json_writer_add_hex(
     arnm_json_writer *writer, const char *key, size_t key_length, const uint8_t *data, uint32_t size
 ) {
   json_writer_state *state = state_of(writer);
-  if (!state || ARNM_SUCCESS != state->status) { return; }
-  if (!container_for(state, key, key_length)) { return; }
+  yyjson_mut_val *node = field(state, key, key_length);
+  if (!node) { return; }
 
   // an empty block is the empty string and not `null`: it says the field was there and held
   // nothing, which is what the block itself said
   if (!data || 0 == size) {
-    (void)attach(state, key, key_length, yyjson_mut_rawn(state->doc, "\"\"", 2u));
+    unsafe_yyjson_set_raw(node, "\"\"", 2u);
     return;
   }
   if (size > JSON_HEX_MAX_BYTES) {
-    record_error(state, ARNM_ERROR_RESOURCE_SIZE_EXCEED, field_name(key), key_length);
+    abandon_field(state, node, ARNM_ERROR_RESOURCE_SIZE_EXCEED, key, key_length);
     return;
   }
 
@@ -583,7 +589,7 @@ void arnm_json_writer_add_hex(
   const uint32_t text_length = size * 2u + 2u;
   char *text = unsafe_yyjson_mut_str_alc(state->doc, text_length);
   if (!text) {
-    record_error(state, ARNM_ERROR_OUT_OF_MEMORY, field_name(key), key_length);
+    abandon_field(state, node, ARNM_ERROR_OUT_OF_MEMORY, key, key_length);
     return;
   }
 
@@ -593,7 +599,7 @@ void arnm_json_writer_add_hex(
   // closing quote goes and is overwritten by it a line later
   const arnm_result hexed = arnm_binary_to_hex(text + 1, &block);
   if (ARNM_SUCCESS != hexed) {
-    record_error(state, hexed, field_name(key), key_length);
+    abandon_field(state, node, hexed, key, key_length);
     return;
   }
   text[text_length - 1u] = '"';
@@ -601,7 +607,7 @@ void arnm_json_writer_add_hex(
 
   // The length is exact rather than a bound: hex holds no character any flag escapes, so what
   // is measured here is what the serializer will lay down.
-  (void)attach(state, key, key_length, yyjson_mut_rawn(state->doc, text, text_length));
+  unsafe_yyjson_set_raw(node, text, text_length);
 }
 
 /**
@@ -615,22 +621,22 @@ void arnm_json_writer_add_base64(
     arnm_json_writer *writer, const char *key, size_t key_length, const uint8_t *data, uint32_t size
 ) {
   json_writer_state *state = state_of(writer);
-  if (!state || ARNM_SUCCESS != state->status) { return; }
-  if (!container_for(state, key, key_length)) { return; }
+  yyjson_mut_val *node = field(state, key, key_length);
+  if (!node) { return; }
 
   if (!data || 0 == size) {
-    (void)attach(state, key, key_length, yyjson_mut_rawn(state->doc, "\"\"", 2u));
+    unsafe_yyjson_set_raw(node, "\"\"", 2u);
     return;
   }
   if (size > JSON_BASE64_MAX_BYTES) {
-    record_error(state, ARNM_ERROR_RESOURCE_SIZE_EXCEED, field_name(key), key_length);
+    abandon_field(state, node, ARNM_ERROR_RESOURCE_SIZE_EXCEED, key, key_length);
     return;
   }
 
   const uint32_t text_length = ARNM_BASE64_STRING_LENGTH(size) + 2u;
   char *text = unsafe_yyjson_mut_str_alc(state->doc, text_length);
   if (!text) {
-    record_error(state, ARNM_ERROR_OUT_OF_MEMORY, field_name(key), key_length);
+    abandon_field(state, node, ARNM_ERROR_OUT_OF_MEMORY, key, key_length);
     return;
   }
 
@@ -640,7 +646,7 @@ void arnm_json_writer_add_base64(
   // where the closing quote goes
   const arnm_result encoded = arnm_binary_to_base64(text + 1, &block);
   if (ARNM_SUCCESS != encoded) {
-    record_error(state, encoded, field_name(key), key_length);
+    abandon_field(state, node, encoded, key, key_length);
     return;
   }
   text[text_length - 1u] = '"';
@@ -648,7 +654,7 @@ void arnm_json_writer_add_base64(
 
   // exact, not a bound: no character of the standard alphabet, padding included, is one any
   // write flag escapes
-  (void)attach(state, key, key_length, yyjson_mut_rawn(state->doc, text, text_length));
+  unsafe_yyjson_set_raw(node, text, text_length);
 }
 
 /** @brief What a uuid renders as: the canonical form and the two quotes around it. */
@@ -658,19 +664,19 @@ void arnm_json_writer_add_uuid(
     arnm_json_writer *writer, const char *key, size_t key_length, const uint8_t *uuid
 ) {
   json_writer_state *state = state_of(writer);
-  if (!state || ARNM_SUCCESS != state->status) { return; }
-  if (!container_for(state, key, key_length)) { return; }
+  yyjson_mut_val *node = field(state, key, key_length);
+  if (!node) { return; }
 
   // sixteen bytes or nothing at all -- there is no size here that could make an absent uuid an
   // empty one, so NULL is the member that is not there
   if (!uuid) {
-    (void)attach(state, key, key_length, yyjson_mut_null(state->doc));
+    unsafe_yyjson_set_null(node);
     return;
   }
 
   char *text = unsafe_yyjson_mut_str_alc(state->doc, JSON_UUID_TEXT_LENGTH);
   if (!text) {
-    record_error(state, ARNM_ERROR_OUT_OF_MEMORY, field_name(key), key_length);
+    abandon_field(state, node, ARNM_ERROR_OUT_OF_MEMORY, key, key_length);
     return;
   }
 
@@ -681,9 +687,7 @@ void arnm_json_writer_add_uuid(
   text[JSON_UUID_TEXT_LENGTH - 1u] = '"';
   text[JSON_UUID_TEXT_LENGTH] = '\0';
 
-  (void)attach(
-      state, key, key_length, yyjson_mut_rawn(state->doc, text, JSON_UUID_TEXT_LENGTH)
-  );
+  unsafe_yyjson_set_raw(node, text, JSON_UUID_TEXT_LENGTH);
 }
 
 // ********** nesting *******************
@@ -693,19 +697,19 @@ static void open_container(
     arnm_json_writer *writer, const char *key, size_t key_length, bool is_array
 ) {
   json_writer_state *state = state_of(writer);
-  if (!state || ARNM_SUCCESS != state->status) { return; }
-  if (!container_for(state, key, key_length)) { return; }
+  yyjson_mut_val *node = field(state, key, key_length);
+  if (!node) { return; }
 
   if (state->depth >= ARNM_JSON_WRITER_MAX_DEPTH) {
-    record_error(state, ARNM_ERROR_RESOURCE_EXHAUSTED, field_name(key), key_length);
+    abandon_field(state, node, ARNM_ERROR_RESOURCE_EXHAUSTED, key, key_length);
     return;
   }
 
-  yyjson_mut_val *opened = is_array ? yyjson_mut_arr(state->doc) : yyjson_mut_obj(state->doc);
+  // an empty container is its tag and nothing else, exactly as yyjson_mut_obj() leaves one
+  node->tag =
+      is_array ? (YYJSON_TYPE_ARR | YYJSON_SUBTYPE_NONE) : (YYJSON_TYPE_OBJ | YYJSON_SUBTYPE_NONE);
   // the empty form is charged now; the first field that lands inside pays the difference
-  if (!attach(state, key, key_length, opened)) { return; }
-
-  state->stack[state->depth] = opened;
+  state->stack[state->depth] = node;
   state->depth += 1u;
   state->elements++;
 }
@@ -743,18 +747,33 @@ static inline bool size_is_pow2(size_t size) {
 static inline size_t size_align_up(size_t size, size_t align) {
   if (size_is_pow2(align)) {
     return (size + (align - 1)) & ~(align - 1);
-  }
-  else {
+  } else {
     return size + align - (size + align - 1) % align - 1;
   }
 }
+
+/** @brief Bytes charged per element, minified and under either pretty layout. */
+#define JSON_ELEMENT_TEXT_ESTIMATE 18u
+#define JSON_ELEMENT_TEXT_ESTIMATE_PRETTY 32u
+/** @brief Added once, so the smallest documents are not estimated down to nothing. */
+#define JSON_ESTIMATE_FLOOR 64u
 
 uint32_t arnm_json_writer_buffer_size_min(const arnm_json_writer *writer) {
   const json_writer_state *state = state_of(writer);
   if (!state || !state->doc) { return 0u; }
 
-  bool is_pretty = (state->write_flags & ARNM_JSON_WRITE_PRETTY) == ARNM_JSON_WRITE_PRETTY;
-  const uint64_t total = size_align_up(state->elements * (is_pretty ? 32 : 18) + 64, 16);
+  // write_flags is yyjson's bit set and not the public one, so the two pretty layouts are asked
+  // for by yyjson's names -- ARNM_JSON_WRITE_PRETTY_TWO_SPACES does not sit on the same bit
+  const bool is_pretty =
+      0 != (state->write_flags & (YYJSON_WRITE_PRETTY | YYJSON_WRITE_PRETTY_TWO_SPACES));
+  const uint32_t per_element =
+      is_pretty ? JSON_ELEMENT_TEXT_ESTIMATE_PRETTY : JSON_ELEMENT_TEXT_ESTIMATE;
+
+  // widened before the multiply: a document of millions of elements overflows a uint32_t here
+  // long before it reaches the ceiling, and an estimate that wraps is worse than one that saturates
+  uint64_t total = (uint64_t)state->elements * per_element + JSON_ESTIMATE_FLOOR;
+  if (total > (uint64_t)ARNM_MAX_ALLOC_SIZE) { return ARNM_MAX_ALLOC_SIZE; }
+  total = (uint64_t)size_align_up((size_t)total, 16u);
   return (total > (uint64_t)ARNM_MAX_ALLOC_SIZE) ? ARNM_MAX_ALLOC_SIZE : (uint32_t)total;
 }
 
@@ -780,17 +799,17 @@ arnm_result arnm_json_writer_write(
   size_t length = 0;
   yyjson_write_err error;
   char *written = yyjson_mut_write_opts(state->doc, state->write_flags, &alc, &length, &error);
-  if (!written) {
-    return translate_write_error((uint32_t)error.code);
-  }
+  if (!written) { return translate_write_error((uint32_t)error.code); }
   uint32_t narrowed_length = narrow_length(length);
   if ((size_t)narrowed_length != length) {
+    // the bytes exist and cannot be handed over, so they go back rather than being stranded
+    json_buffer_dispose(&write_buffer, written);
     return ARNM_ERROR_ARITHMETIC_OVERFLOW;
   }
   const uint32_t needed = narrowed_length + 1u; /* the terminator yyjson wrote */
-  
+
   arnm_memory_block block;
-  block.data = (uint8_t*)written;
+  block.data = (uint8_t *)written;
   block.size = write_buffer.size;
   // measured exactly, this changes nothing; measured as a bound -- a real number, an escaped
   // character -- the slack goes home here, while the block is still at the tail
