@@ -168,6 +168,10 @@ arnm_result arnm_binary_to_hex(char *result_buffer, const uint8_t *bytes, const 
   if (!result_buffer || !bytes) { return ARNM_ERROR_NULL_POINTER; }
   // an empty block is a parameter the caller can fix, not a pointer they forgot
   if (!size) { return ARNM_ERROR_INVALID_PARAM; }
+  // the terminator lands at index size * 2, which is a uint32_t like every size here and would
+  // wrap above this rather than say so -- and a wrapped index writes over the front of the
+  // buffer after the loop has filled it
+  if (size > ARNM_HEX_MAX_BINARY_SIZE) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
 
   for (size_t i = 0; i < size; ++i) {
     uint8_t high = (uint8_t)(bytes[i] >> 4);
@@ -521,6 +525,9 @@ static const uint8_t BASE64_VALUE[256] = {
 arnm_result arnm_binary_to_base64(char *result_buffer, const uint8_t *bytes, const uint32_t size) {
   if (!result_buffer || !bytes) { return ARNM_ERROR_NULL_POINTER; }
   if (!size) { return ARNM_ERROR_INVALID_PARAM; }
+  // as in arnm_binary_to_hex(): `written` counts the characters in a uint32_t, and one group
+  // more than this would carry it past what that holds
+  if (size > ARNM_BASE64_MAX_BINARY_SIZE) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
 
   const uint32_t groups = size / 3u;
 

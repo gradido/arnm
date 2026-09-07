@@ -1,4 +1,6 @@
+#include "arnm/arena.h"
 #include "arnm/converter.h"
+#include "arnm/memory.h"
 #include "arnm/memory_block.h"
 #include "arnm/mono_timer.h"
 #include <gtest/gtest.h>
@@ -867,6 +869,109 @@ TEST(Converter, Base64BinarySizeAgreesWithWhatTheDecodeWrites) {
     ASSERT_EQ(arnm_binary_from_base64(buffer, &written, base64), ARNM_SUCCESS) << base64;
     EXPECT_EQ(written, expected) << base64;
   }
+}
+
+/* --- what the encoders refuse before they write ------------------------------------------- */
+
+// Both _alloc wrappers had no caller anywhere in this repository until these tests, which is
+// how the missing terminator below went unnoticed. What they promise is checked here.
+
+// promise: the block an alloc call hands back has room for the terminator the encode writes.
+// ARNM_BASE64_STRING_LENGTH() counts characters only -- unlike the hex macro, which counts the
+// terminator -- so the wrapper has to add it. An arena sized to the characters alone is
+// therefore one byte short, and the call has to say so rather than write past what it got.
+TEST(Converter, Base64AllocReservesTheByteTheTerminatorNeeds) {
+  const uint8_t payload[6] = {'h', 'e', 'l', 'l', 'o', '!'};
+  constexpr uint32_t characters = ARNM_BASE64_STRING_LENGTH(sizeof(payload));
+  static_assert(characters == 8, "six bytes are two whole groups, so eight characters, no '='");
+
+  // exactly the characters and not one byte more, with a guard behind the arena's own buffer
+  alignas(8) uint8_t storage[characters + 8] = {};
+  storage[characters] = 0xAB;
+
+  arnm arena;
+  ASSERT_EQ(arnm_init_arena_borrow(&arena, storage, characters), ARNM_SUCCESS);
+
+  arnm_memory_block out = {};
+  EXPECT_EQ(
+      arnm_binary_to_base64_alloc(&out, payload, sizeof(payload), &arena), ARNM_ERROR_OUT_OF_MEMORY
+  ) << "room for the characters alone is not room for the string";
+  EXPECT_EQ(out.data, nullptr) << "and a failed call leaves the block untouched";
+  EXPECT_EQ(storage[characters], 0xAB) << "the terminator was written past the arena's block";
+  arnm_release(&arena);
+
+  // one byte more is enough, and the block says it holds it
+  alignas(8) uint8_t roomy[characters + 8] = {};
+  ASSERT_EQ(arnm_init_arena_borrow(&arena, roomy, characters + 8), ARNM_SUCCESS);
+  ASSERT_EQ(arnm_binary_to_base64_alloc(&out, payload, sizeof(payload), &arena), ARNM_SUCCESS);
+  EXPECT_EQ(out.size, characters + 1u) << "the characters, and the terminator behind them";
+  EXPECT_STREQ(reinterpret_cast<const char *>(out.data), "aGVsbG8h");
+  arnm_release(&arena);
+}
+
+// promise: the hex wrapper needs no such correction, because its macro counts the terminator
+TEST(Converter, HexAllocIsSizedByAMacroThatAlreadyCountsTheTerminator) {
+  const uint8_t payload[3] = {0x0f, 0xa0, 0xff};
+  arnm_memory_block out = {};
+  ASSERT_EQ(arnm_binary_to_hex_alloc(&out, payload, sizeof(payload), nullptr), ARNM_SUCCESS);
+  EXPECT_EQ(out.size, ARNM_HEX_STRING_LENGTH(sizeof(payload)));
+  EXPECT_EQ(out.size, 7u);
+  EXPECT_STREQ(reinterpret_cast<const char *>(out.data), "0fa0ff");
+  EXPECT_EQ(arnm_memory_block_free(&out, nullptr), ARNM_SUCCESS);
+}
+
+// promise: the documented bounds are the last size whose text still measures in a uint32_t.
+// Computed here in 64 bit, which is the arithmetic the macros cannot do.
+TEST(Converter, TheEncodingBoundsAreWhereTheLengthWouldStopFitting) {
+  const uint64_t hex_max = ARNM_HEX_MAX_BINARY_SIZE;
+  EXPECT_EQ(hex_max, 2147483647u);
+  EXPECT_EQ(hex_max * 2u + 1u, static_cast<uint64_t>(UINT32_MAX)) << "the last one that fits";
+  EXPECT_GT((hex_max + 1u) * 2u + 1u, static_cast<uint64_t>(UINT32_MAX))
+      << "and the first that does not";
+
+  const uint64_t base64_max = ARNM_BASE64_MAX_BINARY_SIZE;
+  EXPECT_EQ(base64_max, 3221225469u);
+  EXPECT_LE((base64_max + 2u) / 3u * 4u + 1u, static_cast<uint64_t>(UINT32_MAX));
+  EXPECT_GT((base64_max + 3u) / 3u * 4u + 1u, static_cast<uint64_t>(UINT32_MAX));
+}
+
+// promise: a size whose text could not be measured is refused, and refused before either
+// pointer is read -- which is what lets this test name sizes no machine here could hold.
+// The pointers below are never dereferenced and deliberately point at almost nothing.
+TEST(Converter, ASizeTooLargeToMeasureIsRefusedBeforeAnythingIsRead) {
+  char destination[1] = {'x'};
+  const uint8_t dummy[1] = {0};
+
+  EXPECT_EQ(
+      arnm_binary_to_hex(destination, dummy, ARNM_HEX_MAX_BINARY_SIZE + 1u),
+      ARNM_ERROR_ARITHMETIC_OVERFLOW
+  );
+  EXPECT_EQ(destination[0], 'x') << "nothing written, not even a terminator";
+
+  EXPECT_EQ(
+      arnm_binary_to_base64(destination, dummy, ARNM_BASE64_MAX_BINARY_SIZE + 1u),
+      ARNM_ERROR_ARITHMETIC_OVERFLOW
+  );
+  EXPECT_EQ(destination[0], 'x');
+
+  // and the allocating pair refuses it too, rather than handing a wrapped length to the
+  // allocator -- ARNM_HEX_STRING_LENGTH(2147483648) is 1, a size that would look perfectly fine
+  EXPECT_EQ(ARNM_HEX_STRING_LENGTH(ARNM_HEX_MAX_BINARY_SIZE + 1u), 1u) << "the wrap this avoids";
+
+  arnm_memory_block out = {};
+  EXPECT_EQ(
+      arnm_binary_to_hex_alloc(&out, dummy, ARNM_HEX_MAX_BINARY_SIZE + 1u, nullptr),
+      ARNM_ERROR_ARITHMETIC_OVERFLOW
+  );
+  EXPECT_EQ(out.data, nullptr);
+  EXPECT_EQ(out.size, 0u);
+
+  EXPECT_EQ(
+      arnm_binary_to_base64_alloc(&out, dummy, ARNM_BASE64_MAX_BINARY_SIZE + 1u, nullptr),
+      ARNM_ERROR_ARITHMETIC_OVERFLOW
+  );
+  EXPECT_EQ(out.data, nullptr);
+  EXPECT_EQ(out.size, 0u);
 }
 
 TEST(Converter, Base64BinarySizeRefusesALengthThatIsNoBase64) {

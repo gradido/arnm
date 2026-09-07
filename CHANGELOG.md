@@ -97,6 +97,20 @@ at six bytes a character, in case every one of them escapes to `\uXXXX`, and a r
 That is why `arnm_json_writer_add_hex()` and `arnm_json_writer_add_base64()` write raw, and why a
 large payload placed by hand should too.
 
+**Fixed: `arnm_binary_to_base64_alloc()` reserved the characters but not the terminator.**
+`ARNM_BASE64_STRING_LENGTH()` counts characters only -- unlike `ARNM_HEX_STRING_LENGTH()`, which
+counts the terminator -- so the block was one byte short of what `arnm_binary_to_base64()` then
+wrote into it, for every input. `out->size` is one larger than before as a result. Neither
+allocating wrapper had a caller anywhere in this repository, which is how it survived; both have
+tests now.
+
+**Both encoders refuse a size whose text could not be measured.** `ARNM_HEX_STRING_LENGTH()`
+wraps above 2147483647 bytes and `ARNM_BASE64_STRING_LENGTH()` above 3221225469, and a wrapped
+length is not a large number but a small and plausible one -- the hex of 2147483648 bytes
+measures as 1. `arnm_binary_to_hex()`, `arnm_binary_to_base64()` and both `_alloc` wrappers now
+answer `ARNM_ERROR_ARITHMETIC_OVERFLOW` there, before either pointer is read, and the two bounds
+are named as `ARNM_HEX_MAX_BINARY_SIZE` and `ARNM_BASE64_MAX_BINARY_SIZE`.
+
 **`arnm_binary_to_hex()` and `arnm_binary_to_base64()` take a pointer and a size** rather than an
 `arnm_memory_block *`, which is what lets them encode a slice, or format straight into storage
 that is not a block. `arnm_binary_block_to_hex()` and `arnm_binary_block_to_base64()` are the old
