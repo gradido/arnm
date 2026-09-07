@@ -90,8 +90,18 @@ static arnm g_arena;
 static volatile uint64_t g_sink = 0;
 /** Prefilled ring for the read-side steps, the same ELEMENT_COUNT values as g_filled. */
 static arnm_fixed_ring g_filled_ring;
+/*
+ * Parked, not deleted: the footprint line the queue section was meant to carry underneath its
+ * three rows was never written, and these three pieces are what it needs. The comment at that
+ * section says what it should say -- what a bucket vector does when it is asked to be the steady
+ * state queue, "in the only terms it can honestly be put", which is bytes and not nanoseconds.
+ * Writing it means running a vector as that queue and putting its footprint against the ring's
+ * fixed one; until someone does, this compiles nothing and warns about nothing.
+ */
+#if 0
 /** What the ring still held when its queue step finished, ready for the report below it. */
 static char g_ring_queue_bytes_string[32] = "";
+#endif
 
 /**
  * Stop on a failed setup instead of measuring the wreckage.
@@ -331,6 +341,8 @@ static void test_bvec_push_pop_cycle(int stepCount) {
 
 /* --- queue ------------------------------------------------------------------------------ */
 
+/* Parked with g_ring_queue_bytes_string above; see the note there. */
+#if 0
 /**
  * Bytes a bucket vector holds: its buckets, plus the index array of pointers to them.
  *
@@ -357,6 +369,7 @@ static void bench_bytes_string(char *buffer, size_t buffer_size, uint32_t bytes)
     snprintf(buffer, buffer_size, "%.1f MiB", (double)bytes / (1024.0 * 1024.0));
   }
 }
+#endif
 
 /**
  * A ring in its steady state: the window stays full while everything passes through it.
@@ -374,9 +387,10 @@ static void test_ring_queue_steady(int stepCount) {
     require_ok(ring_u64_pop(&r), "pop");
     require_ok(ring_u64_push(&r, (uint64_t)i), "push");
   }
-  bench_bytes_string(
-      g_ring_queue_bytes_string, sizeof(g_ring_queue_bytes_string), ring_u64_reserved(&r)
-  );
+  /* the footprint the parked report above would have used:
+     bench_bytes_string(
+         g_ring_queue_bytes_string, sizeof(g_ring_queue_bytes_string), ring_u64_reserved(&r)
+     ); */
   require_ok(ring_u64_free(&r, NULL), "free ring");
 }
 

@@ -6,6 +6,7 @@
 #include "arnm/memory_block.h"
 #include "arnm/multi_arena.h"
 #include "arnm/result.h"
+#include "arnm/utf8.h"
 
 #include "memory_limit.h"
 #include <cstdint>
@@ -1021,13 +1022,16 @@ TEST(JsonWriter, ARefusalWithNoKeyIsFiledUnderTheArraySentinel) {
   EXPECT_EQ(arnm_json_writer_status(deep.writer()), ARNM_ERROR_RESOURCE_EXHAUSTED);
   EXPECT_STREQ(arnm_json_writer_error_field(deep.writer()), "[]");
 
-  // one close too many belongs to no field, and reads as the empty string
+  // One close too many belongs to no field, so the slot carries the sentence instead of a name.
+  // ARNM_ERROR_INVALID_STATE alone would leave a caller guessing which of the states it was.
   ArenaWriter closed;
   arnm_json_writer_open_object(closed.writer(), ARNM_JSON_WRITER_KEY("inner"));
   arnm_json_writer_close(closed.writer());
   arnm_json_writer_close(closed.writer());
   EXPECT_EQ(arnm_json_writer_status(closed.writer()), ARNM_ERROR_INVALID_STATE);
-  EXPECT_STREQ(arnm_json_writer_error_field(closed.writer()), "");
+  EXPECT_STREQ(
+      arnm_json_writer_error_field(closed.writer()), "arnm_json_writer_close was called too often"
+  );
 }
 
 TEST(JsonWriter, OneCloseTooManyIsRecordedRatherThanSwallowed) {
@@ -1049,7 +1053,7 @@ TEST(JsonWriter, OpeningPastTheLastLevelIsRefused) {
   }
   EXPECT_EQ(arnm_json_writer_depth(owner.writer()), ARNM_JSON_WRITER_MAX_DEPTH);
 
-  arnm_json_writer_open_object(owner.writer(), "one_too_deep", 13, false);
+  arnm_json_writer_open_object(owner.writer(), ARNM_JSON_WRITER_KEY("one_too_deep"));
   EXPECT_EQ(arnm_json_writer_status(owner.writer()), ARNM_ERROR_RESOURCE_EXHAUSTED);
   EXPECT_STREQ(arnm_json_writer_error_field(owner.writer()), "one_too_deep");
   EXPECT_EQ(arnm_json_writer_depth(owner.writer()), ARNM_JSON_WRITER_MAX_DEPTH);
@@ -1870,4 +1874,79 @@ TEST(JsonWriterRelease, AMultiArenaReleasesChunkByChunkAndStaysCorrect) {
   (void)arnm_json_writer_release(&writer);
 
   arnm_destroy(chain, nullptr);
+}
+
+/* --- malformed UTF-8 ------------------------------------------------------------------------ */
+
+// The build validates UTF-8, and the reader refuses a document that is not. The writer is the
+// asymmetric half, and these pin why: a string added the ordinary way is marked as needing no
+// escaping, so yyjson copies it without walking it and never sees what is in it. Asking for the
+// escaping pass is what puts it under the check -- and then a bad string fails the whole write.
+//
+// That asymmetry is the reason arnm/utf8.h exists. Checking at the edge names the field; a write
+// that fails at the end names nothing.
+
+TEST(JsonWriterUtf8, TheOrdinaryPathWritesMalformedBytesThrough) {
+  const char bad[] = "a\xed\xa0\x80\x62"; // a surrogate half between two letters
+
+  ArenaWriter owner;
+  ASSERT_EQ(arnm_json_writer_begin_object(owner.writer()), ARNM_SUCCESS);
+  arnm_json_writer_add_string(owner.writer(), ARNM_JSON_WRITER_KEY("k"), bad, strlen(bad));
+  EXPECT_EQ(arnm_json_writer_status(owner.writer()), ARNM_SUCCESS);
+
+  arnm_memory_block text{};
+  EXPECT_EQ(arnm_json_writer_write(owner.writer(), owner.arena(), &text, nullptr), ARNM_SUCCESS)
+      << "borrowed and unescaped is copied verbatim, so nothing looks at it";
+  EXPECT_NE(memchr(text.data, 0xed, text.size), nullptr) << "the bytes really went out";
+  EXPECT_FALSE(arnm_utf8_is_valid(reinterpret_cast<const char *>(text.data), text.size))
+      << "which is how a document that is not JSON leaves this library";
+}
+
+TEST(JsonWriterUtf8, AskingForEscapingPutsTheStringUnderTheCheck) {
+  const char bad[] = "a\xed\xa0\x80\x62";
+
+  ArenaWriter owner;
+  ASSERT_EQ(arnm_json_writer_begin_object(owner.writer()), ARNM_SUCCESS);
+  arnm_json_writer_add_string_flags(
+      owner.writer(), ARNM_JSON_WRITER_KEY("k"), bad, strlen(bad), ARNM_JSON_WRITER_STRING_ESCAPE
+  );
+  EXPECT_EQ(arnm_json_writer_status(owner.writer()), ARNM_SUCCESS)
+      << "the refusal is the serializer's, so it arrives at the write and not at the field";
+
+  arnm_memory_block text{};
+  EXPECT_EQ(
+      arnm_json_writer_write(owner.writer(), owner.arena(), &text, nullptr),
+      ARNM_ERROR_ENCODE_FAILED
+  );
+  EXPECT_STREQ(arnm_json_writer_error_field(owner.writer()), "")
+      << "and it names no field, because by then there is no field left to name";
+}
+
+TEST(JsonWriterUtf8, WellFormedMultiByteTextGoesOutUnchangedOnBothPaths) {
+  const char good[] = "gr\xc3\xbc\xc3\x9f\x65 \xe6\x97\xa5\xe6\x9c\xac \xf0\x9f\x8e\x89";
+  ASSERT_TRUE(arnm_utf8_is_valid(good, strlen(good)));
+
+  ArenaWriter borrowed;
+  ASSERT_EQ(arnm_json_writer_begin_object(borrowed.writer()), ARNM_SUCCESS);
+  arnm_json_writer_add_string(borrowed.writer(), ARNM_JSON_WRITER_KEY("k"), good, strlen(good));
+  arnm_memory_block plain{};
+  ASSERT_EQ(
+      arnm_json_writer_write(borrowed.writer(), borrowed.arena(), &plain, nullptr), ARNM_SUCCESS
+  );
+
+  ArenaWriter escaped;
+  ASSERT_EQ(arnm_json_writer_begin_object(escaped.writer()), ARNM_SUCCESS);
+  arnm_json_writer_add_string_flags(
+      escaped.writer(), ARNM_JSON_WRITER_KEY("k"), good, strlen(good),
+      ARNM_JSON_WRITER_STRING_ESCAPE
+  );
+  arnm_memory_block checked{};
+  ASSERT_EQ(
+      arnm_json_writer_write(escaped.writer(), escaped.arena(), &checked, nullptr), ARNM_SUCCESS
+  ) << "well formed text passes the check it is now put under";
+
+  EXPECT_STREQ(
+      reinterpret_cast<const char *>(plain.data), reinterpret_cast<const char *>(checked.data)
+  ) << "and neither path normalized or replaced anything";
+  EXPECT_TRUE(arnm_utf8_is_valid(reinterpret_cast<const char *>(plain.data), plain.size));
 }

@@ -208,7 +208,6 @@ pub fn build(b: *std.Build) void {
     core_lib.root_module.addCMacro("YYJSON_DISABLE_INCR_READER", "1");
     core_lib.root_module.addCMacro("YYJSON_DISABLE_UTILS", "1");
     core_lib.root_module.addCMacro("YYJSON_DISABLE_NON_STANDARD", "1");
-    core_lib.root_module.addCMacro("YYJSON_DISABLE_UTF8_VALIDATION", "1");
     core_lib.addIncludePath(b.path("third_party/yyjson/src"));
     core_lib.addCSourceFiles(.{
         .files = &[_][]const u8{yyjson_source},
@@ -258,6 +257,7 @@ pub fn build(b: *std.Build) void {
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_json_writer", .srcs = &.{"test_json_writer.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_multi_arena", .srcs = &.{"test_multi_arena.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_result", .srcs = &.{"test_result.cpp"} }, path);
+        processBuildTarget(&context, .{ .link_googletest = true, .name = "test_utf8", .srcs = &.{"test_utf8.cpp"} }, path);
     }
 
     const cdbTargetsSlice = cdbTargets.toOwnedSlice(b.allocator) catch @panic("OOM");

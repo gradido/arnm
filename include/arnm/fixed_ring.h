@@ -398,11 +398,22 @@ arnm_result arnm_fixed_ring_copy_to(const arnm_fixed_ring *ring, void *dst, uint
     arnm_fixed_ring_clear(ring);                                                                   \
   }                                                                                                \
                                                                                                    \
-  /** Claim the slot at the back without writing it. */                                            \
+  /** Claim the slot at the back without writing it.                                               \
+   *                                                                                               \
+   *  A `void *` of its own rather than `(void **)out_slot`: `void **` and `type **` are           \
+   *  different types, and having one write through the other is not something C promises          \
+   *  anything about -- only `char *` is guaranteed to share a representation with `void *`. What  \
+   *  goes through here instead is the ordinary conversion C does define. It costs nothing: the    \
+   *  slot is left uninitialized, as in `_push` below, so the compiler emits the same number of    \
+   *  instructions the cast did, and folds the test away wherever the caller tests the result too. \
+   */                                                                                              \
   ARNM_FIXED_RING_MAYBE_UNUSED static inline arnm_result name##_emplace(                           \
       arnm_fixed_ring *ring, type **out_slot                                                       \
   ) {                                                                                              \
-    return arnm_fixed_ring_emplace(ring, (void **)out_slot);                                       \
+    void *slot;                                                                                    \
+    const arnm_result result = arnm_fixed_ring_emplace(ring, &slot);                               \
+    if (ARNM_SUCCESS == result) { *out_slot = (type *)slot; }                                      \
+    return result;                                                                                 \
   }                                                                                                \
                                                                                                    \
   /** Append a value at the back. */                                                               \

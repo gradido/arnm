@@ -48,9 +48,6 @@
 /* a build and the render after it cost more than a parse of the same document, and there are
    four such rows per payload, so the writing runs at half the parse count */
 #define WRITE_STEPS 10000
-/* a field read, so the count has to be large enough that the loop around it is not the figure */
-#define ASK_STEPS 2000000
-
 #define SCRATCH_CAPACITY (8u * 1024u * 1024u)
 #define KEPT_CAPACITY (8u * 1024u * 1024u)
 #define OUTPUT_CAPACITY (1u * 1024u * 1024u)
@@ -101,8 +98,7 @@ typedef struct payload {
   arnm_json_reader reader;    /**< Parsed once and held, for the rows that are not about parsing. */
   arnm_json_value *root;      /**< That document's way in. */
   arnm_json_writer_hint hint; /**< This document's own size, for the rows that are told it. */
-  uint32_t estimate;       /**< What the writer guessed the text would take, before it wrote it. */
-  arnm_json_writer writer; /**< Built once and held, for the row that only asks it a question. */
+  uint32_t estimate; /**< What the writer guessed the text would take, before it wrote it. */
 } payload;
 
 #define SHORT_VALUE "a string value of an ordinary length"
@@ -178,13 +174,19 @@ static void build_payload(arnm_json_writer *writer, const shape *form) {
   arnm_json_writer_close(writer);
 }
 
+/*
+ * Named members and not a row of positions: everything after the shape is filled at prepare
+ * time, and these are statics, so the zeros were never saying anything. Spelling out the two
+ * that matter also puts the difference between the six payloads on one line each -- which is
+ * the whole point of having six.
+ */
 /* clang-format off */
-static payload in_order = {"in order",  {0, 0, false, false, sizeof(SHORT_VALUE) - 1}, {0}, 0, {{0}}, NULL, {0, 0}, 0, {{0}}};
-static payload behind   = {"24 behind", {0, SPARE_COUNT, false, false, sizeof(SHORT_VALUE) - 1}, {0}, 0, {{0}}, NULL, {0, 0}, 0, {{0}}};
-static payload in_front = {"24 in front",{0, SPARE_COUNT, true, false, sizeof(SHORT_VALUE) - 1}, {0}, 0, {{0}}, NULL, {0, 0}, 0, {{0}}};
-static payload reversed = {"reversed",  {0, 0, false, true, sizeof(SHORT_VALUE) - 1}, {0}, 0, {{0}}, NULL, {0, 0}, 0, {{0}}};
-static payload nested   = {"nested",    {ARRAY_ELEMENTS, 0, false, false, sizeof(SHORT_VALUE) - 1}, {0}, 0, {{0}}, NULL, {0, 0}, 0, {{0}}};
-static payload text     = {"text",      {0, 0, false, false, LONG_VALUE_LENGTH}, {0}, 0, {{0}}, NULL, {0, 0}, 0, {{0}}};
+static payload in_order = {.name = "in order",    .form = {0, 0, false, false, sizeof(SHORT_VALUE) - 1}};
+static payload behind   = {.name = "24 behind",   .form = {0, SPARE_COUNT, false, false, sizeof(SHORT_VALUE) - 1}};
+static payload in_front = {.name = "24 in front", .form = {0, SPARE_COUNT, true, false, sizeof(SHORT_VALUE) - 1}};
+static payload reversed = {.name = "reversed",    .form = {0, 0, false, true, sizeof(SHORT_VALUE) - 1}};
+static payload nested   = {.name = "nested",      .form = {ARRAY_ELEMENTS, 0, false, false, sizeof(SHORT_VALUE) - 1}};
+static payload text     = {.name = "text",        .form = {0, 0, false, false, LONG_VALUE_LENGTH}};
 /* clang-format on */
 
 static payload *const payloads[] = {&in_order, &behind, &in_front, &reversed, &nested, &text};
@@ -260,23 +262,6 @@ static void render_document(payload *one, const arnm_json_writer_hint *hint, int
     (void)arnm_json_writer_release(&writer);
     arnm_reset(&scratch);
     arnm_reset(&output);
-  }
-  g_sink += sink;
-}
-
-/**
- * @brief The one question a writer answers without doing anything: roughly how long the text is.
- *
- * An arithmetic answer over a count the adders already kept -- no walk, no string measured, and
- * nothing rendered. The row exists to say that in a figure, because sizing an output arena
- * before there is any text to size it against is only worth doing if asking is free. Timed on
- * the writer that stands for the whole run rather than on one built inside the loop, which
- * would time the building instead.
- */
-static void measure_size(payload *one, int steps) {
-  uint64_t sink = 0;
-  for (int step = 0; step < steps; ++step) {
-    sink += arnm_json_writer_buffer_size_min(&one->writer);
   }
   g_sink += sink;
 }
@@ -540,15 +525,6 @@ static void prepare_test_data(void) {
 
     // and the hint, which the count that parse just arrived at is half of
     one->hint = hint_of(one);
-
-    // the writer that stays, holding this same document: the row that only asks it a question
-    // needs a document to ask about, and building one inside that loop would be the measurement
-    require_ok(
-        arnm_json_writer_init(&one->writer, &kept, ARNM_JSON_WRITE_DEFAULT, &one->hint),
-        "writer init"
-    );
-    build_payload(&one->writer, &one->form);
-    require_ok(arnm_json_writer_status(&one->writer), one->name);
   }
 
   verify_layouts_agree();
@@ -573,7 +549,6 @@ static void prepare_test_data(void) {
 static void release_test_data(void) {
   for (size_t index = 0; index < PAYLOAD_COUNT; ++index) {
     (void)arnm_json_reader_release(&payloads[index]->reader);
-    (void)arnm_json_writer_release(&payloads[index]->writer);
   }
   arnm_release(&output);
   arnm_release(&kept);

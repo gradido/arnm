@@ -44,9 +44,9 @@ extern "C" {
  * | call | what it does |
  * |---|---|
  * | `_alloc` | pops the free list, or makes an arena when it is empty |
- * | `_free` | resets the arena, then keeps it if the stock is below @c spare_limit, otherwise gives
- * it to the host | | `_reserve` | fills the stock ahead of time, so the first callers do not pay
- * for it | | `_release` | gives every spare arena back, but only once every lent one has returned |
+ * | `_free` | resets the arena, then keeps it if the stock is below @c spare_limit, otherwise gives it to the host |
+ * | `_reserve` | fills the stock ahead of time, so the first callers do not pay for it |
+ * | `_release` | gives every spare arena back, but only once every lent one has returned |
  * | `_destroy` | `_release`, then the descriptor itself |
  *
  * `_release` refuses with @ref ARNM_ERROR_RESOURCE_IN_USE while anything is still out, the

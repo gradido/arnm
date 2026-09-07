@@ -408,14 +408,29 @@ arnm_result arnm_bvec_copy_to(const arnm_bvec *v, void *dst, uint32_t dst_capaci
     arnm_bvec_free(v);                                                                             \
   }                                                                                                \
                                                                                                    \
-  /** Cold path of @c _emplace: open the next bucket, reusing an already allocated one. */         \
+  /** Cold path of @c _emplace: open the next bucket, reusing an already allocated one.            \
+   *                                                                                               \
+   *  A `void *` of its own rather than `(void **)out_slot`: `void **` and `type **` are           \
+   *  different types, and having one write through the other is not something C promises          \
+   *  anything about -- only `char *` is guaranteed to share a representation with `void *`. What  \
+   *  goes through here instead is the ordinary conversion C does define. It costs nothing: the    \
+   *  slot is left uninitialized, as in `_push` below, so the compiler emits the same number of    \
+   *  instructions the cast did, and folds the test away wherever the caller tests the result too. \
+   */                                                                                              \
   ARNM_BVEC_MAYBE_UNUSED static inline arnm_result name##_grow(arnm_bvec *v, type **out_slot) {    \
-    return arnm_bvec_grow(v, (void **)out_slot);                                                   \
+    void *slot;                                                                                    \
+    const arnm_result result = arnm_bvec_grow(v, &slot);                                           \
+    if (ARNM_SUCCESS == result) { *out_slot = (type *)slot; }                                      \
+    return result;                                                                                 \
   }                                                                                                \
                                                                                                    \
-  /** Claim the next slot without writing it -- construct large payloads in place. */              \
+  /** Claim the next slot without writing it -- construct large payloads in place. As @c _grow,    \
+   *  the slot travels as a `void *` and is converted once. */                                     \
   ARNM_BVEC_MAYBE_UNUSED static inline arnm_result name##_emplace(arnm_bvec *v, type **out_slot) { \
-    return arnm_bvec_emplace(v, (void **)out_slot);                                                \
+    void *slot;                                                                                    \
+    const arnm_result result = arnm_bvec_emplace(v, &slot);                                        \
+    if (ARNM_SUCCESS == result) { *out_slot = (type *)slot; }                                      \
+    return result;                                                                                 \
   }                                                                                                \
                                                                                                    \
   /** Append a value. */                                                                           \

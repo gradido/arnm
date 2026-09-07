@@ -146,9 +146,11 @@ arnm_result arnm_graded_arena_pool_init(
     grade_bits |= 1u << arnm_ctz(capacity);
   }
 
-  arnm_dynamic_arena_pool *grades = NULL;
-  const arnm_result allocated = arnm_alloc((uint8_t **)&grades, grades_bytes(grade_count), NULL);
+  // a uint8_t* of its own and the conversion afterwards; see the note in arnm_create()
+  uint8_t *ladder = NULL;
+  const arnm_result allocated = arnm_alloc(&ladder, grades_bytes(grade_count), NULL);
   if (ARNM_SUCCESS != allocated) { return allocated; }
+  arnm_dynamic_arena_pool *grades = (arnm_dynamic_arena_pool *)(void *)ladder;
 
   // the sizes passed above, so no grade can refuse and the loop needs no way back
   for (uint16_t i = 0; i < grade_count; i++) {
@@ -164,12 +166,14 @@ arnm_result arnm_graded_arena_pool_init(
 arnm_graded_arena_pool *arnm_graded_arena_pool_create(
     const uint32_t *sizes, uint16_t grade_count, uint32_t spare_per_grade, arnm *allocator
 ) {
-  arnm_graded_arena_pool *pool = NULL;
+  // a uint8_t* of its own and the conversion afterwards; see the note in arnm_create()
+  uint8_t *block = NULL;
   // `allocator` carries this descriptor and nothing else; the ladder and its arenas are the
   // host's
-  if (ARNM_SUCCESS != arnm_alloc((uint8_t **)&pool, sizeof(arnm_graded_arena_pool), allocator)) {
+  if (ARNM_SUCCESS != arnm_alloc(&block, sizeof(arnm_graded_arena_pool), allocator)) {
     return NULL;
   }
+  arnm_graded_arena_pool *pool = (arnm_graded_arena_pool *)(void *)block;
   if (ARNM_SUCCESS != arnm_graded_arena_pool_init(pool, sizes, grade_count, spare_per_grade)) {
     // straight back to where it came from; it is still the tail there, so an arena takes it
     arnm_free((uint8_t *)pool, sizeof(arnm_graded_arena_pool), allocator);

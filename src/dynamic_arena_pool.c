@@ -97,11 +97,13 @@ arnm_result arnm_dynamic_arena_pool_init(
 arnm_dynamic_arena_pool *arnm_dynamic_arena_pool_create(
     uint32_t arena_capacity, uint32_t spare_limit, arnm *allocator
 ) {
-  arnm_dynamic_arena_pool *pool = NULL;
+  // a uint8_t* of its own and the conversion afterwards; see the note in arnm_create()
+  uint8_t *block = NULL;
   // `allocator` carries this descriptor and nothing else; the arenas are the host's
-  if (ARNM_SUCCESS != arnm_alloc((uint8_t **)&pool, sizeof(arnm_dynamic_arena_pool), allocator)) {
+  if (ARNM_SUCCESS != arnm_alloc(&block, sizeof(arnm_dynamic_arena_pool), allocator)) {
     return NULL;
   }
+  arnm_dynamic_arena_pool *pool = (arnm_dynamic_arena_pool *)(void *)block;
   if (ARNM_SUCCESS != arnm_dynamic_arena_pool_init(pool, arena_capacity, spare_limit)) {
     // straight back to where it came from; it is still the tail there, so an arena takes it
     arnm_free((uint8_t *)pool, sizeof(arnm_dynamic_arena_pool), allocator);

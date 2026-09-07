@@ -197,10 +197,29 @@ extern "C" {
  * @ref ARNM_JSON_WRITE_INF_AND_NAN_AS_NULL is asked for -- `null` is standard JSON, so that one
  * survives the build and is the only way to get such a value into the output at all.
  *
- * The other one moved the other way. The same build also sets YYJSON_DISABLE_UTF8_VALIDATION,
- * so a string is never checked and malformed bytes are always written through. That is what the
- * removed ALLOW_INVALID_UNICODE used to ask for, and it is now simply how this writer behaves;
- * a caller that must emit well formed text has to check its own input.
+ * The other one is subtler, and it is the one to read.
+ *
+ * ### The build checks UTF-8. This writer mostly does not.
+ *
+ * yyjson validates UTF-8 here, and @ref arnm_json_reader refuses a document whose bytes are not.
+ * The writer does not inherit that, because of what it does with a string a line earlier: the
+ * ordinary @ref arnm_json_writer_add_string() marks its value as needing no escaping, which is
+ * what makes borrowing a string free, and a string that needs no escaping is copied without
+ * being walked. Nothing looks at it, so nothing can refuse it. Malformed bytes go out.
+ *
+ * @ref ARNM_JSON_WRITER_STRING_ESCAPE puts a string under the pass and therefore under the
+ * check. A malformed string then fails -- but it fails at @ref arnm_json_writer_write(), with
+ * @ref ARNM_ERROR_ENCODE_FAILED, for the whole document, and
+ * @ref arnm_json_writer_error_field() is empty because by then there is no field left to name.
+ *
+ * @warning So bytes a caller did not produce are checked before they are added, not after. A
+ * request body, a header, a filename, a column someone else filled, anything decoded from
+ * base64: those go through @ref arnm_utf8_is_valid() at the edge they arrive at, once, while the
+ * field they belong to is still known. A document holding malformed UTF-8 is not JSON, and what
+ * happens to it is decided somewhere this library cannot see -- a `JSON.parse` that throws, a
+ * database that refuses the row, a queue consumer that rejects a message already acknowledged.
+ * Strings a process made itself -- literals, numbers, uuids, hex digests, enum names -- cannot
+ * fail that check and should not be walked.
  *
  * Bits 4 and 6 stay empty rather than being closed up. A caller that still passes one of the
  * removed values is answered with ARNM_ERROR_INVALID_PARAM at init, which is what a renumbering
@@ -421,6 +440,14 @@ arnm_result arnm_json_writer_status(const arnm_json_writer *writer);
  * The key of the field, `"[]"` for an element added to an array, and the empty string for
  * anything that belongs to no field. Truncated to @ref ARNM_JSON_WRITER_FIELD_NAME_SIZE bytes
  * including the terminator.
+ *
+ * A handful of refusals belong to no field and would read as that empty string while being the
+ * ones hardest to place from a result code alone -- a key given inside an array, a key missing
+ * inside an object, one `close` more than there were opens. Those carry a sentence here instead,
+ * beginning with a capital letter where a key would not: `"No container is open"`,
+ * `"Missing key for object container"`, `"Not null key for array container"`,
+ * `"arnm_json_writer_close was called too often"`. Read this for a person, not for a lookup: it
+ * is a field name where there is one and an explanation where there is not.
  *
  * @param[in] writer Writer to ask; may be NULL.
  * @return The name, never NULL, valid until the next `begin` or

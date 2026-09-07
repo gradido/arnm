@@ -144,8 +144,9 @@ static std::string reference_hex(const uint8_t *bytes, size_t count) {
   return out;
 }
 
-// a missing pointer and an empty block are different mistakes and say so
-TEST(HexTest, RejectsNullAndEmptySeparately) {
+// a missing pointer is a mistake and an empty block is not, and the two are told apart -- even
+// where they arrive together, since a NULL block is a NULL block at any size
+TEST(HexTest, RejectsNullButNotAnEmptyBlock) {
   uint8_t payload[4] = {1, 2, 3, 4};
   char out[16];
   EXPECT_EQ(arnm_binary_to_hex(nullptr, payload, sizeof(payload)), ARNM_ERROR_NULL_POINTER);
@@ -202,9 +203,10 @@ TEST(HexTest, WritesTheTerminatorAndNothingBeyondIt) {
   }
 }
 
-// promise: upper case digits decode to the same bytes, and an empty string spells no bytes and
-// is refused rather than answered -- the same way arnm_binary_to_hex() refuses an empty block
-TEST(HexTest, AcceptsBothDigitCasesAndRefusesTheEmptyString) {
+// promise: upper case digits decode to the same bytes, and an empty string spells no bytes --
+// which is an answer and not a refusal, the same way arnm_binary_to_hex() writes the empty string
+// for an empty block and the same way arnm_binary_from_base64() has always read one
+TEST(HexTest, AcceptsBothDigitCasesAndTheEmptyString) {
   uint8_t payload[8] = {0x00, 0x0f, 0xa5, 0xff, 0x10, 0xde, 0xad, 0xbe};
 
   char lower[sizeof(payload) * 2 + 1];
@@ -232,7 +234,10 @@ TEST(HexTest, AcceptsBothDigitCasesAndRefusesTheEmptyString) {
   EXPECT_EQ(arnm_binary_from_hex(untouched, ""), ARNM_SUCCESS)
       << "an empty run spells no bytes, which is an answer and not a mistake";
   for (unsigned char byte : untouched) {
-    EXPECT_EQ(byte, 0x77) << "a refusal writes nothing, not even the zeros a failed decode clears";
+    EXPECT_EQ(
+        byte, 0x77
+    ) << "no characters spell no bytes, so none are written -- not even the zeros a failed "
+         "decode clears";
   }
   EXPECT_EQ(arnm_binary_from_hex_with_known_hex_size(untouched, "00", 0), ARNM_SUCCESS)
       << "the length decides, not what the buffer happens to carry after it";
@@ -695,7 +700,9 @@ TEST(Base64, EveryLengthSurvivesTheRoundTrip) {
   }
 }
 
-TEST(Base64, NoBytesIsRefusedAndAnEmptyStringDecodesToNothing) {
+// promise: nothing in either direction is an answer -- no bytes encode to the empty string, and
+// an empty string decodes to no bytes
+TEST(Base64, NoBytesEncodesToTheEmptyStringAndBack) {
   const uint8_t byte = 0;
   char text[8];
   text[0] = 'x';

@@ -56,7 +56,8 @@
 #define JSON_ELEMENT_FIELD_NAME "[]"
 #define ERROR_MESSAGE_MISSING_KEY_OBJECT "Missing key for object container"
 #define ERROR_MESSAGE_KEY_ON_ARRAY "Not null key for array container"
-#define ERROR_INVALID_DEPTH_MESSAGE "arnm_json_writer_close was called to often"
+#define ERROR_MESSAGE_CLOSE_TOO_OFTEN "arnm_json_writer_close was called too often"
+#define ERROR_MESSAGE_NO_CONTAINER_OPEN "No container is open"
 
 /**
  * @brief Largest pool hints that can still be served, in the units the hint is written in.
@@ -406,10 +407,16 @@ static yyjson_mut_val *field(
   json_writer_state *state = (json_writer_state *)writer;
   if (!state || ARNM_SUCCESS != state->status) { return NULL; }
   if (!state->doc && ARNM_SUCCESS != begin_document(state, false)) { return NULL; }
+  // A guard on an invariant rather than on a caller: `state->doc` is never set without
+  // `state->depth` going to 1 beside it, and arnm_json_writer_close() refuses at a depth of 1,
+  // so nothing takes it back to 0 while a document stands. What it protects is the read below,
+  // where a depth of 0 would index the stack at -1. The message says what the state is and not
+  // what caused it, because no call site here can cause it -- one close too many is answered by
+  // close() itself, under its own message.
   if (0 == state->depth) {
     record_error(
-        state, ARNM_ERROR_INVALID_STATE, ERROR_INVALID_DEPTH_MESSAGE,
-        sizeof(ERROR_INVALID_DEPTH_MESSAGE) - 1u
+        state, ARNM_ERROR_INVALID_STATE, ERROR_MESSAGE_NO_CONTAINER_OPEN,
+        sizeof(ERROR_MESSAGE_NO_CONTAINER_OPEN) - 1u
     );
     return NULL;
   }
@@ -874,7 +881,14 @@ static void open_container(
   yyjson_mut_val *node = field(writer, key, key_length, escape_key);
   if (!node) { return; }
 
-  // an empty container is its tag and nothing else, exactly as yyjson_mut_obj() leaves one
+  // An empty container is its tag and nothing else, exactly as yyjson_mut_obj() and
+  // yyjson_mut_arr() leave one -- both set the tag and touch nothing else, so `uni.ptr` stays
+  // whatever the value pool held. That is safe because nothing reads it while the length is 0,
+  // and yyjson guarantees that at both ends: unsafe_yyjson_mut_obj_add() branches on the length
+  // and *writes* uni.ptr for the first member rather than reading it, and every write path in
+  // the serializer leaves an empty container at `if (ctn_len == 0) goto ..._end`. Initializing
+  // it here would cost a store per open for a field nothing looks at, and would make these
+  // containers differ from the ones yyjson makes itself.
   node->tag =
       is_array ? (YYJSON_TYPE_ARR | YYJSON_SUBTYPE_NONE) : (YYJSON_TYPE_OBJ | YYJSON_SUBTYPE_NONE);
   state->stack[state->depth] = node;
@@ -903,8 +917,12 @@ void arnm_json_writer_close(arnm_json_writer *writer) {
 
   if (state->depth <= 1u) {
     // the root closes itself at the write; one close too many would move the next field
-    // somewhere nobody expects, and silence about that is worse than the record
-    record_error(state, ARNM_ERROR_INVALID_STATE, NULL, 0);
+    // somewhere nobody expects, and silence about that is worse than the record. This is the
+    // one place that situation is really reached, so it is the one that carries its name.
+    record_error(
+        state, ARNM_ERROR_INVALID_STATE, ERROR_MESSAGE_CLOSE_TOO_OFTEN,
+        sizeof(ERROR_MESSAGE_CLOSE_TOO_OFTEN) - 1u
+    );
     return;
   }
   state->depth -= 1u;

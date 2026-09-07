@@ -142,8 +142,14 @@ arnm_result arnm_bvec_reserve(arnm_bvec *v, uint32_t element_count) {
     const uint32_t old_capacity = index_bytes(v->bucket_capacity);
     const uint32_t new_capacity = index_bytes(needed);
 
-    arnm_result result =
-        arnm_realloc((uint8_t **)&v->buckets, old_capacity, new_capacity, v->allocator);
+    /* The index array travels as a uint8_t* and is put back afterwards: arnm_realloc() stores a
+       uint8_t* through the pointer it is given, and `(uint8_t **)&v->buckets` would have it store
+       that into an object declared `void **`. See the note in arnm_create(). Writing it back
+       unconditionally is what the cast did -- where the call changed nothing, this puts back what
+       was already there. */
+    uint8_t *index = (uint8_t *)v->buckets;
+    arnm_result result = arnm_realloc(&index, old_capacity, new_capacity, v->allocator);
+    v->buckets = (void **)(void *)index;
     if (ARNM_SUCCESS != result && ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED != result) {
       return result;
     }
@@ -213,8 +219,9 @@ arnm_result arnm_bvec_shrink(arnm_bvec *v) {
   const uint32_t old_capacity = index_bytes(v->bucket_capacity);
   const uint32_t new_capacity = index_bytes(i);
   /* a refused tightening costs only unused pointer slots, so it is not an error */
-  arnm_result result =
-      arnm_realloc((uint8_t **)&v->buckets, old_capacity, new_capacity, v->allocator);
+  uint8_t *index = (uint8_t *)v->buckets;
+  arnm_result result = arnm_realloc(&index, old_capacity, new_capacity, v->allocator);
+  v->buckets = (void **)(void *)index;
   if (ARNM_SUCCESS == result) {
     v->bucket_capacity = i;
   } else if (ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED != result) {
@@ -270,8 +277,9 @@ arnm_result arnm_bvec_grow(arnm_bvec *v, void **out_slot) {
       if (new_capacity > ARNM_BVEC_MAX_INDEX_CAPACITY) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
       const uint32_t old_index_bytes = index_bytes(v->bucket_capacity);
       const uint32_t new_index_bytes = index_bytes((uint16_t)new_capacity);
-      arnm_result result =
-          arnm_realloc((uint8_t **)&v->buckets, old_index_bytes, new_index_bytes, v->allocator);
+      uint8_t *index = (uint8_t *)v->buckets;
+      arnm_result result = arnm_realloc(&index, old_index_bytes, new_index_bytes, v->allocator);
+      v->buckets = (void **)(void *)index;
       if (result != ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED && result != ARNM_SUCCESS)
         return result;
       /* above allocated_count every slot has to say "no bucket here": _shrink and _free walk

@@ -56,6 +56,7 @@ allocator is on no path this library takes.
 | `arnm/fixed_ring.h` | bounded queue, first in first out; the room taken once, a full ring refuses rather than grows |
 | `arnm/json_reader.h` | JSON parsed into your arena; one line per struct field, the first error kept with its field name, an in-situ path that copies nothing |
 | `arnm/json_writer.h` | the way back: one line per struct field, strings and keys borrowed rather than copied, and the text rendered straight into the allocator you name |
+| `arnm/utf8.h` | is this run of bytes UTF-8, and where does it stop being it -- the check the reader does for you and the writer does not |
 | `arnm/converter.h` | integer to decimal string, roughly 4× faster than `snprintf`; bytes to lowercase hex and back, uuid to its 8-4-4-4-12 form and back |
 | `arnm/duration.h` | nanoseconds to a readable span |
 | `arnm/mono_timer.h` | monotonic clock, one type, three units |
@@ -398,7 +399,7 @@ signed to string          snprintf   58.2 ns      arnm  13.8 ns
 ## Using it from another zig project
 
 ```bash
-zig fetch --save git+https://github.com/gradido/arnm#v0.7.2
+zig fetch --save git+https://github.com/gradido/arnm#v0.8.0
 ```
 
 ```zig

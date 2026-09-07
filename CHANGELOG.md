@@ -167,6 +167,75 @@ test file which calls are on which side of that line.
 
 ### Added
 
+**`arnm_json_reader` refuses a document whose bytes are not UTF-8.** yyjson is no longer built
+with `YYJSON_DISABLE_UTF8_VALIDATION`, so `arnm_json_reader_parse()` and `_parse_insitu()` answer
+`ARNM_ERROR_DECODE_FAILED` for an overlong form, a surrogate half or a code point past U+10FFFF,
+where they used to carry the bytes through unexamined. **A document that parsed before may now be
+refused** -- which is the point, but it is a behaviour change and not only a new safety net. What
+passes is unchanged, byte for byte: nothing is replaced or normalized.
+
+It costs nothing on ASCII and about a fifth of the read on text that is not -- 17.2 against 17.8
+ns per string on ASCII, 14.8 against 17.6 on multi byte, measured against yyjson compiled both
+ways. Free where a service passes its own ids and enum names, and worth the fifth at the door a
+request comes through.
+
+**The writer is deliberately not symmetric, and that is the trap this release documents.** A
+string added the ordinary way is marked as needing no escaping -- that is what makes borrowing it
+free -- and a string that needs no escaping is copied without being walked, so malformed bytes go
+out of `arnm_json_writer_write()` with `ARNM_SUCCESS` whatever the build flag says. Only
+`ARNM_JSON_WRITER_STRING_ESCAPE` puts a string under the check, and then it fails late: the whole
+document, `ARNM_ERROR_ENCODE_FAILED`, and `arnm_json_writer_error_field()` empty because there is
+no field left to name. Turning the writer's borrowing off to close that would cost an escaping
+pass over every string of every document, which is the thing the borrowing exists to avoid. So it
+stays, both headers say so, and `arnm/utf8.h` is the answer for bytes that came from outside.
+
+**Fixed: three generated wrappers wrote a `void *` through a `type **`.** The `_emplace` of
+`ARNM_FIXED_RING_DEFINE` and the `_grow` and `_emplace` of `ARNM_BVEC_DEFINE` passed
+`(void **)out_slot` down to the untyped call underneath. `void **` and `type **` are different
+types, and only `char *` is guaranteed to share a representation with `void *`, so having the
+callee store through the cast is not something C promises anything about -- in a header that
+expands into the consumer's translation unit and is compiled with whatever flags they use. The
+slot now travels as a `void *` of its own and is converted once, which is the conversion C does
+define.
+
+It costs nothing, which was worth checking rather than asserting: the local is left
+uninitialized, as the `_push` beside it always did, and the object code is instruction for
+instruction what the cast produced -- identical for `_push`, where the compiler folds the added
+test into the one the caller already makes.
+
+The same shape sat eight more times inside the library, as `(uint8_t **)&pool` and
+`(uint8_t **)&v->buckets`, where `arnm_alloc()` and `arnm_realloc()` were being asked to store a
+`uint8_t *` into an object declared as a struct pointer or as `void **`. All eight now take a
+`uint8_t *` of their own and convert once; the index array of a bucket vector is written back
+straight after the call, which is what the cast did in every case including the ones where the
+call changed nothing. A ninth was not a cast at all -- `arnm_create_multi_arena()` was casting a
+`uint8_t *` to `uint8_t **`'s target for no reason -- and simply lost it. The reasoning is written
+out once, at `arnm_create()`, rather than at each of them.
+
+**Fixed: three tables in the public headers were not tables.** clang-format reflows comment text
+to the column limit, and a markdown row longer than that came back as a paragraph of pipes --
+doxygen rendered the memory model table in `arnm/memory.h`, the resize table beside
+`arnm_realloc()` and the lifetime table in `arnm/dynamic_arena_pool.h` as prose. Repairing a row
+by hand did not survive the next `lint.sh`, so `.clang-format` now carries
+`CommentPragmas: '^ *\|'`: a comment line that begins with a pipe is left alone, and everything
+else is reflowed as before.
+
+**`arnm/utf8.h`**, one question about a run of bytes. `arnm_utf8_valid_length()` answers how far
+into @p text the bytes are well formed UTF-8 -- which is the offset of the first bad byte, and
+equals the length when there is none -- and `arnm_utf8_is_valid()` asks the same walk as a yes or
+no. What it refuses is what the standard refuses and not merely what decodes: an overlong form,
+a surrogate half, a code point past U+10FFFF, a stray continuation byte, a sequence the run ends
+inside. It validates and does not repair.
+
+It exists because the writing side of the JSON pair does not check, and it is the half that
+cannot be fixed by a build flag. See the entry below.
+
+It walks ASCII eight bytes at a time: 34 GB/s there, 2.7 GB/s over German text, 1.5 GB/s over
+Japanese, so a 4 KiB request body is a tenth of a microsecond. Scalar and portable C11 -- a
+vectorised validator reaches ten times the multi byte figure and needs intrinsics per
+architecture, which is a trade for a caller validating megabytes and not one this library
+carries.
+
 **`arnm/byte_buffer.h`**, one block filled from the front. `arnm_byte_buffer_init()` takes every
 byte it will ever hold, `arnm_byte_buffer_copy()` lands each record where the last one ended, and
 `arnm_byte_buffer_access()` hands the whole run out as the pointer and length a `write()` wants --
@@ -242,6 +311,15 @@ answer says there is one. A NULL handle answers false -- a member that is not th
 that is `null` are different things, and the mask from the walk is what tells them apart.
 
 ### Fixed
+
+**The refusals that belong to no field say which one they are.** `arnm_json_writer_error_field()`
+answers a sentence rather than an empty string for the four states a result code alone cannot
+place: a key missing inside an object, a key given inside an array, one `close` more than there
+were opens, and no container open at all. "arnm_json_writer_close was called too often" had a
+typo, and sat on the guard in `field()` rather than in `arnm_json_writer_close()` -- which is the
+only place that situation is reachable, since `close()` refuses at a depth of one and so can
+never take the depth to zero. The message moved to where it is true; the guard it left carries
+one that describes its own state. The header says what that slot can hold now.
 
 **A refusal at an array element was filed under the empty string in three adders.**
 `arnm_json_writer_add_hex()`, `_add_base64()` and `_add_uuid()` passed the caller's key straight

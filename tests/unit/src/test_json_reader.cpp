@@ -1004,3 +1004,63 @@ TEST(JsonReader, ANullMemberIsSkippedAndTheRestOfTheWalkGoesOn) {
   ASSERT_EQ(arnm_json_read_object(root, rest, 1, nullptr), ARNM_SUCCESS);
   EXPECT_EQ(retries, 3u) << "and the field behind the null was read after all";
 }
+
+/* --- malformed UTF-8 ------------------------------------------------------------------------ */
+
+// yyjson is built here with its UTF-8 validation on, so a document whose bytes are not UTF-8 is
+// not a document. What is checked below is that the refusal is the parser's and not a decoder's
+// further down: the three cases decode perfectly well and are still not UTF-8.
+
+TEST(JsonReaderUtf8, RefusesADocumentWhoseBytesAreNotUtf8) {
+  struct Case {
+    const char *document;
+    const char *what;
+  };
+  const Case cases[] = {
+      {"{\"k\":\"a\xed\xa0\x80\x62\"}", "a surrogate half, U+D800"},
+      {"{\"k\":\"a\xc0\x80\x62\"}", "an overlong NUL"},
+      {"{\"k\":\"a\xf5\x80\x80\x80\x62\"}", "a code point past the end of Unicode"},
+      {"{\"k\":\"a\xc3\"}", "a sequence the string ends inside"},
+      {"{\"\xed\xa0\x80\":1}", "and the same in a key"},
+  };
+
+  for (const Case &one : cases) {
+    arnm arena;
+    ASSERT_EQ(arnm_init_arena(&arena, 64 * 1024), ARNM_SUCCESS);
+    arnm_json_reader reader;
+    ASSERT_EQ(arnm_json_reader_init(&reader, &arena), ARNM_SUCCESS);
+    arnm_json_value *root = nullptr;
+    EXPECT_EQ(
+        arnm_json_reader_parse(&reader, one.document, strlen(one.document), false, &root),
+        ARNM_ERROR_DECODE_FAILED
+    ) << one.what;
+    (void)arnm_json_reader_release(&reader);
+    arnm_release(&arena);
+  }
+}
+
+// promise: well formed multi byte text is carried through untouched, byte for byte -- the
+// validation refuses what is malformed and changes nothing that is not
+TEST(JsonReaderUtf8, CarriesWellFormedMultiByteTextThroughUnchanged) {
+  const char document[] =
+      "{\"k\":\"gr\xc3\xbc\xc3\x9f\x65 \xe6\x97\xa5\xe6\x9c\xac \xf0\x9f\x8e\x89\"}";
+  const char expected[] = "gr\xc3\xbc\xc3\x9f\x65 \xe6\x97\xa5\xe6\x9c\xac \xf0\x9f\x8e\x89";
+
+  arnm arena;
+  ASSERT_EQ(arnm_init_arena(&arena, 64 * 1024), ARNM_SUCCESS);
+  arnm_json_reader reader;
+  ASSERT_EQ(arnm_json_reader_init(&reader, &arena), ARNM_SUCCESS);
+  arnm_json_value *root = nullptr;
+  ASSERT_EQ(
+      arnm_json_reader_parse(&reader, document, strlen(document), false, &root), ARNM_SUCCESS
+  );
+
+  arnm_memory_block value{};
+  arnm_json_field fields[] = {ARNM_JSON_FIELD_STRING("k", &value)};
+  ASSERT_EQ(arnm_json_read_object(root, fields, 1, nullptr), ARNM_SUCCESS);
+  ASSERT_EQ(value.size, strlen(expected));
+  EXPECT_EQ(memcmp(value.data, expected, value.size), 0) << "byte for byte, nothing normalized";
+
+  (void)arnm_json_reader_release(&reader);
+  arnm_release(&arena);
+}
