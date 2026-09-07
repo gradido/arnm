@@ -6,6 +6,12 @@ TabWidth: 2
 
 ColumnLimit: 100
 
+# A markdown table row has to stay on its line: doxygen reads the pipes, and reflowing one to fit
+# the column limit turns a table into a paragraph of pipes. Every table in the public headers had
+# been through that. This exempts lines that begin with a pipe and nothing else -- prose keeps
+# being reflowed as before.
+CommentPragmas: '^ *\|'
+
 BinPackParameters: false
 AlignAfterOpenBracket: AlwaysBreak
 BreakBeforeBraces: Attach

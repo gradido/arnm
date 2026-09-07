@@ -193,22 +193,21 @@ pub fn build(b: *std.Build) void {
 
     addDirSources(core_lib, b, "src");
 
-    // yyjson, the parser behind arnm/json_reader.h. It is a submodule under third_party/ and is
-    // compiled straight into libarnm, so a consumer links one library and adds one include path
-    // -- the same as before there was a JSON reader at all. The include path below is private:
-    // no installed header names yyjson, and nothing of it reaches include/arnm/json_reader.h.
+    // yyjson, the parser behind arnm/json_reader.h. Its two files are copied into
+    // third_party/yyjson/ rather than pulled in as a submodule, because `zig fetch` takes the
+    // repository tree and nothing under it -- a submodule would reach a consumer as an empty
+    // directory and take the JSON half of the library with it. See third_party/yyjson/README.md
+    // for the version, the upstream commit, and how to move it.
     //
-    // The submodule is checked rather than assumed. A fresh `git clone` without --recursive
-    // leaves the directory empty, and the error that follows would otherwise be a missing
-    // header three layers down, which says nothing about what to do next.
+    // It is compiled straight into libarnm, so a consumer links one library and adds one include
+    // path -- the same as before there was a JSON reader at all. The include path below is
+    // private: no installed header names yyjson, and nothing of it reaches
+
     const yyjson_source = "third_party/yyjson/src/yyjson.c";
-    b.build_root.handle.access(yyjson_source, .{}) catch {
-        std.debug.panic(
-            "'{s}' is missing -- the yyjson submodule is not checked out.\n" ++
-                "  git submodule update --init --recursive\n",
-            .{yyjson_source},
-        );
-    };
+    // Disable not needed features from yyjson
+    core_lib.root_module.addCMacro("YYJSON_DISABLE_INCR_READER", "1");
+    core_lib.root_module.addCMacro("YYJSON_DISABLE_UTILS", "1");
+    core_lib.root_module.addCMacro("YYJSON_DISABLE_NON_STANDARD", "1");
     core_lib.addIncludePath(b.path("third_party/yyjson/src"));
     core_lib.addCSourceFiles(.{
         .files = &[_][]const u8{yyjson_source},
@@ -234,24 +233,31 @@ pub fn build(b: *std.Build) void {
 
     if (enable_benchmarks) {
         const path = "benchmarks/src";
-        processBuildTarget(&context, .{ .name = "bench_bucket_vector", .srcs = &.{"bench_bucket_vector.c"} }, path);
-        processBuildTarget(&context, .{ .name = "bench_multi_arena", .srcs = &.{"bench_multi_arena.c"} }, path);
+        processBuildTarget(&context, .{ .name = "bench_vector", .srcs = &.{"bench_vector.c"} }, path);
+        processBuildTarget(&context, .{ .name = "bench_arena", .srcs = &.{"bench_arena.c"} }, path);
         processBuildTarget(&context, .{ .name = "bench_numberToString", .srcs = &.{"bench_numberToString.c"} }, path);
         processBuildTarget(&context, .{ .name = "bench_binaryToString", .srcs = &.{"bench_binaryToString.c"} }, path);
+        processBuildTarget(&context, .{ .name = "bench_byte_buffer", .srcs = &.{"bench_byte_buffer.c"} }, path);
         processBuildTarget(&context, .{ .name = "bench_json", .srcs = &.{"bench_json.c"} }, path);
     }
 
     if (enable_tests) {
         const path = "tests/unit/src";
+        processBuildTarget(&context, .{ .link_googletest = true, .name = "test_bitmap", .srcs = &.{"test_bitmap.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_bucket_vector", .srcs = &.{"test_bucket_vector.cpp"} }, path);
+        processBuildTarget(&context, .{ .link_googletest = true, .name = "test_byte_buffer", .srcs = &.{"test_byte_buffer.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_converter", .srcs = &.{"test_converter.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_duration", .srcs = &.{"test_duration.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_memory", .srcs = &.{"test_memory.cpp"} }, path);
+        processBuildTarget(&context, .{ .link_googletest = true, .name = "test_dynamic_arena_pool", .srcs = &.{"test_dynamic_arena_pool.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_fixed_arena_pool", .srcs = &.{"test_fixed_arena_pool.cpp"} }, path);
+        processBuildTarget(&context, .{ .link_googletest = true, .name = "test_graded_arena_pool", .srcs = &.{"test_graded_arena_pool.cpp"} }, path);
+        processBuildTarget(&context, .{ .link_googletest = true, .name = "test_fixed_ring", .srcs = &.{"test_fixed_ring.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_json_reader", .srcs = &.{"test_json_reader.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_json_writer", .srcs = &.{"test_json_writer.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_multi_arena", .srcs = &.{"test_multi_arena.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_result", .srcs = &.{"test_result.cpp"} }, path);
+        processBuildTarget(&context, .{ .link_googletest = true, .name = "test_utf8", .srcs = &.{"test_utf8.cpp"} }, path);
     }
 
     const cdbTargetsSlice = cdbTargets.toOwnedSlice(b.allocator) catch @panic("OOM");

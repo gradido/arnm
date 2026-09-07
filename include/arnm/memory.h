@@ -20,14 +20,11 @@ extern "C" {
  * file. Which strategy answers them is decided when the handle is made, and callers never
  * branch on it:
  *
- * | handle                          | made by                                                  |
- * what @ref arnm_alloc() does                     |
- * |---------------------------------|----------------------------------------------------------|-------------------------------------------------|
- * | `NULL`, or a zeroed @ref arnm   | nothing, or @ref arnm_create()                           |
- * hands the request to the host (malloc/free)     | | arena                           | @ref
- * arnm_init_arena(), @ref arnm_init_arena_borrow()    | bumps an index inside one fixed block | |
- * chain                           | @ref arnm_create_multi_arena()                           |
- * bumps an index in the first arena with room     |
+ * | handle | made by | what @ref arnm_alloc() does |
+ * |---|---|---|
+ * | `NULL`, or a zeroed @ref arnm | nothing, or @ref arnm_create() | hands the request to the host (malloc/free) |
+ * | arena | @ref arnm_init_arena(), @ref arnm_init_arena_borrow() | bumps an index inside one fixed block |
+ * | chain | @ref arnm_create_multi_arena() | bumps an index in the first arena with room |
  *
  * A function that takes an `arnm *` therefore works against all three, and a caller with no
  * opinion passes NULL and gets the host. That is the point of the handle being one type.
@@ -101,9 +98,18 @@ static inline uint32_t arnm_align8_u32(uint32_t size) {
  *
  * All zeroes is a valid, usable state: the host allocator. Everything else comes from
  * @ref arnm_init_arena(), @ref arnm_init_arena_borrow() or @ref arnm_create_multi_arena().
+ *
+ * The union is not a choice between members but an alignment floor. The layout behind these
+ * bytes holds pointers, and a bare `uint8_t[]` is aligned for nothing -- so a handle placed
+ * after an odd number of chars, in a struct or among statics, would sit on an address the
+ * implementation then reads a pointer from. `sizeof(arnm)` is 32 either way.
  */
 typedef struct arnm {
-  uint8_t bytes[32]; /**< Opaque. Read it through the predicates above, never directly. */
+  union {
+    uint8_t bytes[32];       /**< Opaque. Read it through the predicates above, never directly. */
+    void *alignment_pointer; /**< Never read. Present for its alignment alone. */
+    uint64_t alignment_integer; /**< Never read. Present for its alignment alone. */
+  } opaque;                     /**< The storage itself. Never named by a caller. */
 } arnm;
 
 // ********** manage memory allocator themself *******************
@@ -197,10 +203,9 @@ arnm_result arnm_alloc(uint8_t **buffer, uint32_t size, arnm *memory);
  * |----------|-----------|-------------------------------------------------|---------|
  * | tail     | shrink    | index moves back, the bytes are reusable        | SUCCESS |
  * | tail     | grow      | index moves on, the address does not change     | SUCCESS |
- * | tail     | grow, no room in *this* arena, chain only | fresh block elsewhere in the chain,
- * contents copied, old block given back | SUCCESS | | non tail | grow      | fresh block, @p
- * old_size bytes copied, old one abandoned | WARNING | | non tail | shrink    | nothing at all,
- * address and bytes kept          | WARNING |
+ * | tail     | grow, no room in *this* arena, chain only | fresh block elsewhere in the chain, contents copied, old block given back | SUCCESS |
+ * | non tail | grow      | fresh block, @p old_size bytes copied, old one abandoned | WARNING |
+ * | non tail | shrink    | nothing at all, address and bytes kept          | WARNING |
  *
  * @param[in,out] buffer   Not NULL, but may point to NULL to allocate from scratch. Updated
  *                         when the block moves.

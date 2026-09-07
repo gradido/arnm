@@ -14,9 +14,17 @@
 // ********** manage memory allocator themself *******************
 
 arnm *arnm_create(arnm *allocator) {
-  arnm *memory = NULL;
+  // A uint8_t* of its own, and the conversion afterwards. arnm_alloc() stores a uint8_t* through
+  // the pointer it is given, and letting it store that into an object declared `arnm *` -- which
+  // is what `(uint8_t **)&memory` asks for -- is not something C defines: only `char *` is
+  // guaranteed to share a representation with another object pointer. The same reason the
+  // generated wrappers in arnm/fixed_ring.h and arnm/bucket_vector.h take a void* of their own,
+  // and like those it costs nothing. Every other allocation of a struct in this library reads
+  // this way; the note is here once rather than at each of them.
+  uint8_t *block = NULL;
   // for allocator == NULL, arnm_alloc use default single allocation (like malloc)
-  if (ARNM_SUCCESS != arnm_alloc((uint8_t **)&memory, sizeof(arnm), allocator)) { return NULL; }
+  if (ARNM_SUCCESS != arnm_alloc(&block, sizeof(arnm), allocator)) { return NULL; }
+  arnm *memory = (arnm *)(void *)block;
   // zeroed, so it is in a valid state and can be directly used
   memset(memory, 0, sizeof(arnm));
   return memory;
@@ -290,7 +298,7 @@ arnm *arnm_create_multi_arena(arnm_multi_arena_options *options, arnm *allocator
   uint8_t *buffer = NULL;
   // for allocator == NULL, arnm_alloc use default single allocation (like malloc)
   uint32_t allocation_size = sizeof(arnm) + sizeof(arnm_multi_arena);
-  if (ARNM_SUCCESS != arnm_alloc((uint8_t **)&buffer, allocation_size, allocator)) return NULL;
+  if (ARNM_SUCCESS != arnm_alloc(&buffer, allocation_size, allocator)) return NULL;
   arnm_intern *memory = (arnm_intern *)buffer;
   // _validate resolves the defaults as well, so this is the only place the options are read
   arnm_result result = arnm_multi_arena_options_validate(options);
