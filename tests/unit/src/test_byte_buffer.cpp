@@ -241,6 +241,167 @@ TEST(ByteBuffer, CopyRefusesArgumentsItCannotUse) {
   ASSERT_EQ(arnm_byte_buffer_free(&buffer, nullptr), ARNM_SUCCESS);
 }
 
+// promise: a pushed byte lands exactly where a copy of one byte would have, and the two
+// interleave without a seam -- push is the same append, spelled for a single byte
+TEST(ByteBuffer, PushAppendsOneByteWhereACopyWouldHavePutIt) {
+  arnm_byte_buffer pushed;
+  arnm_byte_buffer copied;
+  ASSERT_EQ(arnm_byte_buffer_init(&pushed, 32, nullptr), ARNM_SUCCESS);
+  ASSERT_EQ(arnm_byte_buffer_init(&copied, 32, nullptr), ARNM_SUCCESS);
+
+  const char *record = "{\"a\":1}";
+  ASSERT_EQ(Append(&pushed, record), ARNM_SUCCESS);
+  ASSERT_EQ(arnm_byte_buffer_push(&pushed, '\n'), ARNM_SUCCESS);
+  ASSERT_EQ(Append(&pushed, record), ARNM_SUCCESS);
+
+  ASSERT_EQ(Append(&copied, record), ARNM_SUCCESS);
+  ASSERT_EQ(arnm_byte_buffer_copy(&copied, "\n", 1), ARNM_SUCCESS);
+  ASSERT_EQ(Append(&copied, record), ARNM_SUCCESS);
+
+  EXPECT_EQ(Content(&pushed), Content(&copied));
+  EXPECT_EQ(pushed.last_index, copied.last_index);
+  EXPECT_EQ(pushed.last_index, 15u);
+
+  ASSERT_EQ(arnm_byte_buffer_free(&pushed, nullptr), ARNM_SUCCESS);
+  ASSERT_EQ(arnm_byte_buffer_free(&copied, nullptr), ARNM_SUCCESS);
+}
+
+// promise: every byte value goes in unchanged, the ones above 0x7F included. That is what the
+// uint8_t parameter is for: with a char one, half of these are a narrowing conversion at the
+// call site and gcc says so under -Wconversion.
+TEST(ByteBuffer, PushTakesEveryByteValueUnchanged) {
+  arnm_byte_buffer buffer;
+  ASSERT_EQ(arnm_byte_buffer_init(&buffer, 256, nullptr), ARNM_SUCCESS);
+
+  for (int value = 0; value <= 255; ++value) {
+    ASSERT_EQ(arnm_byte_buffer_push(&buffer, static_cast<uint8_t>(value)), ARNM_SUCCESS)
+        << "byte " << value;
+  }
+  EXPECT_EQ(buffer.last_index, 256u);
+
+  const uint8_t *data = nullptr;
+  uint32_t size = 0;
+  ASSERT_EQ(arnm_byte_buffer_access(&buffer, &data, &size), ARNM_SUCCESS);
+  ASSERT_EQ(size, 256u);
+  for (int value = 0; value <= 255; ++value) {
+    ASSERT_EQ(data[value], static_cast<uint8_t>(value)) << "at " << value;
+  }
+
+  ASSERT_EQ(arnm_byte_buffer_free(&buffer, nullptr), ARNM_SUCCESS);
+}
+
+// promise: the last byte is usable and the one after it is refused, with nothing written and
+// the mark where it was -- the same all or nothing a copy promises
+TEST(ByteBuffer, PushFillsTheLastByteAndThenRefuses) {
+  arnm_byte_buffer buffer;
+  ASSERT_EQ(arnm_byte_buffer_init(&buffer, 4, nullptr), ARNM_SUCCESS);
+
+  ASSERT_EQ(Append(&buffer, "abc"), ARNM_SUCCESS);
+  ASSERT_EQ(arnm_byte_buffer_push(&buffer, 'd'), ARNM_SUCCESS) << "the last byte is a byte";
+  EXPECT_EQ(arnm_byte_buffer_available(&buffer), 0u);
+
+  EXPECT_EQ(arnm_byte_buffer_push(&buffer, 'e'), ARNM_ERROR_RESOURCE_EXHAUSTED);
+  EXPECT_EQ(buffer.last_index, 4u);
+  EXPECT_EQ(Content(&buffer), "abcd");
+
+  // and a copy of one byte agrees with it, which is the invariant the two share
+  EXPECT_EQ(arnm_byte_buffer_copy(&buffer, "e", 1), ARNM_ERROR_RESOURCE_EXHAUSTED);
+
+  ASSERT_EQ(arnm_byte_buffer_free(&buffer, nullptr), ARNM_SUCCESS);
+}
+
+// promise: push refuses what it cannot use, exactly where copy does
+TEST(ByteBuffer, PushRefusesABufferItCannotWriteTo) {
+  EXPECT_EQ(arnm_byte_buffer_push(nullptr, 'x'), ARNM_ERROR_NULL_POINTER);
+
+  arnm_byte_buffer empty = {};
+  EXPECT_EQ(arnm_byte_buffer_push(&empty, 'x'), ARNM_ERROR_NOT_INITIALIZED);
+  EXPECT_EQ(empty.last_index, 0u);
+}
+
+// ---------------------------------------------------------------------------
+// the unsafe pair
+// ---------------------------------------------------------------------------
+
+// promise: the unsafe calls write what the safe ones write, byte for byte and mark for mark.
+// They are the same append with the questions asked somewhere else, not a different one.
+TEST(ByteBuffer, TheUnsafePairWritesExactlyWhatTheSafePairWrites) {
+  arnm_byte_buffer safe;
+  arnm_byte_buffer unsafe;
+  ASSERT_EQ(arnm_byte_buffer_init(&safe, 256, nullptr), ARNM_SUCCESS);
+  ASSERT_EQ(arnm_byte_buffer_init(&unsafe, 256, nullptr), ARNM_SUCCESS);
+
+  const uint8_t record[5] = {0x00, 0xff, 0x41, 0x7f, 0x80};
+  for (int round = 0; round < 8; ++round) {
+    ASSERT_EQ(arnm_byte_buffer_copy(&safe, record, sizeof(record)), ARNM_SUCCESS);
+    ASSERT_EQ(arnm_byte_buffer_push(&safe, static_cast<uint8_t>(round)), ARNM_SUCCESS);
+
+    // the shape the unsafe pair is written for: one question for the whole group
+    ASSERT_GE(arnm_byte_buffer_available(&unsafe), sizeof(record) + 1u);
+    unsafe_arnm_byte_buffer_copy(&unsafe, record, sizeof(record));
+    unsafe_arnm_byte_buffer_push(&unsafe, static_cast<uint8_t>(round));
+  }
+
+  EXPECT_EQ(safe.last_index, unsafe.last_index);
+  EXPECT_EQ(Content(&safe), Content(&unsafe));
+
+  // and the last byte either of them may write is the last byte of the block, not one past it
+  arnm_byte_buffer edge;
+  ASSERT_EQ(arnm_byte_buffer_init(&edge, 4, nullptr), ARNM_SUCCESS);
+  unsafe_arnm_byte_buffer_copy(&edge, "abc", 3);
+  unsafe_arnm_byte_buffer_push(&edge, 'd');
+  EXPECT_EQ(Content(&edge), "abcd");
+  EXPECT_EQ(arnm_byte_buffer_available(&edge), 0u);
+
+  ASSERT_EQ(arnm_byte_buffer_free(&safe, nullptr), ARNM_SUCCESS);
+  ASSERT_EQ(arnm_byte_buffer_free(&unsafe, nullptr), ARNM_SUCCESS);
+  ASSERT_EQ(arnm_byte_buffer_free(&edge, nullptr), ARNM_SUCCESS);
+}
+
+#ifndef NDEBUG
+// What the unsafe pair asserts is exactly what the safe pair refuses, so these walk that list.
+// They are the only tests here that cannot run with NDEBUG defined -- a release build takes the
+// checks out, which is the whole point of them -- so the whole block is compiled out there
+// rather than left to fail.
+
+TEST(ByteBufferDeathTest, UnsafeCopyChecksWhatTheSafeCopyRefuses) {
+  arnm_byte_buffer buffer;
+  ASSERT_EQ(arnm_byte_buffer_init(&buffer, 8, nullptr), ARNM_SUCCESS);
+  ASSERT_EQ(Append(&buffer, "abcde"), ARNM_SUCCESS);
+
+  EXPECT_DEATH(unsafe_arnm_byte_buffer_copy(&buffer, "XXXX", 4), "room for")
+      << "three bytes are free and four were offered";
+  EXPECT_DEATH(unsafe_arnm_byte_buffer_copy(&buffer, "X", 0), "size is 0");
+  EXPECT_DEATH(unsafe_arnm_byte_buffer_copy(&buffer, nullptr, 1), "src is NULL");
+  EXPECT_DEATH(unsafe_arnm_byte_buffer_copy(nullptr, "X", 1), "buffer is NULL");
+
+  arnm_byte_buffer empty = {};
+  EXPECT_DEATH(unsafe_arnm_byte_buffer_copy(&empty, "X", 1), "holds no block");
+
+  // the parent process is untouched by any of that, and the buffer still works
+  EXPECT_EQ(Content(&buffer), "abcde");
+  ASSERT_EQ(Append(&buffer, "fgh"), ARNM_SUCCESS);
+  EXPECT_EQ(Content(&buffer), "abcdefgh");
+  ASSERT_EQ(arnm_byte_buffer_free(&buffer, nullptr), ARNM_SUCCESS);
+}
+
+TEST(ByteBufferDeathTest, UnsafePushChecksWhatTheSafePushRefuses) {
+  arnm_byte_buffer buffer;
+  ASSERT_EQ(arnm_byte_buffer_init(&buffer, 4, nullptr), ARNM_SUCCESS);
+  ASSERT_EQ(Append(&buffer, "abcd"), ARNM_SUCCESS);
+  ASSERT_EQ(arnm_byte_buffer_available(&buffer), 0u);
+
+  EXPECT_DEATH(unsafe_arnm_byte_buffer_push(&buffer, 'e'), "the buffer is full");
+  EXPECT_DEATH(unsafe_arnm_byte_buffer_push(nullptr, 'e'), "buffer is NULL");
+
+  arnm_byte_buffer empty = {};
+  EXPECT_DEATH(unsafe_arnm_byte_buffer_push(&empty, 'e'), "holds no block");
+
+  EXPECT_EQ(Content(&buffer), "abcd");
+  ASSERT_EQ(arnm_byte_buffer_free(&buffer, nullptr), ARNM_SUCCESS);
+}
+#endif // NDEBUG
+
 // ---------------------------------------------------------------------------
 // reading it back out
 // ---------------------------------------------------------------------------

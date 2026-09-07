@@ -238,6 +238,7 @@ pub fn build(b: *std.Build) void {
         processBuildTarget(&context, .{ .name = "bench_arena", .srcs = &.{"bench_arena.c"} }, path);
         processBuildTarget(&context, .{ .name = "bench_numberToString", .srcs = &.{"bench_numberToString.c"} }, path);
         processBuildTarget(&context, .{ .name = "bench_binaryToString", .srcs = &.{"bench_binaryToString.c"} }, path);
+        processBuildTarget(&context, .{ .name = "bench_byte_buffer", .srcs = &.{"bench_byte_buffer.c"} }, path);
         processBuildTarget(&context, .{ .name = "bench_json", .srcs = &.{"bench_json.c"} }, path);
     }
 

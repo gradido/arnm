@@ -223,18 +223,44 @@ static void record_error(
 
 // ********** building *******************
 
-/** @brief Let the document go, and say whether an arena kept any of it. */
-static void dispose_document(json_writer_state *state) {
+/**
+ * @brief Let the document go, and say whether an arena kept any of it.
+ *
+ * Everything one document took is one run of blocks, opened by `yyjson_mut_doc_new()` and grown
+ * by chunks chained behind it, so where the arena still ends at that run it comes back in a
+ * single arnm_free() -- see json_alc_release_span(). What that replaces is not merely slower
+ * but, in an arena, largely ineffective: `yyjson_mut_doc_free()` releases the string pool, then
+ * the value pool, then the document, while the chunks of the two pools were interleaved as they
+ * were allocated. Most of those releases are therefore buried, give nothing back, and leave the
+ * caller holding the warning for a document that is gone.
+ *
+ * The run is asked for and not assumed. Anything else in the arena on top of it -- the written
+ * text, where the caller named the same allocator for it -- makes arnm_free() answer the
+ * warning instead, and the chunk by chunk release below runs as it always did.
+ *
+ * @param[in,out] state Writer state; not NULL.
+ * @retval ARNM_SUCCESS Released, or there was nothing to release.
+ * @retval ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED The document is gone and an arena kept part of
+ *                     its bytes until that arena resets.
+ * @whisper The scaffolding recedes, all at once where the ground allows it
+ */
+static arnm_result dispose_document(json_writer_state *state) {
   state->depth = 0;
-  if (state->doc) {
-    state->alc_context.arena_kept_bytes = false;
-    if (arnm_is_arena(state->alc_context.allocator)) {
-      arnm_reset(state->alc_context.allocator);
-    } else {
-      yyjson_mut_doc_free(state->doc);
-    }
+  if (!state->doc) { return ARNM_SUCCESS; }
+
+  state->alc_context.arena_kept_bytes = false;
+  if (json_alc_release_span(&state->alc_context, state->doc)) {
     state->doc = NULL;
+    return ARNM_SUCCESS;
   }
+
+  yyjson_mut_doc_free(state->doc);
+  state->doc = NULL;
+  // Whatever the chunk by chunk release could not reclaim is no longer ours to account for; the
+  // next document opens its own run at its own address.
+  json_alc_span_reset(&state->alc_context);
+  return state->alc_context.arena_kept_bytes ? ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED
+                                             : ARNM_SUCCESS;
 }
 
 /**
@@ -431,8 +457,7 @@ arnm_result arnm_json_writer_init(
   if (ARNM_SUCCESS != translated) { return translated; }
 
   json_writer_state *state = (json_writer_state *)(void *)writer;
-  state->alc_context.allocator = allocator;
-  state->alc_context.arena_kept_bytes = false;
+  json_alc_context_init(&state->alc_context, allocator);
   json_alc_bind(&state->alc, &state->alc_context);
   state->doc = NULL;
   state->write_flags = write_flags;
@@ -467,8 +492,7 @@ arnm_result arnm_json_writer_release(arnm_json_writer *writer) {
   if (!writer) { return ARNM_SUCCESS; }
   json_writer_state *state = state_of(writer);
   if (!state) { return ARNM_ERROR_NOT_INITIALIZED; }
-  dispose_document(state);
-  return ARNM_SUCCESS;
+  return dispose_document(state);
 }
 
 arnm_result arnm_json_writer_destroy(arnm_json_writer *writer, arnm *allocator) {
@@ -476,14 +500,18 @@ arnm_result arnm_json_writer_destroy(arnm_json_writer *writer, arnm *allocator) 
   json_writer_state *state = state_of(writer);
   if (!state) { return ARNM_ERROR_NOT_INITIALIZED; }
 
-  dispose_document(state);
+  const arnm_result released = dispose_document(state);
   // the magic goes before the bytes do, so a second destroy finds an uninitialized writer
   state->magic = 0;
 
   const arnm_result given_back =
       arnm_free((uint8_t *)(void *)writer, (uint32_t)sizeof(arnm_json_writer), allocator);
 
-  return given_back;
+  // Either half may have left bytes with an arena and the header promises one answer for both,
+  // so the warning outlives a success. A real error from the release of the writer's own bytes
+  // is the more specific answer and wins over it.
+  if (ARNM_SUCCESS != given_back) { return given_back; }
+  return released;
 }
 
 arnm_result arnm_json_writer_begin_object(arnm_json_writer *writer) {
@@ -653,6 +681,17 @@ void arnm_json_writer_add_string(
  */
 #define JSON_HEX_MAX_BYTES ((ARNM_MAX_ALLOC_SIZE - 3u) / 2u)
 
+/*
+ * This cap has to stay inside the converter's own, so that a block too large is refused here --
+ * where the name of the field is still at hand -- rather than by arnm_binary_to_hex() further
+ * down, where the answer would arrive after the text was already reserved. Holding it at compile
+ * time is what lets the call below go unchecked; see the note at that call.
+ */
+static_assert(
+    JSON_HEX_MAX_BYTES <= ARNM_HEX_MAX_BINARY_SIZE,
+    "arnm_json_writer_add_hex() has to refuse a block before arnm_binary_to_hex() would"
+);
+
 void arnm_json_writer_add_hex(
     arnm_json_writer *writer,
     const char *key,
@@ -688,18 +727,22 @@ void arnm_json_writer_add_hex(
   const size_t text_length = (size_t)size * 2u + 2u;
   char *text = unsafe_yyjson_mut_str_alc(state->doc, text_length);
   if (!text) {
-    record_error(state, ARNM_ERROR_OUT_OF_MEMORY, key, key_length);
+    record_error(
+        state, ARNM_ERROR_OUT_OF_MEMORY, field_name(key), field_name_length(key, key_length)
+    );
     return;
   }
 
   text[0] = '"';
-  // arnm_binary_to_hex() closes its run with a terminator, which lands exactly where the
-  // closing quote goes and is overwritten by it a line later
-  const arnm_result result = arnm_binary_to_hex(text + 1, data, size);
-  if (ARNM_SUCCESS != result) {
-    record_error(state, result, key, key_length);
-    return;
-  }
+  // Not checked, because none of the three refusals arnm_binary_to_hex() has is still open: the
+  // buffer came back from the string pool a line above, the block and its size were answered at
+  // the top of this function, and the size cap is held against the converter's by the
+  // static_assert at JSON_HEX_MAX_BYTES. What is left cannot fail, and a branch on it would read
+  // as though it could.
+  //
+  // The converter closes its run with a terminator, which lands exactly where the closing quote
+  // goes and is overwritten by it a line later.
+  (void)arnm_binary_to_hex(text + 1, data, size);
   text[text_length - 1u] = '"';
   text[text_length] = '\0';
 
@@ -714,6 +757,12 @@ void arnm_json_writer_add_hex(
  * Four characters per three bytes, rounded up to a whole group, plus the quotes and the NUL.
  */
 #define JSON_BASE64_MAX_BYTES (((ARNM_MAX_ALLOC_SIZE - 3u) / 4u) * 3u)
+
+/* As at JSON_HEX_MAX_BYTES: the writer's cap stays inside the converter's. */
+static_assert(
+    JSON_BASE64_MAX_BYTES <= ARNM_BASE64_MAX_BINARY_SIZE,
+    "arnm_json_writer_add_base64() has to refuse a block before arnm_binary_to_base64() would"
+);
 
 void arnm_json_writer_add_base64(
     arnm_json_writer *writer,
@@ -743,18 +792,16 @@ void arnm_json_writer_add_base64(
   const uint32_t text_length = ARNM_BASE64_STRING_LENGTH(size) + 2u;
   char *text = unsafe_yyjson_mut_str_alc(state->doc, text_length);
   if (!text) {
-    record_error(state, ARNM_ERROR_OUT_OF_MEMORY, key, key_length);
+    record_error(
+        state, ARNM_ERROR_OUT_OF_MEMORY, field_name(key), field_name_length(key, key_length)
+    );
     return;
   }
 
   text[0] = '"';
-  // as in arnm_json_writer_add_hex(): the terminator the converter leaves behind lands exactly
-  // where the closing quote goes
-  const arnm_result encoded = arnm_binary_to_base64(text + 1, data, size);
-  if (ARNM_SUCCESS != encoded) {
-    record_error(state, encoded, key, key_length);
-    return;
-  }
+  // as in arnm_json_writer_add_hex(): nothing here can refuse any more, and the terminator the
+  // converter leaves behind lands exactly where the closing quote goes
+  (void)arnm_binary_to_base64(text + 1, data, size);
   text[text_length - 1u] = '"';
   text[text_length] = '\0';
 
@@ -786,7 +833,9 @@ void arnm_json_writer_add_uuid(
 
   char *text = unsafe_yyjson_mut_str_alc(state->doc, JSON_UUID_TEXT_LENGTH);
   if (!text) {
-    record_error(state, ARNM_ERROR_OUT_OF_MEMORY, key, key_length);
+    record_error(
+        state, ARNM_ERROR_OUT_OF_MEMORY, field_name(key), field_name_length(key, key_length)
+    );
     return;
   }
 

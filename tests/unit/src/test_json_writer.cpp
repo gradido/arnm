@@ -4,6 +4,7 @@
 #include "arnm/json_writer.h"
 #include "arnm/memory.h"
 #include "arnm/memory_block.h"
+#include "arnm/multi_arena.h"
 #include "arnm/result.h"
 
 #include "memory_limit.h"
@@ -1590,6 +1591,73 @@ TEST(JsonWriter, ABlockTooLargeToRenderIsRefusedForWhatItWouldBe) {
       << "an element of an array has no name, so the sentinel is what it is filed under";
 }
 
+// promise: a refusal at an element of an array is filed under the "[]" sentinel, whatever the
+// refusal was. The size branch above already did that; the out of memory branch beside it is
+// reached through a different door -- the string pool, not the size check -- and the header
+// makes one promise for both: the empty string is for what belongs to no field at all.
+TEST(JsonWriter, AnElementThatRunsOutOfMemoryIsFiledUnderTheSentinelToo) {
+  // An arena with room for the document and its first values, and nothing left for text: the
+  // string pool cannot open its first chunk, which is the door these three go through.
+  auto exhausted_array_writer = [](arnm *arena, arnm_json_writer *writer) {
+    ASSERT_EQ(arnm_init_arena(arena, 2048), ARNM_SUCCESS);
+    ASSERT_EQ(arnm_json_writer_init(writer, arena, ARNM_JSON_WRITE_DEFAULT, nullptr), ARNM_SUCCESS);
+    ASSERT_EQ(arnm_json_writer_begin_array(writer), ARNM_SUCCESS);
+    uint8_t *filler = nullptr;
+    const uint32_t left = arnm_arena_remaining(arena);
+    ASSERT_GT(left, 0u);
+    ASSERT_EQ(arnm_alloc(&filler, left, arena), ARNM_SUCCESS) << "nothing may be left over";
+  };
+
+  const uint8_t payload[16] = {0};
+
+  {
+    arnm arena;
+    arnm_json_writer writer;
+    exhausted_array_writer(&arena, &writer);
+    arnm_json_writer_add_hex(&writer, nullptr, 0, false, payload, sizeof(payload));
+    EXPECT_EQ(arnm_json_writer_status(&writer), ARNM_ERROR_OUT_OF_MEMORY);
+    EXPECT_STREQ(arnm_json_writer_error_field(&writer), "[]") << "add_hex";
+    arnm_release(&arena);
+  }
+  {
+    arnm arena;
+    arnm_json_writer writer;
+    exhausted_array_writer(&arena, &writer);
+    arnm_json_writer_add_base64(&writer, nullptr, 0, false, payload, sizeof(payload));
+    EXPECT_EQ(arnm_json_writer_status(&writer), ARNM_ERROR_OUT_OF_MEMORY);
+    EXPECT_STREQ(arnm_json_writer_error_field(&writer), "[]") << "add_base64";
+    arnm_release(&arena);
+  }
+  {
+    arnm arena;
+    arnm_json_writer writer;
+    exhausted_array_writer(&arena, &writer);
+    arnm_json_writer_add_uuid(&writer, nullptr, 0, false, payload);
+    EXPECT_EQ(arnm_json_writer_status(&writer), ARNM_ERROR_OUT_OF_MEMORY);
+    EXPECT_STREQ(arnm_json_writer_error_field(&writer), "[]") << "add_uuid";
+    arnm_release(&arena);
+  }
+}
+
+// promise: a named field keeps its own name on that same path, which is what says the sentinel
+// above is standing in for a missing key and not overwriting a present one
+TEST(JsonWriter, ANamedFieldThatRunsOutOfMemoryKeepsItsName) {
+  arnm arena;
+  ASSERT_EQ(arnm_init_arena(&arena, 2048), ARNM_SUCCESS);
+  arnm_json_writer writer;
+  ASSERT_EQ(arnm_json_writer_init(&writer, &arena, ARNM_JSON_WRITE_DEFAULT, nullptr), ARNM_SUCCESS);
+  ASSERT_EQ(arnm_json_writer_begin_object(&writer), ARNM_SUCCESS);
+  uint8_t *filler = nullptr;
+  ASSERT_EQ(arnm_alloc(&filler, arnm_arena_remaining(&arena), &arena), ARNM_SUCCESS);
+
+  const uint8_t payload[16] = {0};
+  arnm_json_writer_add_hex(&writer, ARNM_JSON_WRITER_KEY("digest"), payload, sizeof(payload));
+  EXPECT_EQ(arnm_json_writer_status(&writer), ARNM_ERROR_OUT_OF_MEMORY);
+  EXPECT_STREQ(arnm_json_writer_error_field(&writer), "digest");
+
+  arnm_release(&arena);
+}
+
 TEST(JsonWriter, TheEstimateChargesAContainerForItsBracketsAsWellAsItsSlot) {
   // A container is a value like any other and is counted as one, plus one more for the brackets
   // around whatever goes inside -- text that no element of its own will ever be charged for.
@@ -1604,4 +1672,202 @@ TEST(JsonWriter, TheEstimateChargesAContainerForItsBracketsAsWellAsItsSlot) {
   const uint32_t with = arnm_json_writer_buffer_size_min(nested.writer());
 
   EXPECT_GT(with, without) << "an empty object costs more than a scalar under the same key";
+}
+
+/* --- what a release gives back ------------------------------------------------------------ */
+
+// A document is one run of blocks in the allocator it was built from, and releasing it gives
+// that run back in a single step where the arena still ends at it. What these pin is not the
+// step -- that is an optimisation -- but what it may never cost: memory in the same arena that
+// belongs to the caller, and the warning when the run could not come back.
+
+namespace {
+
+/** Fill @p writer with a document big enough to make yyjson open more than one chunk.
+ *
+ *  The adders answer nothing on purpose -- the writer keeps the first refusal and is asked once
+ *  at the end, which is the shape the header describes.
+ */
+void WriteAFewFields(arnm_json_writer *writer) {
+  ASSERT_EQ(arnm_json_writer_begin_object(writer), ARNM_SUCCESS);
+  for (uint32_t i = 0; i < 64u; ++i) {
+    arnm_json_writer_add_string(
+        writer, ARNM_JSON_WRITER_KEY("field"), LONG_CONTENT_STRING, strlen(LONG_CONTENT_STRING)
+    );
+    arnm_json_writer_add_uint64(writer, ARNM_JSON_WRITER_KEY("n"), i);
+  }
+  ASSERT_EQ(arnm_json_writer_status(writer), ARNM_SUCCESS);
+}
+
+} // namespace
+
+// promise: releasing a document gives the whole of it back to the arena it came from
+TEST(JsonWriterRelease, TheDocumentComesBackToTheArenaItCameFrom) {
+  arnm arena;
+  ASSERT_EQ(arnm_init_arena(&arena, kArenaCapacity), ARNM_SUCCESS);
+
+  arnm_json_writer writer;
+  ASSERT_EQ(arnm_json_writer_init(&writer, &arena, ARNM_JSON_WRITE_DEFAULT, nullptr), ARNM_SUCCESS);
+  const uint32_t before = arnm_arena_remaining(&arena);
+
+  WriteAFewFields(&writer);
+  EXPECT_LT(arnm_arena_remaining(&arena), before) << "the document has to be in there somewhere";
+
+  EXPECT_EQ(arnm_json_writer_release(&writer), ARNM_SUCCESS);
+  EXPECT_EQ(arnm_arena_remaining(&arena), before) << "every byte of the run, not most of them";
+
+  // and the writer still works afterwards, which is what a release promises over a destroy
+  WriteAFewFields(&writer);
+  EXPECT_EQ(arnm_json_writer_release(&writer), ARNM_SUCCESS);
+  EXPECT_EQ(arnm_arena_remaining(&arena), before);
+
+  arnm_release(&arena);
+}
+
+// promise: what the caller put in the same arena is none of the writer's business. This is the
+// one that says why the release cannot simply reset the arena: it has no way of knowing what
+// else is in there.
+TEST(JsonWriterRelease, MemoryTheCallerHoldsInTheSameArenaSurvivesIt) {
+  arnm arena;
+  ASSERT_EQ(arnm_init_arena(&arena, kArenaCapacity), ARNM_SUCCESS);
+
+  // something of the caller's, made before the writer ever sees the arena
+  uint8_t *mine = nullptr;
+  ASSERT_EQ(arnm_alloc(&mine, 64, &arena), ARNM_SUCCESS);
+  memset(mine, 0xA5, 64);
+  const uint32_t after_mine = arnm_arena_remaining(&arena);
+
+  arnm_json_writer writer;
+  ASSERT_EQ(arnm_json_writer_init(&writer, &arena, ARNM_JSON_WRITE_DEFAULT, nullptr), ARNM_SUCCESS);
+  WriteAFewFields(&writer);
+  EXPECT_EQ(arnm_json_writer_release(&writer), ARNM_SUCCESS);
+
+  for (int i = 0; i < 64; ++i) { ASSERT_EQ(mine[i], 0xA5) << "byte " << i; }
+  EXPECT_EQ(arnm_arena_remaining(&arena), after_mine)
+      << "the document went back and the caller's block did not";
+
+  // the arena still knows it is handed out: a fresh allocation must not land on top of it
+  uint8_t *next = nullptr;
+  ASSERT_EQ(arnm_alloc(&next, 64, &arena), ARNM_SUCCESS);
+  EXPECT_NE(next, mine);
+  for (int i = 0; i < 64; ++i) { EXPECT_EQ(mine[i], 0xA5) << "byte " << i; }
+
+  arnm_release(&arena);
+}
+
+// promise: a run that is no longer at the tail is not given back, and the caller is told. The
+// bytes stay with the arena until it resets -- which is exactly what the warning means.
+TEST(JsonWriterRelease, ARunWithSomethingOnTopOfItReportsWhatTheArenaKept) {
+  arnm arena;
+  ASSERT_EQ(arnm_init_arena(&arena, kArenaCapacity), ARNM_SUCCESS);
+
+  arnm_json_writer writer;
+  ASSERT_EQ(arnm_json_writer_init(&writer, &arena, ARNM_JSON_WRITE_DEFAULT, nullptr), ARNM_SUCCESS);
+  WriteAFewFields(&writer);
+
+  // the caller allocates while the document stands, so the run is buried under it
+  uint8_t *on_top = nullptr;
+  ASSERT_EQ(arnm_alloc(&on_top, 64, &arena), ARNM_SUCCESS);
+  memset(on_top, 0x5A, 64);
+  const uint32_t buried = arnm_arena_remaining(&arena);
+
+  EXPECT_EQ(arnm_json_writer_release(&writer), ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED);
+  EXPECT_EQ(arnm_arena_remaining(&arena), buried)
+      << "nothing may be given back while the caller's block sits on top of it";
+  for (int i = 0; i < 64; ++i) { EXPECT_EQ(on_top[i], 0x5A) << "byte " << i; }
+
+  // and the writer is still usable: the next document opens its own run above everything
+  WriteAFewFields(&writer);
+  EXPECT_EQ(arnm_json_writer_release(&writer), ARNM_SUCCESS)
+      << "the new run is at the tail, whatever the old one left behind";
+  EXPECT_EQ(arnm_arena_remaining(&arena), buried);
+
+  arnm_release(&arena);
+}
+
+// promise: the text a write produced belongs to the caller and outlives the document. With the
+// same allocator for both, the text sits on top of the run -- so this is also the everyday
+// shape of the case above.
+TEST(JsonWriterRelease, TextWrittenIntoTheSameArenaIsUntouchedByTheRelease) {
+  arnm arena;
+  ASSERT_EQ(arnm_init_arena(&arena, kArenaCapacity), ARNM_SUCCESS);
+
+  arnm_json_writer writer;
+  ASSERT_EQ(arnm_json_writer_init(&writer, &arena, ARNM_JSON_WRITE_DEFAULT, nullptr), ARNM_SUCCESS);
+  ASSERT_EQ(arnm_json_writer_begin_object(&writer), ARNM_SUCCESS);
+  arnm_json_writer_add_string(&writer, ARNM_JSON_WRITER_KEY("k"), "value", 5);
+  ASSERT_EQ(arnm_json_writer_status(&writer), ARNM_SUCCESS);
+
+  arnm_memory_block text = {};
+  ASSERT_EQ(arnm_json_writer_write(&writer, &arena, &text, nullptr), ARNM_SUCCESS);
+  const std::string expected = "{\"k\":\"value\"}";
+  ASSERT_STREQ(reinterpret_cast<const char *>(text.data), expected.c_str());
+
+  (void)arnm_json_writer_release(&writer);
+  EXPECT_STREQ(reinterpret_cast<const char *>(text.data), expected.c_str())
+      << "the text was never the document's to hold";
+
+  // Reading the bytes back is not enough to show that: an arena that moved its index to zero
+  // leaves them exactly where they were and only hands them out again. So ask for everything the
+  // arena still has and write over all of it -- that lands on the text only if the release gave
+  // away ground it did not own.
+  uint8_t *rest = nullptr;
+  const uint32_t remaining = arnm_arena_remaining(&arena);
+  ASSERT_GT(remaining, 0u);
+  ASSERT_EQ(arnm_alloc(&rest, remaining, &arena), ARNM_SUCCESS);
+  memset(rest, 0xEE, remaining);
+  EXPECT_STREQ(reinterpret_cast<const char *>(text.data), expected.c_str())
+      << "the arena handed out ground the text was standing on";
+
+  arnm_release(&arena);
+}
+
+// promise: host mode releases the same document the same way, chunk by chunk, and keeps nothing.
+// A release that took the arena's one step path here would free the first block and orphan every
+// other chunk -- which this many rounds would turn into a memory limit failure rather than a
+// quiet leak, because memory_limit.h caps the address space of this binary.
+TEST(JsonWriterRelease, HostModeReleasesEveryChunkOverManyRounds) {
+  arnm_json_writer writer;
+  ASSERT_EQ(
+      arnm_json_writer_init(&writer, nullptr, ARNM_JSON_WRITE_DEFAULT, nullptr), ARNM_SUCCESS
+  );
+
+  for (int round = 0; round < 2000; ++round) {
+    WriteAFewFields(&writer);
+    ASSERT_EQ(arnm_json_writer_release(&writer), ARNM_SUCCESS) << "round " << round;
+  }
+
+  // and it still writes what it should after all of that
+  ASSERT_EQ(arnm_json_writer_begin_object(&writer), ARNM_SUCCESS);
+  arnm_json_writer_add_uint64(&writer, ARNM_JSON_WRITER_KEY("n"), 7);
+  arnm_memory_block text = {};
+  ASSERT_EQ(arnm_json_writer_write(&writer, nullptr, &text, nullptr), ARNM_SUCCESS);
+  EXPECT_STREQ(reinterpret_cast<const char *>(text.data), "{\"n\":7}");
+  EXPECT_EQ(arnm_memory_block_free(&text, nullptr), ARNM_SUCCESS);
+  EXPECT_EQ(arnm_json_writer_release(&writer), ARNM_SUCCESS);
+}
+
+// promise: a chain is not taken down in one step -- its blocks may sit in more than one arena,
+// where a sum measured against one of them means nothing. It still releases correctly.
+TEST(JsonWriterRelease, AMultiArenaReleasesChunkByChunkAndStaysCorrect) {
+  arnm_multi_arena_options options{};
+  options.arena_capacity = 16 * 1024;
+  arnm *chain = arnm_create_multi_arena(&options, nullptr);
+  ASSERT_NE(chain, nullptr);
+
+  arnm_json_writer writer;
+  ASSERT_EQ(arnm_json_writer_init(&writer, chain, ARNM_JSON_WRITE_DEFAULT, nullptr), ARNM_SUCCESS);
+  WriteAFewFields(&writer);
+
+  const arnm_result released = arnm_json_writer_release(&writer);
+  EXPECT_TRUE(released == ARNM_SUCCESS || released == ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED)
+      << "a chain answers one of the two, never an error";
+
+  WriteAFewFields(&writer);
+  arnm_memory_block text = {};
+  ASSERT_EQ(arnm_json_writer_write(&writer, chain, &text, nullptr), ARNM_SUCCESS);
+  EXPECT_GT(text.size, 0u);
+  (void)arnm_json_writer_release(&writer);
+
+  arnm_destroy(chain, nullptr);
 }

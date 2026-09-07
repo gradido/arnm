@@ -1,6 +1,7 @@
 #ifndef ARNM_BYTE_BUFFER_H
 #define ARNM_BYTE_BUFFER_H
 
+#include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -195,6 +196,100 @@ static inline arnm_result arnm_byte_buffer_copy(
   memcpy(buffer->data + buffer->last_index, src, size);
   buffer->last_index += size;
   return ARNM_SUCCESS;
+}
+
+/** @brief @ref arnm_byte_buffer_copy() with the checks moved into the debug build.
+ *
+ *  The same bytes and the same mark, and no answer to read: what the safe call refuses, this one
+ *  asserts where assertions are on and does not look at where they are not. Inspired by yyjson's
+ *  unsafe_* pair, and here for the same reason -- a caller that already asked
+ *  @ref arnm_byte_buffer_available() has taken the branch this would take again.
+ *
+ *  Ask once for a run of writes rather than once per write; that is where the pair pays:
+ *
+ *  @code
+ *  if (arnm_byte_buffer_available(&log) >= record_length + 1u) {
+ *    unsafe_arnm_byte_buffer_copy(&log, record, record_length);
+ *    unsafe_arnm_byte_buffer_push(&log, '\n');
+ *  }
+ *  @endcode
+ *
+ *  @param[in,out] buffer Buffer to append to; not NULL, initialized, and holding room for
+ *                        @p size more bytes.
+ *  @param[in]     src    Bytes to copy; not NULL, and at least @p size of them.
+ *  @param[in]     size   Bytes to copy; > 0 and at most @ref arnm_byte_buffer_available().
+ *  @note The assertions belong to the caller and not to the library. This is an inline function,
+ *        so whether they run is decided by NDEBUG in the translation unit that calls it -- a
+ *        consumer's debug build checks these even against a release build of arnm, and a
+ *        consumer's release build checks nothing even against a debug one.
+ *  @warning With NDEBUG not one of those preconditions is looked at. A size past the end writes
+ *           past the end, and the buffer being static is what makes that a fixed address rather
+ *           than an allocator's business.
+ *  @whisper The same handful, poured by a hand that already looked
+ */
+static inline void unsafe_arnm_byte_buffer_copy(
+    arnm_byte_buffer *buffer, const void *src, uint32_t size
+) {
+  // What arnm_byte_buffer_copy() answers with a result code, in the same order.
+  assert(buffer && "unsafe_arnm_byte_buffer_copy: buffer is NULL");
+  assert(src && "unsafe_arnm_byte_buffer_copy: src is NULL");
+  assert(size && "unsafe_arnm_byte_buffer_copy: size is 0");
+  assert(buffer->data && "unsafe_arnm_byte_buffer_copy: buffer holds no block");
+  assert(
+      size <= buffer->size - buffer->last_index &&
+      "unsafe_arnm_byte_buffer_copy: more bytes than the buffer has room for"
+  );
+  memcpy(buffer->data + buffer->last_index, src, size);
+  buffer->last_index += size;
+}
+
+/** @brief Append one byte, and move the mark along by one.
+ *
+ *  @ref arnm_byte_buffer_copy() for the case it is called with most often: the separator between
+ *  two records, a brace, a quote. Same refusals and same all or nothing, only there is no
+ *  pointer to read and no length to trust -- so the branch on the size, the call through memcpy
+ *  and the read of the source all fall away, and what is left is a compare and a store.
+ *
+ *  @param[in,out] buffer Buffer to append to; not NULL and initialized.
+ *  @param[in]     value  The byte. A character literal is one: `arnm_byte_buffer_push(&b, '\n')`.
+ *  @retval ARNM_SUCCESS                  Written, @c last_index advanced by one.
+ *  @retval ARNM_ERROR_NULL_POINTER       @p buffer is NULL.
+ *  @retval ARNM_ERROR_NOT_INITIALIZED    @p buffer holds no block.
+ *  @retval ARNM_ERROR_RESOURCE_EXHAUSTED The buffer is full. Nothing was written and
+ *                                        @c last_index did not move.
+ *  @note uint8_t and not char, because this writes a byte and half of them are not a char: with
+ *        a signed char parameter -- which is what gcc and clang give it on x86 and ARM -- a
+ *        plain `push(&b, 0xFF)` is a narrowing conversion, and gcc says so under -Wconversion
+ *        while clang stays quiet. A character literal passes as it always did.
+ *  @whisper One grain, laid where the last one came to rest
+ */
+static inline arnm_result arnm_byte_buffer_push(arnm_byte_buffer *buffer, uint8_t value) {
+  if (!buffer) { return ARNM_ERROR_NULL_POINTER; }
+  if (!buffer->data) { return ARNM_ERROR_NOT_INITIALIZED; }
+  // the subtraction cannot wrap, because last_index <= size holds from init onwards; a full
+  // buffer is the one case where it answers 0
+  if (buffer->size == buffer->last_index) { return ARNM_ERROR_RESOURCE_EXHAUSTED; }
+  buffer->data[buffer->last_index++] = value;
+  return ARNM_SUCCESS;
+}
+
+/** @brief @ref arnm_byte_buffer_push() with the checks moved into the debug build.
+ *
+ *  As @ref unsafe_arnm_byte_buffer_copy(), for the single byte -- the separator that follows a
+ *  record whose room was measured together with it.
+ *
+ *  @param[in,out] buffer Buffer to append to; not NULL, initialized, and not full.
+ *  @param[in]     value  The byte.
+ *  @note The assertions are the calling translation unit's; see @ref
+ *        unsafe_arnm_byte_buffer_copy().
+ *  @warning With NDEBUG a full buffer is written past rather than answered.
+ *  @whisper One grain, laid without looking, where the looking was already done
+ */
+static inline void unsafe_arnm_byte_buffer_push(arnm_byte_buffer *buffer, uint8_t value) {
+  assert(buffer && "unsafe_arnm_byte_buffer_push: buffer is NULL");
+  assert(buffer->data && "unsafe_arnm_byte_buffer_push: buffer holds no block");
+  assert(buffer->last_index < buffer->size && "unsafe_arnm_byte_buffer_push: the buffer is full");
+  buffer->data[buffer->last_index++] = value;
 }
 
 /** @brief The start of the content and how much of it there is.

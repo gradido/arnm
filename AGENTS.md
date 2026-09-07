@@ -340,6 +340,28 @@ arnm_reset(...)
 arnm_release(...)
 ```
 
+### `unsafe_`, the one prefix that goes in front of the name
+
+A call that deliberately skips the checks its ordinary twin performs carries `unsafe_` ahead of the whole arnm name:
+
+```c
+arnm_byte_buffer_copy(&log, record, length);          // checks, and answers
+unsafe_arnm_byte_buffer_copy(&log, record, length);   // the caller already asked
+```
+
+yyjson spells its own pairs that way, and the reason it is worth the exception is where the word lands. The prefix is the first thing read at a call site, so the dangerous member of a pair cannot be taken for the ordinary one while skimming, and every unchecked call in a codebase is one grep. `arnm_byte_buffer_copy_unsafe()` would keep the rule and lose exactly that: the two names would then differ only at the end, after a reader has already decided what the line does.
+
+The exception is narrow.
+
+* It is for a checked/unchecked pair and nothing else. A call with no checked twin does not get the prefix; it gets the checks.
+* The arnm name stays whole behind the prefix. `unsafe_arnm_byte_buffer_copy`, never `unsafe_byte_buffer_copy`.
+* Both members take the same arguments in the same order and write the same bytes. The unchecked one answers nothing and asserts, where assertions are on, exactly what the checked one refuses -- see the pair in `arnm/byte_buffer.h`.
+* Such a twin is a `static inline` in a header. It emits no external symbol -- even unoptimized it is a local `t`, never a global -- so nothing here reaches a linker, and the namespace the rule above protects is untouched.
+
+The rule is about what a linker and a reader see of arnm as a whole. This exception is about what a reader sees at the one moment it matters most.
+
+The only other name in the public headers without an `ARNM_` prefix is `static_assert`, the C11 fallback under Portability. It is spelled that way because it stands in for the keyword, and it is defined only where the keyword is missing.
+
 Keep `include/arnm/` flat. A public header such as `arnm/bucket_vector.h` should not be hidden several directories deep.
 
 ---

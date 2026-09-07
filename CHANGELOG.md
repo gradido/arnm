@@ -97,6 +97,56 @@ at six bytes a character, in case every one of them escapes to `\uXXXX`, and a r
 That is why `arnm_json_writer_add_hex()` and `arnm_json_writer_add_base64()` write raw, and why a
 large payload placed by hand should too.
 
+**Fixed: a refusal at an array element was filed under the empty string in three adders.**
+`arnm_json_writer_add_hex()`, `_add_base64()` and `_add_uuid()` passed the caller's key straight
+to the error record when the string pool could not answer, where every other refusal in the
+writer passes it through the `"[]"` sentinel first. A NULL key means an element
+of an array, and `arnm_json_writer_error_field()` documents `"[]"` for one -- the empty string is
+for a refusal belonging to no field at all, which these are not. The size branch of the same
+three calls was already right, so which name an over-large block was filed under depended on
+whether it was refused for its size or by the allocator.
+
+**A dead branch in `arnm_json_writer_add_hex()` and `_add_base64()` is gone, and what made it
+dead is now checked by the compiler.** Both tested what the converter answered, and neither could
+ever see anything but success: the buffer comes from the string pool a line above, the block and
+its size are answered at the top of the call, and the size cap the writer applies is stricter
+than the converter's own -- 2147483642 against 2147483647 for hex, 3221225463 against 3221225469
+for base64. That last one is a relationship between two constants in two files, so it is held by
+a `static_assert` at `JSON_HEX_MAX_BYTES` and `JSON_BASE64_MAX_BYTES` rather than by a branch
+nothing reaches. Raising either cap past the converter's now fails the build instead of quietly
+routing a refusal to a place that reads none. 144 bytes of text less in `json_writer.o`.
+
+**Fixed: releasing a document reset the caller's whole arena.** `arnm_json_writer_release()`,
+and every `begin` that followed a document, called `arnm_reset()` when the writer had been given
+an arena -- which hands back everything in that arena and not merely the document, whatever else
+the caller had put there. It also meant `_release()` and `_destroy()` could never answer the
+`ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED` their documentation promises, because there was
+nothing left to report. Both now do.
+
+In its place the whole document comes back in a single `arnm_free()`. Everything yyjson takes
+for one mutable document is one run of blocks -- it opens the run in `yyjson_mut_doc_new()`,
+grows it by chaining chunks through `malloc`, and reaches for `realloc` only when parsing -- so
+the run is a first address and a sum of reservations, and `arnm_free()` is asked whether the
+arena still ends at it. Where it does, the run recedes in one step. Where it does not, because
+the caller allocated on top of it or asked for the written text out of the same arena, nothing
+is given back and the release falls back to letting go of the document chunk by chunk, as
+before. Nothing about this is guessed: the arena is asked, and its answer decides.
+
+Releasing chunk by chunk was measured as the alternative, which is what a reviewer suggested and
+what the code did before an arena was special-cased at all. It is around 7% slower end to end on
+`bench_json`, and that is the smaller half of it: because `yyjson_mut_doc_free()` releases the
+string pool, then the value pool, then the document, while the chunks of the two pools were
+interleaved as they were allocated, most of those releases are buried and give nothing back. The
+benchmark's "still held" column reads 784 bytes per small document that way, and 32344 of the
+nested payload's 56928 -- memory the arena keeps until it resets. With the run released in one
+step every one of those columns is 0.
+
+The one step release is taken for a plain arena only. Host mode releases chunk by chunk because
+one `free()` there would orphan every block but the first, and a chain does too, because its
+blocks may sit in more than one arena and a sum measured against one of them means nothing.
+`ARNM_JSON_WRITER_SIZE` is unchanged: what the bookkeeping needed fits in bytes that were
+padding.
+
 **Fixed: `arnm_binary_to_base64_alloc()` reserved the characters but not the terminator.**
 `ARNM_BASE64_STRING_LENGTH()` counts characters only -- unlike `ARNM_HEX_STRING_LENGTH()`, which
 counts the terminator -- so the block was one byte short of what `arnm_binary_to_base64()` then
@@ -116,6 +166,35 @@ are named as `ARNM_HEX_MAX_BINARY_SIZE` and `ARNM_BASE64_MAX_BINARY_SIZE`.
 that is not a block. `arnm_binary_block_to_hex()` and `arnm_binary_block_to_base64()` are the old
 shape kept as one-line wrappers; `arnm_binary_to_hex_alloc()` and `arnm_binary_to_base64_alloc()`
 draw the buffer themselves.
+
+**The unsafe pair in `arnm/byte_buffer.h` checks its preconditions while assertions are on.**
+`unsafe_arnm_byte_buffer_copy()` and `unsafe_arnm_byte_buffer_push()` write without asking; they
+now assert exactly what the safe pair refuses -- the buffer, the source, a size of 0, an
+uninitialized block, and room for what is being written -- so a mistake shows up in a debug build
+instead of only in a release one. The assertions belong to the caller's translation unit, these
+being inline functions: a consumer's debug build checks them even against a release build of
+arnm, and a consumer's release build checks nothing even against a debug one.
+
+`bench_byte_buffer` measures what that buys, at `-Doptimize=ReleaseFast`:
+
+| step | safe | unsafe |
+|---|---|---|
+| one byte | 1.1 ns | 0.8 ns |
+| one 8 byte record | 0.7 ns | 0.5 ns |
+| one 64 byte record | 1.1 ns | 1.0 ns |
+| one 512 byte record | 8.2 ns | 8.0 ns |
+| four records and their separators, room asked once | 5.7 ns | 1.2 ns |
+
+Per call it is a fraction of a nanosecond, and at 512 bytes the copy itself is all there is left
+to measure. The last row is what the pair is actually for, and the reason is not the checks
+themselves: with the questions out of the way the compiler merges the whole group into a run of
+stores -- 50 instructions against 116 for the same 36 bytes, with no call to memcpy and no branch
+per write. Reach for the unsafe pair where a group of writes shares one question, not to save a
+compare on a single one.
+
+In a debug build the unsafe pair is the **slower** of the two -- 11.1 ns against 8.3 ns for a
+push -- because nothing inlines there and the assertions are real work. That is the trade working
+as intended, and worth knowing before reading a debug profile.
 
 **`arnm/byte_buffer.h`**, one block filled from the front. `arnm_byte_buffer_init()` takes every
 byte it will ever hold, `arnm_byte_buffer_copy()` lands each record where the last one ended, and
