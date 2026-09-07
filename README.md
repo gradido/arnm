@@ -49,6 +49,7 @@ allocator is on no path this library takes.
 | `arnm/memory.h` | the `arnm` handle and the calls every allocator answers: alloc, free, realloc, clone, reset |
 | `arnm/arena.h` | make a handle an arena -- over memory it takes from the host, or memory you lend it |
 | `arnm/memory_block.h` | pointer and size kept together, so freeing needs no bookkeeping from you |
+| `arnm/byte_buffer.h` | one block filled from the front, records packed back to back; handed to a stream in one piece |
 | `arnm/multi_arena.h` | a chain of arenas that opens another one instead of running dry |
 | `arnm/fixed_arena_pool.h` | a fixed set of equal sized arenas, lent out and returned; the peak is known at init |
 | `arnm/bucket_vector.h` | growing sequence with stable element addresses; no copy on growth |

@@ -103,6 +103,21 @@ that is not a block. `arnm_binary_block_to_hex()` and `arnm_binary_block_to_base
 shape kept as one-line wrappers; `arnm_binary_to_hex_alloc()` and `arnm_binary_to_base64_alloc()`
 draw the buffer themselves.
 
+**`arnm/byte_buffer.h`**, one block filled from the front. `arnm_byte_buffer_init()` takes every
+byte it will ever hold, `arnm_byte_buffer_copy()` lands each record where the last one ended, and
+`arnm_byte_buffer_access()` hands the whole run out as the pointer and length a `write()` wants --
+which is what a log of JSON documents packed back to back needs and what an allocator alone does
+not give: separate allocations are not adjacent, so writing them out is one call per record.
+
+It does not grow. A copy that does not fit is refused with `ARNM_ERROR_RESOURCE_EXHAUSTED` and
+writes nothing at all, not even the part that would have fit, because half a record in a packed
+stream cannot be told from a whole one by the side reading it. The buffer keeps two lengths and
+they mean different things: `size` is what the allocator was asked for and what
+`arnm_byte_buffer_free()` gives back, `last_index` is how much of it is written. That is why the
+access call answers a pointer and a `uint32_t` rather than an `arnm_memory_block`, whose `size`
+means the allocated size everywhere else in arnm. `arnm_byte_buffer_clear()` drops the content and
+keeps the block, so a fill / write out / clear cycle costs exactly one allocation in total.
+
 **`arnm_json_read_is_null()`** in `arnm/json_reader.h`. `null` was the one JSON type a table
 entry could not ask about: every other type is named by the entry that reads it, but `null` is
 the member saying it holds no value, so a typed entry refuses it with
