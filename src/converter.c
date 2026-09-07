@@ -166,8 +166,9 @@ uint8_t arnm_int64_to_string(char *buffer, uint8_t bufferSize, int64_t value) {
 
 arnm_result arnm_binary_to_hex(char *result_buffer, const uint8_t *bytes, const uint32_t size) {
   if (!result_buffer || !bytes) { return ARNM_ERROR_NULL_POINTER; }
-  // an empty block is a parameter the caller can fix, not a pointer they forgot
-  if (!size) { return ARNM_ERROR_INVALID_PARAM; }
+  // A size of 0 is not refused: the hex of no bytes is the empty string, the loop below runs no
+  // turn, and ARNM_HEX_STRING_LENGTH(0) is exactly the one byte the terminator needs. A caller
+  // encoding an optional blob would otherwise carry an `if` for the case where it is absent.
   // the terminator lands at index size * 2, which is a uint32_t like every size here and would
   // wrap above this rather than say so -- and a wrapped index writes over the front of the
   // buffer after the loop has filled it
@@ -187,7 +188,8 @@ arnm_result arnm_binary_from_hex_with_known_hex_size(
     uint8_t *result_buffer, const char *hex, size_t hex_size
 ) {
   if (!result_buffer || !hex) return ARNM_ERROR_NULL_POINTER;
-  if (!hex_size) return ARNM_ERROR_INVALID_PARAM;
+  // as in arnm_binary_to_hex(), and as arnm_binary_from_base64() already did: an empty run
+  // spells no bytes, which is an answer and not a mistake. 0 passes the parity test below.
   size_t bin_size = hex_size / 2;
   // two characters make one byte, so an odd length cannot be hex -- the division above dropped
   // the stray character and multiplying back reveals it
@@ -524,7 +526,8 @@ static const uint8_t BASE64_VALUE[256] = {
 
 arnm_result arnm_binary_to_base64(char *result_buffer, const uint8_t *bytes, const uint32_t size) {
   if (!result_buffer || !bytes) { return ARNM_ERROR_NULL_POINTER; }
-  if (!size) { return ARNM_ERROR_INVALID_PARAM; }
+  // as in arnm_binary_to_hex(): 0 writes the empty string, which is what
+  // ARNM_BASE64_STRING_LENGTH(0) + 1 reserves room for
   // as in arnm_binary_to_hex(): `written` counts the characters in a uint32_t, and one group
   // more than this would carry it past what that holds
   if (size > ARNM_BASE64_MAX_BINARY_SIZE) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }

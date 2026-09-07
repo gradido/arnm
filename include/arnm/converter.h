@@ -158,11 +158,13 @@ uint8_t arnm_int64_to_string_size(int64_t value);
  * @param[out] result_buffer Expected to hold @ref ARNM_HEX_STRING_LENGTH(size) bytes. Not
  *                           checkable from here -- sizing it is the caller's part of the
  *                           contract.
- * @param[in]  data          Bytes to encode; not NULL.
- * @param[in]  size          How many; not 0.
+ * @param[in]  data          Bytes to encode; not NULL, and a valid pointer even where @p size
+ *                           is 0.
+ * @param[in]  size          How many. 0 writes the empty string -- @ref
+ *                           ARNM_HEX_STRING_LENGTH(0) is the one byte that takes -- so a
+ *                           caller encoding a blob that may be absent needs no case for it.
  * @retval ARNM_SUCCESS             Hex written, terminator included.
  * @retval ARNM_ERROR_NULL_POINTER  @p result_buffer or @p data is NULL.
- * @retval ARNM_ERROR_INVALID_PARAM @p size is 0.
  * @retval ARNM_ERROR_ARITHMETIC_OVERFLOW @p size is above @ref ARNM_HEX_MAX_BINARY_SIZE, so the
  *                                     hex of it could not be measured in a uint32_t. Refused
  *                                     before anything is written and before either pointer is
@@ -221,14 +223,13 @@ static inline arnm_result arnm_binary_to_hex_alloc(
  *                           belongs to the caller and is left alone.
  * @param[in]  hex           Characters to read; not NULL. No terminator is required and none is
  *                           looked for.
- * @param[in]  hex_size      Characters in @p hex: even, and not 0.
+ * @param[in]  hex_size      Characters in @p hex: even. 0 writes no bytes and is a success --
+ *                           an empty run spells nothing, which is an answer.
  * @retval ARNM_SUCCESS             @p hex_size / 2 bytes written.
  * @retval ARNM_ERROR_NULL_POINTER  @p result_buffer or @p hex is NULL.
- * @retval ARNM_ERROR_INVALID_PARAM @p hex_size is odd or 0. Refused before anything is written,
- *                                     so @p result_buffer is left exactly as the caller had it
- *                                     -- there is nothing of this call's making in it to clear.
- *                                     An empty run spells no bytes and is a refusal here, the
- *                                     same way @ref arnm_binary_to_hex() refuses an empty block.
+ * @retval ARNM_ERROR_INVALID_PARAM @p hex_size is odd. Refused before anything is written, so
+ *                                     @p result_buffer is left exactly as the caller had it --
+ *                                     there is nothing of this call's making in it to clear.
  * @retval ARNM_ERROR_DECODE_FAILED @p hex holds a character that is not a hex digit. The
  *                                     @p hex_size / 2 bytes are zeroed.
  * @note Not constant time; see the warning on this group.
@@ -243,8 +244,7 @@ arnm_result arnm_binary_from_hex_with_known_hex_size(
  *
  * @ref arnm_binary_from_hex_with_known_hex_size() over the length `strlen()` reports, which is
  * the shape a caller holding a plain C string wants. Everything that call promises holds here,
- * the refusal of an empty string included: `""` measures 0 and is answered with
- * @ref ARNM_ERROR_INVALID_PARAM, not with a success that wrote nothing.
+ * an empty string included: `""` measures 0, writes no bytes and answers @ref ARNM_SUCCESS.
  *
  * @param[out] result_buffer Expected to hold `strlen(hex) / 2` bytes; see the sized call.
  * @param[in]  hex           Null terminated string of an even, non zero number of hex digits.
@@ -293,11 +293,12 @@ static inline arnm_result arnm_binary_from_hex(uint8_t *result_buffer, const cha
  * @param[out] result_buffer Expected to hold @ref ARNM_BASE64_STRING_LENGTH(size) + 1 bytes.
  *                           Not checkable from here -- sizing it is the caller's part of the
  *                           contract.
- * @param[in]  data          Bytes to encode; not NULL.
- * @param[in]  size          How many; not 0.
+ * @param[in]  data          Bytes to encode; not NULL, and a valid pointer even where @p size
+ *                           is 0.
+ * @param[in]  size          How many. 0 writes the empty string, as on the decoding side, where
+ *                           an empty run has always answered no bytes.
  * @retval ARNM_SUCCESS             Base64 written, terminator included.
  * @retval ARNM_ERROR_NULL_POINTER  @p result_buffer or @p data is NULL.
- * @retval ARNM_ERROR_INVALID_PARAM @p size is 0.
  * @retval ARNM_ERROR_ARITHMETIC_OVERFLOW @p size is above @ref ARNM_BASE64_MAX_BINARY_SIZE, so
  *                                     the base64 of it could not be measured in a uint32_t.
  *                                     Refused before anything is written and before either

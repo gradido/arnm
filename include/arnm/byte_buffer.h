@@ -172,10 +172,12 @@ static inline uint32_t arnm_byte_buffer_available(const arnm_byte_buffer *buffer
  *
  *  @param[in,out] buffer Buffer to append to; not NULL and initialized.
  *  @param[in]     src    Bytes to copy; not NULL, and at least @p size of them.
- *  @param[in]     size   Bytes to copy; must be > 0.
+ *  @param[in]     size   Bytes to copy. 0 copies nothing and moves nothing, as memcpy() does
+ *                        at that length -- a field that may be empty needs no `if` around this.
  *  @retval ARNM_SUCCESS                 Copied, @c last_index advanced by @p size.
- *  @retval ARNM_ERROR_NULL_POINTER      @p buffer or @p src is NULL.
- *  @retval ARNM_ERROR_INVALID_PARAM     @p size is 0.
+ *  @retval ARNM_ERROR_NULL_POINTER      @p buffer or @p src is NULL. @p src has to be a valid
+ *                                       pointer even where @p size is 0, which is memcpy()'s
+ *                                       own requirement at every length.
  *  @retval ARNM_ERROR_NOT_INITIALIZED   @p buffer holds no block.
  *  @retval ARNM_ERROR_RESOURCE_EXHAUSTED @p size is more than arnm_byte_buffer_available().
  *                                       Nothing was written and @c last_index did not move; the
@@ -188,7 +190,6 @@ static inline arnm_result arnm_byte_buffer_copy(
     arnm_byte_buffer *buffer, const void *src, uint32_t size
 ) {
   if (!buffer || !src) { return ARNM_ERROR_NULL_POINTER; }
-  if (0 == size) { return ARNM_ERROR_INVALID_PARAM; }
   if (!buffer->data) { return ARNM_ERROR_NOT_INITIALIZED; }
   // subtraction and not last_index + size: the sum can wrap a uint32_t, the difference cannot,
   // because last_index <= size holds from init onwards and this is the only line that moves it
@@ -216,8 +217,11 @@ static inline arnm_result arnm_byte_buffer_copy(
  *
  *  @param[in,out] buffer Buffer to append to; not NULL, initialized, and holding room for
  *                        @p size more bytes.
- *  @param[in]     src    Bytes to copy; not NULL, and at least @p size of them.
- *  @param[in]     size   Bytes to copy; > 0 and at most @ref arnm_byte_buffer_available().
+ *  @param[in]     src    Bytes to copy; at least @p size of them, and not NULL even where
+ *                        @p size is 0 -- C requires a valid pointer of memcpy() at every
+ *                        length, and this is a thin wrapper over it.
+ *  @param[in]     size   Bytes to copy; at most @ref arnm_byte_buffer_available(). 0 copies
+ *                        nothing and moves nothing, exactly as in the checked call.
  *  @note The assertions belong to the caller and not to the library. This is an inline function,
  *        so whether they run is decided by NDEBUG in the translation unit that calls it -- a
  *        consumer's debug build checks these even against a release build of arnm, and a
@@ -230,10 +234,10 @@ static inline arnm_result arnm_byte_buffer_copy(
 static inline void unsafe_arnm_byte_buffer_copy(
     arnm_byte_buffer *buffer, const void *src, uint32_t size
 ) {
-  // What arnm_byte_buffer_copy() answers with a result code, in the same order.
+  // The mistakes arnm_byte_buffer_copy() answers with a result code, spoken in a build that has
+  // no result code to read. A size of 0 is not among them there and is not one here.
   assert(buffer && "unsafe_arnm_byte_buffer_copy: buffer is NULL");
-  assert(src && "unsafe_arnm_byte_buffer_copy: src is NULL");
-  assert(size && "unsafe_arnm_byte_buffer_copy: size is 0");
+  assert(src && "unsafe_arnm_byte_buffer_copy: src is NULL, which memcpy() forbids at any size");
   assert(buffer->data && "unsafe_arnm_byte_buffer_copy: buffer holds no block");
   assert(
       size <= buffer->size - buffer->last_index &&

@@ -150,7 +150,11 @@ TEST(HexTest, RejectsNullAndEmptySeparately) {
   char out[16];
   EXPECT_EQ(arnm_binary_to_hex(nullptr, payload, sizeof(payload)), ARNM_ERROR_NULL_POINTER);
   EXPECT_EQ(arnm_binary_to_hex(out, nullptr, 0), ARNM_ERROR_NULL_POINTER);
-  EXPECT_EQ(arnm_binary_to_hex(out, payload, 0), ARNM_ERROR_INVALID_PARAM);
+  // an empty block is an empty string, not a refusal: the caller with an optional blob has
+  // one case fewer, and ARNM_HEX_STRING_LENGTH(0) reserves exactly the terminator it needs
+  out[0] = 'x';
+  EXPECT_EQ(arnm_binary_to_hex(out, payload, 0), ARNM_SUCCESS);
+  EXPECT_STREQ(out, "");
   EXPECT_EQ(arnm_binary_to_hex(out, payload, sizeof(payload)), ARNM_SUCCESS);
   EXPECT_EQ(arnm_binary_to_hex(out, nullptr, 4), ARNM_ERROR_NULL_POINTER);
 }
@@ -225,11 +229,12 @@ TEST(HexTest, AcceptsBothDigitCasesAndRefusesTheEmptyString) {
 
   uint8_t untouched[4];
   memset(untouched, 0x77, sizeof(untouched));
-  EXPECT_EQ(arnm_binary_from_hex(untouched, ""), ARNM_ERROR_INVALID_PARAM);
+  EXPECT_EQ(arnm_binary_from_hex(untouched, ""), ARNM_SUCCESS)
+      << "an empty run spells no bytes, which is an answer and not a mistake";
   for (unsigned char byte : untouched) {
     EXPECT_EQ(byte, 0x77) << "a refusal writes nothing, not even the zeros a failed decode clears";
   }
-  EXPECT_EQ(arnm_binary_from_hex_with_known_hex_size(untouched, "00", 0), ARNM_ERROR_INVALID_PARAM)
+  EXPECT_EQ(arnm_binary_from_hex_with_known_hex_size(untouched, "00", 0), ARNM_SUCCESS)
       << "the length decides, not what the buffer happens to carry after it";
 }
 
@@ -693,7 +698,9 @@ TEST(Base64, EveryLengthSurvivesTheRoundTrip) {
 TEST(Base64, NoBytesIsRefusedAndAnEmptyStringDecodesToNothing) {
   const uint8_t byte = 0;
   char text[8];
-  EXPECT_EQ(arnm_binary_to_base64(text, const_cast<uint8_t *>(&byte), 0), ARNM_ERROR_INVALID_PARAM);
+  text[0] = 'x';
+  EXPECT_EQ(arnm_binary_to_base64(text, const_cast<uint8_t *>(&byte), 0), ARNM_SUCCESS);
+  EXPECT_STREQ(text, "") << "as on the decoding side, where an empty run always answered";
 
   uint8_t out[4] = {1, 2, 3, 4};
   uint32_t written = 99;
@@ -880,6 +887,41 @@ TEST(Converter, Base64BinarySizeAgreesWithWhatTheDecodeWrites) {
 // ARNM_BASE64_STRING_LENGTH() counts characters only -- unlike the hex macro, which counts the
 // terminator -- so the wrapper has to add it. An arena sized to the characters alone is
 // therefore one byte short, and the call has to say so rather than write past what it got.
+// promise: an empty block travels through the allocating wrappers too, and comes back as a
+// block holding the empty string rather than as a refusal
+TEST(Converter, AnEmptyBlockEncodesToTheEmptyStringThroughEveryDoor) {
+  const uint8_t byte = 0x42;
+
+  arnm_memory_block hex = {};
+  ASSERT_EQ(arnm_binary_to_hex_alloc(&hex, &byte, 0, nullptr), ARNM_SUCCESS);
+  EXPECT_EQ(hex.size, ARNM_HEX_STRING_LENGTH(0));
+  EXPECT_EQ(hex.size, 1u) << "the terminator, and nothing before it";
+  EXPECT_STREQ(reinterpret_cast<const char *>(hex.data), "");
+  EXPECT_EQ(arnm_memory_block_free(&hex, nullptr), ARNM_SUCCESS);
+
+  arnm_memory_block base64 = {};
+  ASSERT_EQ(arnm_binary_to_base64_alloc(&base64, &byte, 0, nullptr), ARNM_SUCCESS);
+  EXPECT_EQ(base64.size, ARNM_BASE64_STRING_LENGTH(0) + 1u);
+  EXPECT_EQ(base64.size, 1u);
+  EXPECT_STREQ(reinterpret_cast<const char *>(base64.data), "");
+  EXPECT_EQ(arnm_memory_block_free(&base64, nullptr), ARNM_SUCCESS);
+
+  // and back again: both decoders already answered an empty run with no bytes, which is what
+  // the encoders now agree with
+  uint8_t out[4] = {0xEE, 0xEE, 0xEE, 0xEE};
+  EXPECT_EQ(arnm_binary_from_hex(out, ""), ARNM_SUCCESS);
+  uint32_t written = 0xFFFFFFFFu;
+  EXPECT_EQ(arnm_binary_from_base64(out, &written, ""), ARNM_SUCCESS);
+  EXPECT_EQ(written, 0u);
+  for (uint8_t held : out) { EXPECT_EQ(held, 0xEE) << "no byte of the caller's was touched"; }
+
+  // a NULL block is still a NULL block, whatever the size beside it says
+  EXPECT_EQ(arnm_binary_to_hex(reinterpret_cast<char *>(out), nullptr, 0), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(
+      arnm_binary_to_base64(reinterpret_cast<char *>(out), nullptr, 0), ARNM_ERROR_NULL_POINTER
+  );
+}
+
 TEST(Converter, Base64AllocReservesTheByteTheTerminatorNeeds) {
   const uint8_t payload[6] = {'h', 'e', 'l', 'l', 'o', '!'};
   constexpr uint32_t characters = ARNM_BASE64_STRING_LENGTH(sizeof(payload));

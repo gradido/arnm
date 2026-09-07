@@ -169,9 +169,10 @@ draw the buffer themselves.
 
 **The unsafe pair in `arnm/byte_buffer.h` checks its preconditions while assertions are on.**
 `unsafe_arnm_byte_buffer_copy()` and `unsafe_arnm_byte_buffer_push()` write without asking; they
-now assert exactly what the safe pair refuses -- the buffer, the source, a size of 0, an
-uninitialized block, and room for what is being written -- so a mistake shows up in a debug build
-instead of only in a release one. The assertions belong to the caller's translation unit, these
+now assert the mistakes the safe pair refuses -- the buffer, the source, an uninitialized block,
+and room for what is being written -- so a mistake shows up in a debug build instead of only in a
+release one. A size of 0 is not among them because the checked
+call no longer refuses one either; see the entry below. The assertions belong to the caller's translation unit, these
 being inline functions: a consumer's debug build checks them even against a release build of
 arnm, and a consumer's release build checks nothing even against a debug one.
 
@@ -195,6 +196,31 @@ compare on a single one.
 In a debug build the unsafe pair is the **slower** of the two -- 11.1 ns against 8.3 ns for a
 push -- because nothing inlines there and the assertions are real work. That is the trade working
 as intended, and worth knowing before reading a debug profile.
+
+**A length of 0 is an answer and not a refusal.** `arnm_binary_to_hex()`,
+`arnm_binary_to_base64()`, `arnm_binary_from_hex_with_known_hex_size()`, `arnm_binary_from_hex()`
+and `arnm_byte_buffer_copy()` answered `ARNM_ERROR_INVALID_PARAM` for an empty block or an empty
+run. They now write the empty string, or copy nothing, and answer `ARNM_SUCCESS`. **Code that
+tested for that refusal has to be read again** -- nothing else changes, but a call that used to
+fail now succeeds.
+
+The library was disagreeing with itself: `arnm_binary_from_base64("")` has always answered
+`ARNM_SUCCESS` with no bytes, while the encoder beside it refused the same emptiness, and
+`arnm_json_writer_add_hex()` carried a case of its own to turn an empty block into `""`. The
+standard libraries settle it the same way -- `memcpy()` with a length of 0 copies nothing and is
+well defined, so long as the pointers are valid, which is still required here at every length.
+Every buffer size already fits: `ARNM_HEX_STRING_LENGTH(0)` is 1, the terminator, and
+`ARNM_BASE64_STRING_LENGTH(0) + 1` is the same.
+
+What made it worth changing is the cost to callers. A refusal that means "you asked for nothing"
+puts an `if (length)` at every call site that has an optional field, and where the call has an
+unchecked twin -- `unsafe_arnm_byte_buffer_copy()` -- that guard lands on a hot path in a release
+build to satisfy a check that only runs in a debug one.
+
+Allocation keeps its refusal, and for a reason that does not apply above: `arnm_alloc(0)` has no
+pointer to answer with, `malloc(0)` may hand back NULL, and NULL is how this API says it failed.
+The same holds for `arnm_clone()`, for an arena, ring or pool of zero capacity, and for parsing a
+JSON document of zero length -- an empty document is not JSON.
 
 **`arnm/byte_buffer.h`**, one block filled from the front. `arnm_byte_buffer_init()` takes every
 byte it will ever hold, `arnm_byte_buffer_copy()` lands each record where the last one ended, and

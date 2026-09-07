@@ -356,6 +356,7 @@ The exception is narrow.
 * It is for a checked/unchecked pair and nothing else. A call with no checked twin does not get the prefix; it gets the checks.
 * The arnm name stays whole behind the prefix. `unsafe_arnm_byte_buffer_copy`, never `unsafe_byte_buffer_copy`.
 * Both members take the same arguments in the same order and write the same bytes. The unchecked one answers nothing and asserts, where assertions are on, exactly what the checked one refuses -- see the pair in `arnm/byte_buffer.h`.
+* Which means the checked call has to refuse only what is really a mistake, or the pair cannot be swapped. A degenerate but harmless argument -- a length of 0 for a copy -- is accepted by both. Refuse it in the checked one and the unchecked one has to assert it, and an assertion is an abort rather than a return code, so every caller with a field that may be empty writes `if (n)` around the call: the guard the unchecked call exists to remove, back on their hot path, in their release build, for a check that only runs in a debug one.
 * Such a twin is a `static inline` in a header. It emits no external symbol -- even unoptimized it is a local `t`, never a global -- so nothing here reaches a linker, and the namespace the rule above protects is untouched.
 
 The rule is about what a linker and a reader see of arnm as a whole. This exception is about what a reader sees at the one moment it matters most.

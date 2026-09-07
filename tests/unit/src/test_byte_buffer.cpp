@@ -235,7 +235,8 @@ TEST(ByteBuffer, CopyRefusesArgumentsItCannotUse) {
 
   EXPECT_EQ(arnm_byte_buffer_copy(nullptr, "x", 1), ARNM_ERROR_NULL_POINTER);
   EXPECT_EQ(arnm_byte_buffer_copy(&buffer, nullptr, 1), ARNM_ERROR_NULL_POINTER);
-  EXPECT_EQ(arnm_byte_buffer_copy(&buffer, "x", 0), ARNM_ERROR_INVALID_PARAM);
+  EXPECT_EQ(arnm_byte_buffer_copy(&buffer, "x", 0), ARNM_SUCCESS)
+      << "copying nothing is what memcpy does at that length, not a mistake to report";
   EXPECT_EQ(buffer.last_index, 0u);
 
   ASSERT_EQ(arnm_byte_buffer_free(&buffer, nullptr), ARNM_SUCCESS);
@@ -345,6 +346,14 @@ TEST(ByteBuffer, TheUnsafePairWritesExactlyWhatTheSafePairWrites) {
   EXPECT_EQ(safe.last_index, unsafe.last_index);
   EXPECT_EQ(Content(&safe), Content(&unsafe));
 
+  // A length of 0 goes through both, which is what lets a caller with a field that may be empty
+  // swap one for the other without an `if` around either.
+  EXPECT_EQ(arnm_byte_buffer_copy(&safe, record, 0), ARNM_SUCCESS);
+  const uint32_t before = unsafe.last_index;
+  unsafe_arnm_byte_buffer_copy(&unsafe, record, 0);
+  EXPECT_EQ(unsafe.last_index, before) << "nothing written, nothing refused";
+  EXPECT_EQ(Content(&safe), Content(&unsafe));
+
   // and the last byte either of them may write is the last byte of the block, not one past it
   arnm_byte_buffer edge;
   ASSERT_EQ(arnm_byte_buffer_init(&edge, 4, nullptr), ARNM_SUCCESS);
@@ -371,12 +380,15 @@ TEST(ByteBufferDeathTest, UnsafeCopyChecksWhatTheSafeCopyRefuses) {
 
   EXPECT_DEATH(unsafe_arnm_byte_buffer_copy(&buffer, "XXXX", 4), "room for")
       << "three bytes are free and four were offered";
-  EXPECT_DEATH(unsafe_arnm_byte_buffer_copy(&buffer, "X", 0), "size is 0");
   EXPECT_DEATH(unsafe_arnm_byte_buffer_copy(&buffer, nullptr, 1), "src is NULL");
   EXPECT_DEATH(unsafe_arnm_byte_buffer_copy(nullptr, "X", 1), "buffer is NULL");
 
   arnm_byte_buffer empty = {};
   EXPECT_DEATH(unsafe_arnm_byte_buffer_copy(&empty, "X", 1), "holds no block");
+
+  // a size of 0 is none of their business: it writes nothing, moves nothing, and passes
+  unsafe_arnm_byte_buffer_copy(&buffer, "X", 0);
+  EXPECT_EQ(buffer.last_index, 5u) << "the mark did not move";
 
   // the parent process is untouched by any of that, and the buffer still works
   EXPECT_EQ(Content(&buffer), "abcde");
