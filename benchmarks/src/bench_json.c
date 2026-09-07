@@ -20,10 +20,10 @@
  *
  * The writer has two moving parts: the building, where a field at a time goes into a document
  * held in the arena, and the rendering, where that document becomes text. They are timed apart
- * because a caller pays them apart -- the size is asked for between the two, and that is what an
- * output arena is sized by. Both are timed a second time with the writer told up front how big
- * the document will be, because that hint is the one knob its header offers and a row beside the
- * one without it is the only honest way to say what turning it is worth.
+ * because a caller pays them apart -- the size estimate is asked for between the two, and that
+ * is what an output arena is opened at. Both are timed a second time with the writer told up front
+ * how big the document will be, because that hint is the one knob its header offers and a row
+ * beside the one without it is the only honest way to say what turning it is worth.
  *
  * The reader has three moving parts: a parse, a walk over an object, and a read of an array.
  * Everything a consumer does is some arrangement of those, so each is measured on its own and
@@ -101,8 +101,8 @@ typedef struct payload {
   arnm_json_reader reader;    /**< Parsed once and held, for the rows that are not about parsing. */
   arnm_json_value *root;      /**< That document's way in. */
   arnm_json_writer_hint hint; /**< This document's own size, for the rows that are told it. */
-  uint32_t promised;          /**< What the writer said the text would take, before it wrote it. */
-  arnm_json_writer writer;    /**< Built once and held, for the row that only asks it a question. */
+  uint32_t estimate;       /**< What the writer guessed the text would take, before it wrote it. */
+  arnm_json_writer writer; /**< Built once and held, for the row that only asks it a question. */
 } payload;
 
 #define SHORT_VALUE "a string value of an ordinary length"
@@ -117,39 +117,41 @@ static void write_record_field(arnm_json_writer *writer, unsigned index, const s
   const char *value = (LONG_VALUE_LENGTH == form->length) ? long_value : SHORT_VALUE;
   switch (index) {
   case 0:
-    arnm_json_writer_add_string_length(writer, "name", value, form->length);
+    arnm_json_writer_add_string(writer, ARNM_JSON_WRITER_KEY("name"), value, form->length);
     break;
   case 1:
-    arnm_json_writer_add_uint64(writer, "id", UINT64_C(0x0123456789abcdef));
+    arnm_json_writer_add_uint64(writer, ARNM_JSON_WRITER_KEY("id"), UINT64_C(0x0123456789abcdef));
     break;
   case 2:
-    arnm_json_writer_add_int64(writer, "balance", INT64_C(-4200000000));
+    arnm_json_writer_add_int64(writer, ARNM_JSON_WRITER_KEY("balance"), INT64_C(-4200000000));
     break;
   case 3:
-    arnm_json_writer_add_uint64(writer, "port", 8443);
+    arnm_json_writer_add_uint64(writer, ARNM_JSON_WRITER_KEY("port"), 8443);
     break;
   case 4:
-    arnm_json_writer_add_int64(writer, "offset", -12345);
+    arnm_json_writer_add_int64(writer, ARNM_JSON_WRITER_KEY("offset"), -12345);
     break;
   case 5:
-    arnm_json_writer_add_double(writer, "ratio", 0.6180339887498949);
+    arnm_json_writer_add_double(writer, ARNM_JSON_WRITER_KEY("ratio"), 0.6180339887498949);
     break;
   case 6:
-    arnm_json_writer_add_bool(writer, "active", true);
+    arnm_json_writer_add_bool(writer, ARNM_JSON_WRITER_KEY("active"), true);
     break;
   case 7:
-    arnm_json_writer_add_hex(writer, "digest", record_digest, RECORD_DIGEST_SIZE);
+    arnm_json_writer_add_hex(
+        writer, ARNM_JSON_WRITER_KEY("digest"), record_digest, RECORD_DIGEST_SIZE
+    );
     break;
   default:
-    arnm_json_writer_add_uuid(writer, "uuid", record_uuid);
+    arnm_json_writer_add_uuid(writer, ARNM_JSON_WRITER_KEY("uuid"), record_uuid);
     break;
   }
 }
 
 static void write_spares(arnm_json_writer *writer, uint32_t count) {
   for (uint32_t index = 0; index < count; ++index) {
-    arnm_json_writer_add_string_length(
-        writer, spare_keys[index], SHORT_VALUE, (uint32_t)(sizeof(SHORT_VALUE) - 1u)
+    arnm_json_writer_add_string(
+        writer, spare_keys[index], 8, false, SHORT_VALUE, (uint32_t)(sizeof(SHORT_VALUE) - 1u)
     );
   }
 }
@@ -167,9 +169,9 @@ static void build_payload(arnm_json_writer *writer, const shape *form) {
     build_record(writer, form);
     return;
   }
-  arnm_json_writer_open_array(writer, "items");
+  arnm_json_writer_open_array(writer, ARNM_JSON_WRITER_KEY("items"));
   for (uint32_t index = 0; index < form->elements; ++index) {
-    arnm_json_writer_open_object(writer, NULL);
+    arnm_json_writer_open_object(writer, NULL, 0, false);
     build_record(writer, form);
     arnm_json_writer_close(writer);
   }
@@ -227,7 +229,7 @@ static void build_document(payload *one, const arnm_json_writer_hint *hint, int 
     );
     build_payload(&writer, &one->form);
     require_ok(arnm_json_writer_status(&writer), "build");
-    sink += arnm_json_writer_size(&writer);
+    sink += arnm_json_writer_buffer_size_min(&writer);
     (void)arnm_json_writer_release(&writer);
     arnm_reset(&scratch);
   }
@@ -263,17 +265,19 @@ static void render_document(payload *one, const arnm_json_writer_hint *hint, int
 }
 
 /**
- * @brief The one question a writer answers without doing anything: how long the text will be.
+ * @brief The one question a writer answers without doing anything: roughly how long the text is.
  *
- * A field read, not a walk -- the number is kept as the document is built. The row exists to say
- * that in a figure, because it is what lets an output arena be sized before there is any text to
- * size it against, and a caller only does that if asking is free. Timed on the writer that
- * stands for the whole run rather than on one built inside the loop, which would time the
- * building instead.
+ * An arithmetic answer over a count the adders already kept -- no walk, no string measured, and
+ * nothing rendered. The row exists to say that in a figure, because sizing an output arena
+ * before there is any text to size it against is only worth doing if asking is free. Timed on
+ * the writer that stands for the whole run rather than on one built inside the loop, which
+ * would time the building instead.
  */
 static void measure_size(payload *one, int steps) {
   uint64_t sink = 0;
-  for (int step = 0; step < steps; ++step) { sink += arnm_json_writer_size(&one->writer); }
+  for (int step = 0; step < steps; ++step) {
+    sink += arnm_json_writer_buffer_size_min(&one->writer);
+  }
   g_sink += sink;
 }
 
@@ -382,7 +386,10 @@ static void refill_only(payload *one, int steps) {
 static void walk_record(payload *one, int steps) {
   uint64_t sink = 0;
   for (int step = 0; step < steps; ++step) {
-    record_target into;
+    // zeroed, not merely declared: read_record() fills only the members the payload holds, and
+    // digest_of() reads every one of them -- an absent `active` is otherwise a bool loaded from
+    // whatever was on the stack, which is undefined behaviour the sanitiser build traps on
+    record_target into = {0};
     uint64_t found = 0;
     require_ok(read_record(one->root, &into, &found), "walk");
     sink += digest_of(&into) + found;
@@ -429,7 +436,7 @@ static void traverse_whole(payload *one, int steps) {
     uint32_t count = 0;
     require_ok(arnm_json_read_array(items, elements, ARRAY_ELEMENTS, &count), "array");
     for (uint32_t index = 0; index < count; ++index) {
-      record_target into;
+      record_target into = {0}; /* as in walk_record(): the walk fills only what is there */
       require_ok(read_record(elements[index], &into, NULL), "walk");
       sink += digest_of(&into);
     }
@@ -508,16 +515,11 @@ static void prepare_test_data(void) {
     build_payload(&writer, &one->form);
     require_ok(arnm_json_writer_status(&writer), one->name);
     // asked before the text exists, which is the only moment the answer is of any use
-    one->promised = arnm_json_writer_size(&writer);
+    one->estimate = arnm_json_writer_buffer_size_min(&writer);
 
     arnm_memory_block rendered;
     require_ok(arnm_json_writer_write(&writer, &output, &rendered, &one->length), "write payload");
-    // the promise is an upper bound and never a short one; a document that outgrew what its own
-    // writer reserved for it would have sized an output arena too small
-    if (one->promised < one->length + 1u) {
-      fprintf(stderr, "benchmark setup failed: payload '%s' outgrew its own promise\n", one->name);
-      exit(EXIT_FAILURE);
-    }
+
     // the insitu rows render this text into a buffer of the same size and write padding past its
     // end, so the room for that padding is what has to fit
     if (one->length + ARNM_JSON_READER_INSITU_PADDING > TEXT_CAPACITY) {
@@ -559,7 +561,6 @@ static void prepare_test_data(void) {
     build_document(payloads[index], &payloads[index]->hint, 64);
     render_document(payloads[index], NULL, 64);
     render_document(payloads[index], &payloads[index]->hint, 64);
-    measure_size(payloads[index], 64);
     parse_copying(payloads[index], 64);
     parse_insitu(payloads[index], 64);
     refill_only(payloads[index], 64);
@@ -780,22 +781,6 @@ static void (*const walk_rows[LAYOUT_COUNT])(int) = {
     walk_in_order, walk_behind, walk_in_front, walk_reversed
 };
 
-#define BENCH_ASK(id, one)                                                                         \
-  static void ask_##id(int steps) {                                                                \
-    measure_size(one, steps);                                                                      \
-  }
-/* clang-format off */
-BENCH_ASK(in_order, &in_order)
-BENCH_ASK(behind, &behind)
-BENCH_ASK(in_front, &in_front)
-BENCH_ASK(reversed, &reversed)
-BENCH_ASK(nested, &nested)
-BENCH_ASK(text, &text)
-/* clang-format on */
-
-static void (*const ask_rows[PAYLOAD_COUNT])(int) = {ask_in_order, ask_behind, ask_in_front,
-                                                     ask_reversed, ask_nested, ask_text};
-
 static void read_items_nested(int steps) {
   read_items(&nested, steps);
 }
@@ -810,22 +795,23 @@ int main(void) {
   prepare_test_data();
   bench_prepared(time_used);
 
-  // "promised" is what the writer answered before the text existed, terminator counted, and
-  // "over" is how much of that the text did not need. Every record here carries a double, and a
-  // double is charged its longest possible rendering because its real length is not known until
-  // it has been rendered -- so the promise is a bound on all six, and the last column is one
-  // record's worth of that overcharge times the number of records.
+  // "estimate" is what the writer guessed from its element count before the text existed,
+  // terminator counted, and "off by" is how far that guess landed from the text -- positive
+  // where it was generous, negative where the text ran past it. It is a guess and not a bound
+  // in either direction, so both signs are expected here: a payload of short values comes out
+  // under the estimate, and one carrying a long string comes out over it.
   printf("\nthe payloads\n");
   printf(
-      "  %-12s %8s %8s %10s %10s %8s\n", "payload", "bytes", "nodes", "records", "promised", "over"
+      "  %-12s %8s %8s %10s %10s %8s\n", "payload", "bytes", "nodes", "records", "estimate",
+      "off by"
   );
   for (size_t index = 0; index < PAYLOAD_COUNT; ++index) {
     payload *one = payloads[index];
     printf(
-        "  %-12s %8u %8u %10u %10u %8u\n", one->name, (unsigned)one->length,
+        "  %-12s %8u %8u %10u %10u %+8lld\n", one->name, (unsigned)one->length,
         (unsigned)arnm_json_reader_value_count(&one->reader),
-        (unsigned)(one->form.elements ? one->form.elements : 1u), (unsigned)one->promised,
-        (unsigned)(one->promised - (one->length + 1u))
+        (unsigned)(one->form.elements ? one->form.elements : 1u), (unsigned)one->estimate,
+        (long long)one->estimate - ((long long)one->length + 1)
     );
   }
 
@@ -844,13 +830,6 @@ int main(void) {
   );
   for (size_t index = 0; index < PAYLOAD_COUNT; ++index) {
     report_write_footprint(payloads[index]);
-  }
-
-  bench_section("asking the writer for the size it has been keeping, on a document already built");
-  for (size_t index = 0; index < PAYLOAD_COUNT; ++index) {
-    char name[BENCH_NAME_WIDTH];
-    snprintf(name, sizeof(name), "  %s", payloads[index]->name);
-    bench_step(ask_rows[index], ASK_STEPS, name, "answer");
   }
 
   bench_section("one document parsed, copying against in place, per document");

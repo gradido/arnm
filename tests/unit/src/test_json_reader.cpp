@@ -903,3 +903,104 @@ TEST(JsonReader, AnArrayOfArraysIsReadOneLevelAtATime) {
     EXPECT_EQ(width, expected_widths[index]) << "row " << index;
   }
 }
+
+// ---------------------------------------------------------------------------
+// telling a member that is null from one that is not there
+// ---------------------------------------------------------------------------
+
+TEST(JsonReader, ANullMemberIsTheOnlyTypeATableCannotAskAbout) {
+  ArenaReader owner;
+  arnm_json_value *root = Parse(owner, "{\"timeout\":null,\"retries\":3}");
+  ASSERT_NE(root, nullptr);
+
+  // a typed entry refuses it like any other mismatch, and the walk stops there -- which is
+  // exactly why the handle has to be asked about instead
+  double timeout = 1.0;
+  uint32_t retries = 0;
+  arnm_json_field typed[] = {
+      ARNM_JSON_FIELD_DOUBLE("timeout", &timeout),
+      ARNM_JSON_FIELD_UINT32("retries", &retries),
+  };
+  EXPECT_EQ(arnm_json_read_object(root, typed, 2, nullptr), ARNM_ERROR_INVALID_ENUM_TYPE);
+  EXPECT_EQ(timeout, 1.0) << "the target keeps what it had";
+  EXPECT_EQ(retries, 0u) << "and the entry behind it was never reached";
+}
+
+TEST(JsonReader, IsNullSeparatesAMemberThatIsNullFromOneThatIsNot) {
+  ArenaReader owner;
+  arnm_json_value *root = Parse(
+      owner, "{\"nothing\":null,\"number\":0,\"text\":\"\",\"no\":false,"
+             "\"object\":{},\"array\":[]}"
+  );
+  ASSERT_NE(root, nullptr);
+
+  arnm_json_value *nothing = nullptr;
+  arnm_json_value *number = nullptr;
+  arnm_json_value *text = nullptr;
+  arnm_json_value *no = nullptr;
+  arnm_json_value *object = nullptr;
+  arnm_json_value *array = nullptr;
+  arnm_json_field fields[] = {
+      ARNM_JSON_FIELD_VALUE("nothing", &nothing), ARNM_JSON_FIELD_VALUE("number", &number),
+      ARNM_JSON_FIELD_VALUE("text", &text),       ARNM_JSON_FIELD_VALUE("no", &no),
+      ARNM_JSON_FIELD_VALUE("object", &object),   ARNM_JSON_FIELD_VALUE("array", &array),
+  };
+  ASSERT_EQ(arnm_json_read_object(root, fields, 6, nullptr), ARNM_SUCCESS);
+
+  EXPECT_TRUE(arnm_json_read_is_null(nothing));
+
+  // every other way a member can be empty is not null, which is the distinction the call is for
+  EXPECT_FALSE(arnm_json_read_is_null(number));
+  EXPECT_FALSE(arnm_json_read_is_null(text)) << "the empty string is a string";
+  EXPECT_FALSE(arnm_json_read_is_null(no)) << "false is a value";
+  EXPECT_FALSE(arnm_json_read_is_null(object));
+  EXPECT_FALSE(arnm_json_read_is_null(array));
+}
+
+TEST(JsonReader, AMemberThatIsNotThereIsNotAMemberThatIsNull) {
+  // the mask says which is which: an absent member leaves its handle NULL and its bit clear,
+  // and a member that is there and null leaves the handle set
+  ArenaReader owner;
+  arnm_json_value *root = Parse(owner, "{\"here\":null}");
+  ASSERT_NE(root, nullptr);
+
+  arnm_json_value *here = nullptr;
+  arnm_json_value *absent = nullptr;
+  arnm_json_field fields[] = {
+      ARNM_JSON_FIELD_VALUE("here", &here),
+      ARNM_JSON_FIELD_VALUE("absent", &absent),
+  };
+  uint64_t found = 0;
+  ASSERT_EQ(arnm_json_read_object(root, fields, 2, &found), ARNM_SUCCESS);
+
+  EXPECT_EQ(found, 1u) << "only the first entry was filled";
+  ASSERT_NE(here, nullptr);
+  EXPECT_TRUE(arnm_json_read_is_null(here));
+
+  EXPECT_EQ(absent, nullptr);
+  EXPECT_FALSE(arnm_json_read_is_null(absent))
+      << "NULL is no handle at all, and answering true would fold the two cases into one";
+}
+
+TEST(JsonReader, ANullMemberIsSkippedAndTheRestOfTheWalkGoesOn) {
+  // the shape the header recommends: probe for the handle, ask, and only then name the type
+  ArenaReader owner;
+  arnm_json_value *root = Parse(owner, "{\"timeout\":null,\"retries\":3}");
+  ASSERT_NE(root, nullptr);
+
+  arnm_json_value *timeout = nullptr;
+  arnm_json_field probe[] = {ARNM_JSON_FIELD_VALUE("timeout", &timeout)};
+  ASSERT_EQ(arnm_json_read_object(root, probe, 1, nullptr), ARNM_SUCCESS);
+
+  double seconds = 30.0;
+  if (timeout && !arnm_json_read_is_null(timeout)) {
+    arnm_json_field read[] = {ARNM_JSON_FIELD_DOUBLE("timeout", &seconds)};
+    ASSERT_EQ(arnm_json_read_object(root, read, 1, nullptr), ARNM_SUCCESS);
+  }
+  EXPECT_EQ(seconds, 30.0) << "explicitly nothing, so the default stands";
+
+  uint32_t retries = 0;
+  arnm_json_field rest[] = {ARNM_JSON_FIELD_UINT32("retries", &retries)};
+  ASSERT_EQ(arnm_json_read_object(root, rest, 1, nullptr), ARNM_SUCCESS);
+  EXPECT_EQ(retries, 3u) << "and the field behind the null was read after all";
+}

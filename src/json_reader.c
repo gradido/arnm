@@ -119,8 +119,7 @@ arnm_result arnm_json_reader_init(arnm_json_reader *reader, arnm *allocator) {
   // magic goes last, so a reader that was interrupted mid preparation still reads as one that
   // was never prepared at all.
   json_reader_state *state = (json_reader_state *)(void *)reader;
-  state->alc_context.allocator = allocator;
-  state->alc_context.arena_kept_bytes = false;
+  json_alc_context_init(&state->alc_context, allocator);
   json_alc_bind(&state->alc, &state->alc_context);
   state->doc = NULL;
   state->error_message = NULL;
@@ -480,4 +479,8 @@ arnm_result arnm_json_read_array(
   while ((val = yyjson_arr_iter_next(&iter)) != NULL) { out_values[count++] = to_public(val); }
   if (out_array_size) { *out_array_size = count; }
   return ARNM_SUCCESS;
+}
+
+bool arnm_json_read_is_null(arnm_json_value *json_value) {
+  return yyjson_is_null(to_yyjson(json_value));
 }

@@ -49,12 +49,13 @@ allocator is on no path this library takes.
 | `arnm/memory.h` | the `arnm` handle and the calls every allocator answers: alloc, free, realloc, clone, reset |
 | `arnm/arena.h` | make a handle an arena -- over memory it takes from the host, or memory you lend it |
 | `arnm/memory_block.h` | pointer and size kept together, so freeing needs no bookkeeping from you |
+| `arnm/byte_buffer.h` | one block filled from the front, records packed back to back; handed to a stream in one piece |
 | `arnm/multi_arena.h` | a chain of arenas that opens another one instead of running dry |
 | `arnm/fixed_arena_pool.h` | a fixed set of equal sized arenas, lent out and returned; the peak is known at init |
 | `arnm/bucket_vector.h` | growing sequence with stable element addresses; no copy on growth |
 | `arnm/fixed_ring.h` | bounded queue, first in first out; the room taken once, a full ring refuses rather than grows |
 | `arnm/json_reader.h` | JSON parsed into your arena; one line per struct field, the first error kept with its field name, an in-situ path that copies nothing |
-| `arnm/json_writer.h` | the way back: one line per struct field, strings borrowed rather than copied, and the output size known before the text exists |
+| `arnm/json_writer.h` | the way back: one line per struct field, strings and keys borrowed rather than copied, and the text rendered straight into the allocator you name |
 | `arnm/converter.h` | integer to decimal string, roughly 4× faster than `snprintf`; bytes to lowercase hex and back, uuid to its 8-4-4-4-12 form and back |
 | `arnm/duration.h` | nanoseconds to a readable span |
 | `arnm/mono_timer.h` | monotonic clock, one type, three units |
@@ -242,6 +243,12 @@ document is reachable through — `arnm_json_object_get()`, `arnm_json_read_uint
 `arnm_json_array_iter_next()` and the rest — each answering an `arnm_result` of its own, for
 code that wants every step checked where it happens.
 
+`null` is the one JSON type a table entry cannot ask about: every other type is named by the
+entry that reads it, but `null` is the member saying it has no value at all, so a typed entry
+refuses it and the rest of the walk goes unread. `arnm_json_read_is_null()` is how a mapper
+tells "absent" from "there and explicitly nothing" — take the member as a handle with
+`ARNM_JSON_FIELD_VALUE()`, ask, and name its type only once the answer says there is one.
+
 `arnm_json_reader_parse_insitu()` is the cheaper path. It unescapes strings inside your own
 buffer instead of copying it, which leaves a document at exactly one allocation — and behind an
 arena that one sits at the tail, so releasing gives every byte back. The price is that the
@@ -258,11 +265,11 @@ field, strings borrowed rather than copied, and one check at the end.
 #include "arnm/json_writer.h"
 
 arnm_json_writer writer;
-arnm_json_writer_init(&writer, scratch, ARNM_JSON_WRITE_DEFAULT);   // or ..._PRETTY
+arnm_json_writer_init(&writer, scratch, ARNM_JSON_WRITE_DEFAULT, NULL);   // or ..._PRETTY
 
-arnm_json_writer_add_string(&writer, "host", config.host);
-arnm_json_writer_add_uint64(&writer, "port", config.port);
-arnm_json_writer_add_bool(&writer, "debug", config.debug);
+arnm_json_writer_add_string(&writer, ARNM_JSON_WRITER_KEY("host"), config.host, host_length);
+arnm_json_writer_add_uint64(&writer, ARNM_JSON_WRITER_KEY("port"), config.port);
+arnm_json_writer_add_bool(&writer, ARNM_JSON_WRITER_KEY("debug"), config.debug);
 
 arnm_memory_block text;
 if (ARNM_SUCCESS == arnm_json_writer_write(&writer, output, &text, NULL)) {
@@ -278,40 +285,72 @@ the result above stands in for a check after every field —
 `arnm_json_writer_status()` and `arnm_json_writer_error_field()` are there when you want the
 verdict earlier.
 
-`arnm_json_writer_add_string()` keeps the pointer it is given and nothing else. Every string and
-every key therefore has to stay where it is until the write, which is what makes serialising a
-struct cost almost nothing: the payload is read once, at the end, straight out of your own
-memory. `arnm_json_writer_add_string_copy()` is there for a value that will not stand still that
-long.
+**Every key goes in with its own length, and says whether it needs escaping.** The writer never
+walks a key — not for a terminator, and not for a character JSON cannot hold literally. In a
+mapper the key is a literal whose length the compiler already knows and whose bytes are a plain
+name, so both passes that nothing asked for simply stop happening. `ARNM_JSON_WRITER_KEY()`
+spells the three arguments out of a literal:
+
+```c
+arnm_json_writer_add_uint64(&writer, ARNM_JSON_WRITER_KEY("port"), config.port);
+arnm_json_writer_add_uint64(&writer, "port", 4, false, config.port);      // the same thing
+arnm_json_writer_add_string(&writer, name, name_length, true, value, value_length);
+```
+
+Both are taken at their word and neither is checked against the key: a wrong length is a wrong
+name in the document rather than a refusal, and `false` for a key that does hold a quote writes
+a name the far side cannot parse. `ARNM_JSON_WRITER_ESCAPE_KEY()` is the macro for that case.
+
+`arnm_json_writer_add_string()` keeps the pointer it is given and nothing else — no copy, no
+escaping pass. Every string and every key therefore has to stay where it is until the write,
+which is what makes serialising a struct cost almost nothing: the payload is read once, at the
+end, straight out of your own memory. The same rule as for keys applies to the escaping: a value
+from source is fine as it stands, a value from input needs the flag, or it writes a document the
+far side cannot parse.
+
+`arnm_json_writer_add_string_flags()` is where any of those three defaults changes:
+
+```c
+arnm_json_writer_add_string_flags(&writer, ARNM_JSON_WRITER_KEY("note"), note, note_length,
+                                  ARNM_JSON_WRITER_STRING_COPY |     // will not stand still
+                                  ARNM_JSON_WRITER_STRING_ESCAPE);   // came from input
+```
+
+`ARNM_JSON_WRITER_STRING_RAW` is the third: bytes that are already JSON — a cached fragment, a
+number formatted by hand — laid into the text unquoted, unescaped and unchecked. It also decides
+what the serializer reserves for the field, one byte a character against the six a quoted string
+is charged in case every one of them escapes, which is why the hex and base64 adders write raw.
 
 Nesting is an open and a close, and the writer keeps the levels itself — up to
 `ARNM_JSON_WRITER_MAX_DEPTH`, past which it records `ARNM_ERROR_RESOURCE_EXHAUSTED` rather than
 reaching for memory mid-field. A key of `NULL` means "an element of the current array".
 
 ```c
-arnm_json_writer_open_array(&writer, "peers");
+arnm_json_writer_open_array(&writer, ARNM_JSON_WRITER_KEY("peers"));
 for (uint32_t i = 0; i < config.peer_count; ++i) {
-  arnm_json_writer_open_object(&writer, NULL);
-  arnm_json_writer_add_string(&writer, "name", config.peers[i].name);
+  arnm_json_writer_open_object(&writer, NULL, 0, false);
+  arnm_json_writer_add_string(&writer, ARNM_JSON_WRITER_KEY("name"), peer->name, peer->name_length);
   arnm_json_writer_close(&writer);
 }
 arnm_json_writer_close(&writer);
 ```
 
-**The size of the output is known before the text exists.** `arnm_json_writer_size()` reads a
-number the writer has been keeping all along: every field knows its own length, its separator
-and its indentation the moment it is added, so nothing is walked and nothing is rendered twice.
-It is **exact** for a document of integers, booleans, nulls and valid UTF-8 strings, under every
-layout — and `arnm_json_writer_write()` takes exactly that many bytes from the allocator you
-name, so an arena sized by it comes out full to the byte. Two things make it an upper bound
-instead, and only ever too large: a `double` is charged its longest form (25 bytes), and under
-`ARNM_JSON_WRITE_ESCAPE_UNICODE` a byte outside ASCII is charged six. The slack goes back before
-`write()` returns.
+**The text is rendered once, straight into the allocator you name.** `write()` hands that
+allocator to the serializer and lets it grow there as it goes, so nothing is written to a
+scratch buffer and copied out; what comes back is the buffer it was built in, shrunk to exactly
+what the text needed before it is handed over.
 
-Asking costs 1.4 ns whatever the document holds. Keeping the number costs one table lookup per
-string byte, about 0.2 ns — `bench_json` prices both against the work they precede, and runs
-every payload through the reader and the writer alike so the two directions can be read against
-each other.
+That is what replaced the exact running length the writer used to keep. Measuring every field as
+it went in cost a table lookup per string byte, on every string, whether anyone ever asked for
+the number — and once the serializer writes into the caller's allocator directly, nothing needs
+the number to be exact. `arnm_json_writer_buffer_size_min()` is what is left: a guess from the
+element count and the layout, free to ask, good for opening an arena at roughly the right size.
+It is **not a bound in either direction** — one long string or one large hex blob runs past it —
+so never size a fixed buffer by it. A caller that has to know the length writes the text and
+reads it back.
+
+`bench_json` prices this against the work it precedes, and runs every payload through the reader
+and the writer alike so the two directions can be read against each other.
 
 ## Build
 

@@ -101,9 +101,18 @@ static inline uint32_t arnm_align8_u32(uint32_t size) {
  *
  * All zeroes is a valid, usable state: the host allocator. Everything else comes from
  * @ref arnm_init_arena(), @ref arnm_init_arena_borrow() or @ref arnm_create_multi_arena().
+ *
+ * The union is not a choice between members but an alignment floor. The layout behind these
+ * bytes holds pointers, and a bare `uint8_t[]` is aligned for nothing -- so a handle placed
+ * after an odd number of chars, in a struct or among statics, would sit on an address the
+ * implementation then reads a pointer from. `sizeof(arnm)` is 32 either way.
  */
 typedef struct arnm {
-  uint8_t bytes[32]; /**< Opaque. Read it through the predicates above, never directly. */
+  union {
+    uint8_t bytes[32];       /**< Opaque. Read it through the predicates above, never directly. */
+    void *alignment_pointer; /**< Never read. Present for its alignment alone. */
+    uint64_t alignment_integer; /**< Never read. Present for its alignment alone. */
+  } opaque;                     /**< The storage itself. Never named by a caller. */
 } arnm;
 
 // ********** manage memory allocator themself *******************

@@ -111,6 +111,12 @@ extern "C" {
  *
  * Opaque by construction -- the bytes carry a layout that lives entirely in `json_reader.c`.
  *
+ * The union is not a choice between members but an alignment floor. The layout behind these
+ * bytes holds pointers, so the storage has to be aligned for one -- and a bare `uint8_t[]` is
+ * aligned for nothing. Without this a reader placed in a struct behind an odd number of chars,
+ * which is exactly what `bench_json` does, sits on an address the implementation then reads a
+ * pointer from. The same floor is what @ref arnm_json_writer carries, for the same reason.
+ *
  * A reader may not be moved once it has been initialized. The document keeps its own copy of the
  * allocator hooks, and those hooks point back into this storage; copying the struct to another
  * address leaves the document calling into where it used to be.
@@ -120,7 +126,11 @@ extern "C" {
  * @ref ARNM_ERROR_NOT_INITIALIZED.
  */
 typedef struct arnm_json_reader {
-  uint8_t opaqu[ARNM_JSON_READER_SIZE]; /**< Opaque; never read these directly. */
+  union {
+    uint8_t opaqu[ARNM_JSON_READER_SIZE]; /**< Opaque; never read these directly. */
+    void *alignment_pointer;              /**< Never read. Present for its alignment alone. */
+    uint64_t alignment_integer;           /**< Never read. Present for its alignment alone. */
+  } opaque;                               /**< The storage itself. Never named by a caller. */
 } arnm_json_reader;
 
 /**
@@ -613,6 +623,42 @@ arnm_result arnm_json_read_array(
     uint32_t capacity,
     uint32_t *out_array_size
 );
+
+/**
+ * @brief Whether @p json_value is the literal `null`.
+ *
+ * The one JSON type a table entry cannot ask about. Every other type is named by the entry that
+ * reads it and refused with @ref ARNM_ERROR_INVALID_ENUM_TYPE when the member is something
+ * else, but `null` is not a value a target can hold -- it is the member saying it has none. A
+ * walk that meets one therefore refuses it like any other mismatch, and a caller who wants to
+ * tell "absent" from "present and empty" apart has to look for itself.
+ *
+ * That is what this is for. Take the member as a handle with @ref ARNM_JSON_FIELD_VALUE() first,
+ * ask here, and only name its type once the answer says there is a type to name:
+ *
+ * @code
+ * arnm_json_value *timeout = NULL;
+ * arnm_json_field probe[] = {ARNM_JSON_FIELD_VALUE("timeout", &timeout)};
+ * arnm_json_read_object(root, probe, 1, NULL);
+ *
+ * if (timeout && !arnm_json_read_is_null(timeout)) {
+ *   arnm_json_field read[] = {ARNM_JSON_FIELD_DOUBLE("timeout", &config.timeout)};
+ *   arnm_json_read_object(root, read, 1, NULL);
+ * } else {
+ *   config.timeout = DEFAULT_TIMEOUT;       // absent, or there and explicitly nothing
+ * }
+ * @endcode
+ *
+ * Without it a `"timeout": null` costs the whole walk: the entry names a double, the member is
+ * not one, and every field behind it in the table goes unread.
+ *
+ * @param[in] json_value Value to ask about; may be NULL.
+ * @return true only for the literal `null`. NULL is false -- a handle that is not there is a
+ *         different thing from a member that is `null`, and the mask from the walk is what
+ *         tells them apart.
+ * @whisper A member that came all this way to say it holds nothing
+ */
+bool arnm_json_read_is_null(arnm_json_value *json_value);
 
 /** @} */
 
