@@ -20,10 +20,18 @@ next build.
 Entries before 0.4.0 were reconstructed from the git history after the fact, so they summarise
 what the commits show rather than what was noted at the time.
 
-## 0.8.0 -- unreleased
+## 0.8.0 -- 2026-09-07
 
-`arnm/json_writer.h` stops counting the text it is about to write. Every call site that adds a
-field has to be edited, so this is the release to read before upgrading.
+`arnm/json_writer.h` stops counting the text it is about to write, and stops escaping strings
+nobody asked it to escape. Two calls in `arnm/converter.h` change shape beside it, and one new
+header arrives. This is the release to read before upgrading rather than after.
+
+The first two entries under Changed are compile errors and answer themselves: the build stops,
+the call site is edited, and nothing is left to discover. The six after them are the ones worth
+the time -- they compile exactly as they did and do something else, and the compiler has nothing
+to say about any of them.
+
+### Changed
 
 **Every adder takes the key's length and an escape flag beside the key.**
 `arnm_json_writer_add_string(&writer, "host", config.host)` is now
@@ -41,7 +49,13 @@ side cannot parse. A NULL key still means "an element of the current array", and
 flag are both ignored.
 
 This is a compile error at every call site and not a silent change of behaviour, which is the
-kind that is cheap to answer. The two below are not.
+kind that is cheap to answer.
+
+**`arnm_binary_to_hex()` and `arnm_binary_to_base64()` take a pointer and a size** rather than an
+`arnm_memory_block *`, which is what lets them encode a slice, or format straight into storage
+that is not a block. `arnm_binary_block_to_hex()` and `arnm_binary_block_to_base64()` are the old
+shape kept as one-line wrappers; `arnm_binary_to_hex_alloc()` and `arnm_binary_to_base64_alloc()`
+draw the buffer themselves.
 
 **`arnm_json_writer_size()` is gone, and `arnm_json_writer_buffer_size_min()` is not a
 replacement.** The old call answered a number the writer had been keeping all along, exact for a
@@ -77,46 +91,7 @@ The rule is the same as for keys -- a string that came from source is fine as it
 came from input needs the flag. `WithoutTheEscapeFlagTheBytesReachTheTextUnchanged` pins what
 that costs.
 
-**`arnm_json_writer_add_string_flags()`** is where anything but those defaults is asked for.
-`arnm_json_writer_add_string()` is borrowed, quoted and unescaped; each of the three changes
-through a bit:
-
-- `ARNM_JSON_WRITER_STRING_COPY` takes a copy into the writer's allocator, for a value that will
-  not stand still until the write. It replaces `arnm_json_writer_add_string_copy()`.
-- `ARNM_JSON_WRITER_STRING_ESCAPE` puts the escaping pass back on the value.
-- `ARNM_JSON_WRITER_STRING_RAW` lays the bytes into the text exactly as they stand -- not quoted,
-  not escaped, not checked -- which is the way to place a cached object, a payload that arrived as
-  JSON and is going straight back out, or a number formatted to a precision no flag here can ask
-  for. A string has to arrive carrying its own quotes. Nothing in this header can tell valid JSON
-  from anything else, so bytes that are not a well formed value produce a document that is not one
-  either, and the reader on the far side is what finds out. It replaces
-  `arnm_json_writer_add_string_raw()`.
-
-The bit also decides what the serializer reserves against the field: a quoted string is asked for
-at six bytes a character, in case every one of them escapes to `\uXXXX`, and a raw value at one.
-That is why `arnm_json_writer_add_hex()` and `arnm_json_writer_add_base64()` write raw, and why a
-large payload placed by hand should too.
-
-**Fixed: a refusal at an array element was filed under the empty string in three adders.**
-`arnm_json_writer_add_hex()`, `_add_base64()` and `_add_uuid()` passed the caller's key straight
-to the error record when the string pool could not answer, where every other refusal in the
-writer passes it through the `"[]"` sentinel first. A NULL key means an element
-of an array, and `arnm_json_writer_error_field()` documents `"[]"` for one -- the empty string is
-for a refusal belonging to no field at all, which these are not. The size branch of the same
-three calls was already right, so which name an over-large block was filed under depended on
-whether it was refused for its size or by the allocator.
-
-**A dead branch in `arnm_json_writer_add_hex()` and `_add_base64()` is gone, and what made it
-dead is now checked by the compiler.** Both tested what the converter answered, and neither could
-ever see anything but success: the buffer comes from the string pool a line above, the block and
-its size are answered at the top of the call, and the size cap the writer applies is stricter
-than the converter's own -- 2147483642 against 2147483647 for hex, 3221225463 against 3221225469
-for base64. That last one is a relationship between two constants in two files, so it is held by
-a `static_assert` at `JSON_HEX_MAX_BYTES` and `JSON_BASE64_MAX_BYTES` rather than by a branch
-nothing reaches. Raising either cap past the converter's now fails the build instead of quietly
-routing a refusal to a place that reads none. 144 bytes of text less in `json_writer.o`.
-
-**Fixed: releasing a document reset the caller's whole arena.** `arnm_json_writer_release()`,
+**Releasing a document no longer resets the caller's whole arena.** `arnm_json_writer_release()`,
 and every `begin` that followed a document, called `arnm_reset()` when the writer had been given
 an arena -- which hands back everything in that arena and not merely the document, whatever else
 the caller had put there. It also meant `_release()` and `_destroy()` could never answer the
@@ -147,56 +122,6 @@ blocks may sit in more than one arena and a sum measured against one of them mea
 `ARNM_JSON_WRITER_SIZE` is unchanged: what the bookkeeping needed fits in bytes that were
 padding.
 
-**Fixed: `arnm_binary_to_base64_alloc()` reserved the characters but not the terminator.**
-`ARNM_BASE64_STRING_LENGTH()` counts characters only -- unlike `ARNM_HEX_STRING_LENGTH()`, which
-counts the terminator -- so the block was one byte short of what `arnm_binary_to_base64()` then
-wrote into it, for every input. `out->size` is one larger than before as a result. Neither
-allocating wrapper had a caller anywhere in this repository, which is how it survived; both have
-tests now.
-
-**Both encoders refuse a size whose text could not be measured.** `ARNM_HEX_STRING_LENGTH()`
-wraps above 2147483647 bytes and `ARNM_BASE64_STRING_LENGTH()` above 3221225469, and a wrapped
-length is not a large number but a small and plausible one -- the hex of 2147483648 bytes
-measures as 1. `arnm_binary_to_hex()`, `arnm_binary_to_base64()` and both `_alloc` wrappers now
-answer `ARNM_ERROR_ARITHMETIC_OVERFLOW` there, before either pointer is read, and the two bounds
-are named as `ARNM_HEX_MAX_BINARY_SIZE` and `ARNM_BASE64_MAX_BINARY_SIZE`.
-
-**`arnm_binary_to_hex()` and `arnm_binary_to_base64()` take a pointer and a size** rather than an
-`arnm_memory_block *`, which is what lets them encode a slice, or format straight into storage
-that is not a block. `arnm_binary_block_to_hex()` and `arnm_binary_block_to_base64()` are the old
-shape kept as one-line wrappers; `arnm_binary_to_hex_alloc()` and `arnm_binary_to_base64_alloc()`
-draw the buffer themselves.
-
-**The unsafe pair in `arnm/byte_buffer.h` checks its preconditions while assertions are on.**
-`unsafe_arnm_byte_buffer_copy()` and `unsafe_arnm_byte_buffer_push()` write without asking; they
-now assert the mistakes the safe pair refuses -- the buffer, the source, an uninitialized block,
-and room for what is being written -- so a mistake shows up in a debug build instead of only in a
-release one. A size of 0 is not among them because the checked
-call no longer refuses one either; see the entry below. The assertions belong to the caller's translation unit, these
-being inline functions: a consumer's debug build checks them even against a release build of
-arnm, and a consumer's release build checks nothing even against a debug one.
-
-`bench_byte_buffer` measures what that buys, at `-Doptimize=ReleaseFast`:
-
-| step | safe | unsafe |
-|---|---|---|
-| one byte | 1.1 ns | 0.8 ns |
-| one 8 byte record | 0.7 ns | 0.5 ns |
-| one 64 byte record | 1.1 ns | 1.0 ns |
-| one 512 byte record | 8.2 ns | 8.0 ns |
-| four records and their separators, room asked once | 5.7 ns | 1.2 ns |
-
-Per call it is a fraction of a nanosecond, and at 512 bytes the copy itself is all there is left
-to measure. The last row is what the pair is actually for, and the reason is not the checks
-themselves: with the questions out of the way the compiler merges the whole group into a run of
-stores -- 50 instructions against 116 for the same 36 bytes, with no call to memcpy and no branch
-per write. Reach for the unsafe pair where a group of writes shares one question, not to save a
-compare on a single one.
-
-In a debug build the unsafe pair is the **slower** of the two -- 11.1 ns against 8.3 ns for a
-push -- because nothing inlines there and the assertions are real work. That is the trade working
-as intended, and worth knowing before reading a debug profile.
-
 **A length of 0 is an answer and not a refusal.** `arnm_binary_to_hex()`,
 `arnm_binary_to_base64()`, `arnm_binary_from_hex_with_known_hex_size()`, `arnm_binary_from_hex()`
 and `arnm_byte_buffer_copy()` answered `ARNM_ERROR_INVALID_PARAM` for an empty block or an empty
@@ -222,6 +147,26 @@ pointer to answer with, `malloc(0)` may hand back NULL, and NULL is how this API
 The same holds for `arnm_clone()`, for an arena, ring or pool of zero capacity, and for parsing a
 JSON document of zero length -- an empty document is not JSON.
 
+**`arnm` and `arnm_json_reader` carry an alignment floor.** Both were a bare `uint8_t[]`, which
+is aligned for nothing, while the layout behind either holds pointers. A handle that happened to
+land on an 8-byte boundary worked and every other one was undefined behaviour -- `bench_json`
+puts a reader in a struct behind an odd-sized `char[]` and `bench_binaryToString` puts an `arnm`
+among statics, and both trapped under `-Dsanitize=undefined_behavior`. They now hold the same
+three-member union `arnm_json_writer` always had. `sizeof` is unchanged at 32 and 72, so nothing
+that only passed these around has to be rebuilt; anything that placed one by hand should be.
+
+**An uninitialized writer is undefined on the adders, and answered everywhere else.** The magic
+that tells a writer from any other 280 bytes is read by `_init()`, `_begin_*()`, `_release()`,
+`_destroy()`, `_write()`, `_status()`, `_error_field()`, `_clear_error()`, `_depth()` and
+`_buffer_size_min()` -- once per document, or once per question. It is deliberately not read by
+`add_*`, `open_*` or `close()`: those are the per-field path, and a check nobody can fail does
+not belong in front of a field. A NULL writer is still answered for on all of them, because a
+mapper writing an optional sub-document has a real reason to hold one. Everything else is what
+`_init()` established, and `AnUninitializedWriterAnswersEveryQuestionAskedAboutIt` says in the
+test file which calls are on which side of that line.
+
+### Added
+
 **`arnm/byte_buffer.h`**, one block filled from the front. `arnm_byte_buffer_init()` takes every
 byte it will ever hold, `arnm_byte_buffer_copy()` lands each record where the last one ended, and
 `arnm_byte_buffer_access()` hands the whole run out as the pointer and length a `write()` wants --
@@ -237,6 +182,57 @@ access call answers a pointer and a `uint32_t` rather than an `arnm_memory_block
 means the allocated size everywhere else in arnm. `arnm_byte_buffer_clear()` drops the content and
 keeps the block, so a fill / write out / clear cycle costs exactly one allocation in total.
 
+**The unsafe pair in `arnm/byte_buffer.h` checks its preconditions while assertions are on.**
+`unsafe_arnm_byte_buffer_copy()` and `unsafe_arnm_byte_buffer_push()` write without asking; they
+now assert the mistakes the safe pair refuses -- the buffer, the source, an uninitialized block,
+and room for what is being written -- so a mistake shows up in a debug build instead of only in a
+release one. A size of 0 is not among them because the checked
+call no longer refuses one either -- see *A length of 0 is an answer and not a refusal* under
+Changed. The assertions belong to the caller's translation unit, these
+being inline functions: a consumer's debug build checks them even against a release build of
+arnm, and a consumer's release build checks nothing even against a debug one.
+
+`bench_byte_buffer` measures what that buys, at `-Doptimize=ReleaseFast`:
+
+| step | safe | unsafe |
+|---|---|---|
+| one byte | 1.1 ns | 0.8 ns |
+| one 8 byte record | 0.7 ns | 0.5 ns |
+| one 64 byte record | 1.1 ns | 1.0 ns |
+| one 512 byte record | 8.2 ns | 8.0 ns |
+| four records and their separators, room asked once | 5.7 ns | 1.2 ns |
+
+Per call it is a fraction of a nanosecond, and at 512 bytes the copy itself is all there is left
+to measure. The last row is what the pair is actually for, and the reason is not the checks
+themselves: with the questions out of the way the compiler merges the whole group into a run of
+stores -- 50 instructions against 116 for the same 36 bytes, with no call to memcpy and no branch
+per write. Reach for the unsafe pair where a group of writes shares one question, not to save a
+compare on a single one.
+
+In a debug build the unsafe pair is the **slower** of the two -- 11.1 ns against 8.3 ns for a
+push -- because nothing inlines there and the assertions are real work. That is the trade working
+as intended, and worth knowing before reading a debug profile.
+
+**`arnm_json_writer_add_string_flags()`** is where anything but those defaults is asked for.
+`arnm_json_writer_add_string()` is borrowed, quoted and unescaped; each of the three changes
+through a bit:
+
+- `ARNM_JSON_WRITER_STRING_COPY` takes a copy into the writer's allocator, for a value that will
+  not stand still until the write. It replaces `arnm_json_writer_add_string_copy()`.
+- `ARNM_JSON_WRITER_STRING_ESCAPE` puts the escaping pass back on the value.
+- `ARNM_JSON_WRITER_STRING_RAW` lays the bytes into the text exactly as they stand -- not quoted,
+  not escaped, not checked -- which is the way to place a cached object, a payload that arrived as
+  JSON and is going straight back out, or a number formatted to a precision no flag here can ask
+  for. A string has to arrive carrying its own quotes. Nothing in this header can tell valid JSON
+  from anything else, so bytes that are not a well formed value produce a document that is not one
+  either, and the reader on the far side is what finds out. It replaces
+  `arnm_json_writer_add_string_raw()`.
+
+The bit also decides what the serializer reserves against the field: a quoted string is asked for
+at six bytes a character, in case every one of them escapes to `\uXXXX`, and a raw value at one.
+That is why `arnm_json_writer_add_hex()` and `arnm_json_writer_add_base64()` write raw, and why a
+large payload placed by hand should too.
+
 **`arnm_json_read_is_null()`** in `arnm/json_reader.h`. `null` was the one JSON type a table
 entry could not ask about: every other type is named by the entry that reads it, but `null` is
 the member saying it holds no value, so a typed entry refuses it with
@@ -245,13 +241,30 @@ member as a handle with `ARNM_JSON_FIELD_VALUE()`, ask here, and name its type o
 answer says there is one. A NULL handle answers false -- a member that is not there and a member
 that is `null` are different things, and the mask from the walk is what tells them apart.
 
-**`arnm` and `arnm_json_reader` carry an alignment floor.** Both were a bare `uint8_t[]`, which
-is aligned for nothing, while the layout behind either holds pointers. A handle that happened to
-land on an 8-byte boundary worked and every other one was undefined behaviour -- `bench_json`
-puts a reader in a struct behind an odd-sized `char[]` and `bench_binaryToString` puts an `arnm`
-among statics, and both trapped under `-Dsanitize=undefined_behavior`. They now hold the same
-three-member union `arnm_json_writer` always had. `sizeof` is unchanged at 32 and 72, so nothing
-that only passed these around has to be rebuilt; anything that placed one by hand should be.
+### Fixed
+
+**A refusal at an array element was filed under the empty string in three adders.**
+`arnm_json_writer_add_hex()`, `_add_base64()` and `_add_uuid()` passed the caller's key straight
+to the error record when the string pool could not answer, where every other refusal in the
+writer passes it through the `"[]"` sentinel first. A NULL key means an element
+of an array, and `arnm_json_writer_error_field()` documents `"[]"` for one -- the empty string is
+for a refusal belonging to no field at all, which these are not. The size branch of the same
+three calls was already right, so which name an over-large block was filed under depended on
+whether it was refused for its size or by the allocator.
+
+**`arnm_binary_to_base64_alloc()` reserved the characters but not the terminator.**
+`ARNM_BASE64_STRING_LENGTH()` counts characters only -- unlike `ARNM_HEX_STRING_LENGTH()`, which
+counts the terminator -- so the block was one byte short of what `arnm_binary_to_base64()` then
+wrote into it, for every input. `out->size` is one larger than before as a result. Neither
+allocating wrapper had a caller anywhere in this repository, which is how it survived; both have
+tests now.
+
+**Both encoders refuse a size whose text could not be measured.** `ARNM_HEX_STRING_LENGTH()`
+wraps above 2147483647 bytes and `ARNM_BASE64_STRING_LENGTH()` above 3221225469, and a wrapped
+length is not a large number but a small and plausible one -- the hex of 2147483648 bytes
+measures as 1. `arnm_binary_to_hex()`, `arnm_binary_to_base64()` and both `_alloc` wrappers now
+answer `ARNM_ERROR_ARITHMETIC_OVERFLOW` there, before either pointer is read, and the two bounds
+are named as `ARNM_HEX_MAX_BINARY_SIZE` and `ARNM_BASE64_MAX_BINARY_SIZE`.
 
 **Fixes found while the docs were brought back in line.** A refusal at a field with no key was
 recorded under the empty string rather than the `"[]"` sentinel
@@ -267,15 +280,15 @@ before `field()` does -- the copies, the hex, the base64, the uuid, both opens -
 NULL check `field()` makes, so a NULL writer reached them as a dereference instead of doing
 nothing.
 
-**An uninitialized writer is undefined on the adders, and answered everywhere else.** The magic
-that tells a writer from any other 280 bytes is read by `_init()`, `_begin_*()`, `_release()`,
-`_destroy()`, `_write()`, `_status()`, `_error_field()`, `_clear_error()`, `_depth()` and
-`_buffer_size_min()` -- once per document, or once per question. It is deliberately not read by
-`add_*`, `open_*` or `close()`: those are the per-field path, and a check nobody can fail does
-not belong in front of a field. A NULL writer is still answered for on all of them, because a
-mapper writing an optional sub-document has a real reason to hold one. Everything else is what
-`_init()` established, and `AnUninitializedWriterAnswersEveryQuestionAskedAboutIt` says in the
-test file which calls are on which side of that line.
+**A dead branch in `arnm_json_writer_add_hex()` and `_add_base64()` is gone, and what made it
+dead is now checked by the compiler.** Both tested what the converter answered, and neither could
+ever see anything but success: the buffer comes from the string pool a line above, the block and
+its size are answered at the top of the call, and the size cap the writer applies is stricter
+than the converter's own -- 2147483642 against 2147483647 for hex, 3221225463 against 3221225469
+for base64. That last one is a relationship between two constants in two files, so it is held by
+a `static_assert` at `JSON_HEX_MAX_BYTES` and `JSON_BASE64_MAX_BYTES` rather than by a branch
+nothing reaches. Raising either cap past the converter's now fails the build instead of quietly
+routing a refusal to a place that reads none. 144 bytes of text less in `json_writer.o`.
 
 ## 0.7.6 -- 2026-08-31
 
