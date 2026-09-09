@@ -1466,7 +1466,9 @@ TEST(JsonWriter, WhatWasWrittenReadsBackAsWhatWentIn) {
   ASSERT_NE(tags, nullptr);
   arnm_json_value *tag[2] = {nullptr, nullptr};
   uint32_t tag_count = 0;
-  ASSERT_EQ(arnm_json_read_array(tags, tag, 2, &tag_count), ARNM_SUCCESS);
+  ASSERT_EQ(
+      arnm_json_read_array(tags, ARNM_JSON_FIELD_TYPE_VALUE, tag, 2, &tag_count), ARNM_SUCCESS
+  );
   EXPECT_EQ(tag_count, 2u);
   EXPECT_EQ(arnm_json_reader_status(&reader), ARNM_SUCCESS);
 

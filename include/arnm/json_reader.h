@@ -44,12 +44,14 @@ extern "C" {
  * An object is read by handing over a table: what a key is called, what it should become, and
  * where to put it. One walk of the member chain answers all of them.
  *
- * An array is read by handing over a buffer of value handles, and it comes back filled. The
- * elements are not converted, because an array's elements have no names to hang a type on; the
- * caller looks at each in turn and knows from its own shape what it is.
+ * An array is read by naming one type for all of its elements and handing over a buffer of
+ * them. The elements have no names to hang a type on, so it is stated once instead of once
+ * each, and an array whose elements are not all alike is read as handles and taken apart one at
+ * a time.
  *
  * Everything else -- a number, a string, a nested object -- is a member of one of those two, and
- * therefore something a table already names. Values are never handed out one at a time.
+ * therefore something a table or an element type already names. Values are never handed out one
+ * at a time.
  *
  * ### What is borrowed, and for how long
  *
@@ -554,14 +556,30 @@ typedef struct arnm_json_field {
  * filled the remaining members are not looked at, so a document that carries far more than this
  * reader wants is left where it stands.
  *
- * That an entry is skipped once filled is what decides duplicates: **a member named twice is
- * read the first time and ignored after**, which is the opposite of what most JSON readers do
- * and is worth knowing where a document is not written by the same mapping that reads it. It is
- * a consequence of the shape rather than a preference, and the mask cannot tell the two cases
- * apart -- a member read once and a member read once out of three look the same in it.
+ * That an entry is passed over once its key has been met is what decides duplicates: **a member
+ * named twice is read the first time and ignored after**, which is the opposite of what most
+ * JSON readers do and is worth knowing where a document is not written by the same mapping that
+ * reads it. It is a consequence of the shape rather than a preference, and the mask cannot tell
+ * the two cases apart -- a member read once and a member read once out of three look the same
+ * in it.
  *
  * A member the table does not name is not an error: a document is allowed to carry more than
  * this reader wants.
+ *
+ * ### A member that is null
+ *
+ * `null` is neither a refusal nor a value: it is the member saying it has none. Where a key
+ * matches and its value is `null`, **the target is left exactly as the caller set it and the
+ * entry's bit stays clear**, and the walk carries on to the next member. A target given a
+ * default before the walk therefore keeps that default, and the mask says the same of a `null`
+ * member as of an absent one: nothing was read.
+ *
+ * The entry is spent all the same, by the rule above -- a key met once is not compared again --
+ * so `{"a":null,"a":1}` leaves the target untouched.
+ *
+ * @ref ARNM_JSON_FIELD_TYPE_VALUE is the exception and hardly one: it names no type to convert
+ * to, so it takes the `null` like any other value and sets its bit.
+ * @ref arnm_json_read_is_null() is what tells the two apart afterwards.
  *
  * Nothing here allocates, and there is no allocator to hand over. A string member is borrowed
  * from the document, and the two decoding types write into buffers the caller already owns, so
@@ -573,9 +591,10 @@ typedef struct arnm_json_field {
  *                          entry is also read, for the buffer it names and the size of it.
  * @param[in]     count     Entries in @p fields, at least 1 and at most
  *                          @ref ARNM_JSON_FIELDS_MAX.
- * @param[out]    out_found Bit @c i is set where entry @c i was read; may be NULL. Cleared
- *                          before anything else is asked, and written again when the walk stops
- *                          early, so a caller can see how far it came.
+ * @param[out]    out_found Bit @c i is set where entry @c i was read; may be NULL. A member
+ *                          that is absent and one that is `null` both leave their bit clear.
+ *                          Cleared before anything else is asked, and written again when the
+ *                          walk stops early, so a caller can see how far it came.
  * @retval ARNM_SUCCESS                   Walked; @p out_found says what was there.
  * @retval ARNM_ERROR_NULL_POINTER        @p object or @p fields is NULL, or a matched entry has
  *                                        no target.
@@ -583,7 +602,8 @@ typedef struct arnm_json_field {
  *                                        matched entry carries @ref ARNM_JSON_FIELD_TYPE_NONE or
  *                                        a type this reader does not know.
  * @retval ARNM_ERROR_INVALID_ENUM_TYPE   @p object is no object, or a member is of another JSON
- *                                        type than its entry names.
+ *                                        type than its entry names -- `null` excepted, which is
+ *                                        passed over rather than refused.
  * @retval ARNM_ERROR_ARITHMETIC_OVERFLOW A number does not fit the target its entry names.
  * @retval ARNM_ERROR_DECODE_FAILED       A hex or uuid string is not the shape its entry names.
  * @note The walk stops at the first member it cannot read; the targets filled before it keep
@@ -597,38 +617,81 @@ arnm_result arnm_json_read_object(
 );
 
 /**
- * @brief Fill @p out_values with every element of @p array, in order.
+ * @brief Read every element of @p array into @p out_values, in order, as @p type.
  *
- * The counterpart to @ref arnm_json_read_object(), and deliberately the plainer of the two: an
- * array's elements have no names, so there is nothing to hang a type on and nothing is
- * converted. What comes back is handles, and the caller reads each one the way its own shape
- * says to -- another table, another buffer, or the element it was expecting all along.
+ * The counterpart to @ref arnm_json_read_object(), and the plainer of the two: an array's
+ * elements have no names, so there is nothing to hang a type on one at a time. The type is
+ * stated once for all of them instead, and @p out_values is one buffer of that type --
+ * `uint32_t[32]` for @ref ARNM_JSON_FIELD_TYPE_UINT32, `arnm_memory_block[8]` for a string
+ * type, `arnm_json_value *[8]` for @ref ARNM_JSON_FIELD_TYPE_VALUE. Each element is converted
+ * exactly as that type converts a member of an object, and the buffer is walked by the element
+ * size the type names.
  *
- * All or nothing. An array with more elements than @p capacity is refused rather than truncated,
- * and nothing is written into @p out_values on that path. Where the size is not known ahead of
- * time, ask with a buffer, widen on
- * @ref ARNM_ERROR_DESTINATION_BUFFER_TO_SMALL, and ask again.
+ * An array whose elements are not all alike is read as @ref ARNM_JSON_FIELD_TYPE_VALUE, which
+ * converts nothing and leaves one handle per element for the caller to take apart. That is also
+ * how a nested object or array is reached: a handle, and then a table or a buffer of its own.
  *
- * Because of that, @p out_array_size on success is always exactly the array's length; it is
- * there so the caller does not have to ask twice, not because a partial fill can happen.
+ * A `null` element is not an element. It takes no slot and is not counted: the elements around
+ * it keep their order and close up over it, so `[1,null,3]` read as
+ * @ref ARNM_JSON_FIELD_TYPE_UINT32 fills two slots with 1 and 3. That is the same reading a
+ * `null` gets in the walk over an object, where it leaves its target untouched as though the
+ * member were not there, and it means an element's place in @p out_values is its place among
+ * the values the array carried rather than its index in the document.
+ *
+ * @ref ARNM_JSON_FIELD_TYPE_VALUE is the exception, as it is there: it converts nothing, so a
+ * `null` is a handle like any other, takes its slot, and @ref arnm_json_read_is_null() is what
+ * asks afterwards. An array whose `null`s have to be seen, or counted, or kept in line with the
+ * document's own indices, is read that way.
+ *
+ * The length is settled before anything is written: an array longer than @p capacity is refused
+ * whole rather than truncated, and @p out_array_size then carries the length it would have
+ * taken -- so a caller who does not know the size ahead of time asks once, widens, and asks
+ * again. That length counts `null`s, which the fill then does not, so the gate asks for at most
+ * a slot or two more than the fill uses and never for less.
+ *
+ * Past that gate the fill is not all or nothing. An element the type cannot take stops the read
+ * where it stands, the elements before it keep what they were given, and @p out_array_size
+ * names how many that is.
+ *
+ * Nothing here allocates. A string element is borrowed from the document exactly as a string
+ * member is, and the two decoding types write into buffers the elements already carry.
  *
  * @param[in]  array          Array to read; not NULL.
- * @param[out] out_values     Receives one handle per element; not NULL. Untouched unless the
- *                            call succeeds.
- * @param[in]  capacity       Handles @p out_values holds; more than 0.
- * @param[out] out_array_size Receives the number of handles written; may be NULL. Cleared before
- *                            anything else is asked.
+ * @param[in]  type           What every element is to become; not
+ *                            @ref ARNM_JSON_FIELD_TYPE_NONE. It also decides the element size
+ *                            @p out_values is walked by.
+ * @param[out] out_values     Buffer of at least @p capacity elements of @p type; not NULL. For
+ *                            @ref ARNM_JSON_FIELD_TYPE_HEX_FIXED and
+ *                            @ref ARNM_JSON_FIELD_TYPE_UUID every element is read as well as
+ *                            written, for the buffer it names and the size of it.
+ * @param[in]  capacity       Elements @p out_values holds; more than 0.
+ * @param[out] out_array_size Receives how many slots were filled, which is the array's length
+ *                            less its `null`s; may be NULL. Cleared before anything else is
+ *                            asked, and written again on both paths that stop early: the
+ *                            array's own length where the buffer is too small, and how far the
+ *                            fill came where an element was refused.
  * @retval ARNM_SUCCESS                            Filled; @p out_array_size says how far.
  * @retval ARNM_ERROR_NULL_POINTER                 @p array or @p out_values is NULL.
- * @retval ARNM_ERROR_INVALID_PARAM                @p capacity is 0.
- * @retval ARNM_ERROR_INVALID_ENUM_TYPE            @p array is no array.
- * @retval ARNM_ERROR_DESTINATION_BUFFER_TO_SMALL  The array is longer than @p capacity.
+ * @retval ARNM_ERROR_INVALID_PARAM                @p capacity is 0, or @p type is
+ *                                                 @ref ARNM_JSON_FIELD_TYPE_NONE or a type this
+ *                                                 reader does not know.
+ * @retval ARNM_ERROR_INVALID_ENUM_TYPE            @p array is no array, or an element is of
+ *                                                 another JSON type than @p type names --
+ *                                                 `null` excepted, which is passed over.
+ * @retval ARNM_ERROR_DESTINATION_BUFFER_TO_SMALL  The array is longer than @p capacity. Nothing
+ *                                                 was written; @p out_array_size says how much
+ *                                                 room it wants.
+ * @retval ARNM_ERROR_ARITHMETIC_OVERFLOW          A number does not fit the element @p type
+ *                                                 names.
+ * @retval ARNM_ERROR_DECODE_FAILED                A hex or uuid string is not the shape @p type
+ *                                                 names.
  * @note An empty array is not a refusal: nothing is written and @p out_array_size is 0.
  * @whisper Every element laid out in the order the water carried it
  */
 arnm_result arnm_json_read_array(
     arnm_json_value *array,
-    arnm_json_value **out_values,
+    arnm_json_field_type type,
+    void *out_values,
     uint32_t capacity,
     uint32_t *out_array_size
 );
@@ -636,35 +699,42 @@ arnm_result arnm_json_read_array(
 /**
  * @brief Whether @p json_value is the literal `null`.
  *
- * The one JSON type a table entry cannot ask about. Every other type is named by the entry that
- * reads it and refused with @ref ARNM_ERROR_INVALID_ENUM_TYPE when the member is something
- * else, but `null` is not a value a target can hold -- it is the member saying it has none. A
- * walk that meets one therefore refuses it like any other mismatch, and a caller who wants to
- * tell "absent" from "present and empty" apart has to look for itself.
+ * A table entry never has to ask. A member that is `null` leaves its target at whatever the
+ * caller put there and its bit clear in the mask, and the walk carries on -- so a default
+ * written before @ref arnm_json_read_object() is what survives, and a document that spells a
+ * field out as `null` costs nothing behind it.
  *
- * That is what this is for. Take the member as a handle with @ref ARNM_JSON_FIELD_VALUE() first,
- * ask here, and only name its type once the answer says there is a type to name:
+ * What the mask cannot say is which of the two happened. An absent member and a `null` one look
+ * alike in it, because in both cases nothing was read. Where that difference carries meaning --
+ * a field being cleared, as against a field not being sent -- take the member as a handle with
+ * @ref ARNM_JSON_FIELD_VALUE(), whose bit is set for a `null` as for any other value, and ask
+ * here:
  *
  * @code
  * arnm_json_value *timeout = NULL;
  * arnm_json_field probe[] = {ARNM_JSON_FIELD_VALUE("timeout", &timeout)};
  * arnm_json_read_object(root, probe, 1, NULL);
  *
- * if (timeout && !arnm_json_read_is_null(timeout)) {
+ * if (!timeout) {
+ *   // not there at all -- whatever config.timeout already holds stands
+ * } else if (arnm_json_read_is_null(timeout)) {
+ *   config.timeout = DEFAULT_TIMEOUT;      // there, and explicitly holding nothing
+ * } else {
  *   arnm_json_field read[] = {ARNM_JSON_FIELD_DOUBLE("timeout", &config.timeout)};
  *   arnm_json_read_object(root, read, 1, NULL);
- * } else {
- *   config.timeout = DEFAULT_TIMEOUT;       // absent, or there and explicitly nothing
  * }
  * @endcode
  *
- * Without it a `"timeout": null` costs the whole walk: the entry names a double, the member is
- * not one, and every field behind it in the table goes unread.
+ * It is also the only way to meet a `null` inside an array. @ref arnm_json_read_array() reads
+ * one as an element for @ref ARNM_JSON_FIELD_TYPE_VALUE alone; under every other type a `null`
+ * is not an element at all, and the values around it close up over it without a count or a slot
+ * to show for it. An array whose `null`s carry meaning is therefore read as handles and asked
+ * about element by element.
  *
  * @param[in] json_value Value to ask about; may be NULL.
  * @return true only for the literal `null`. NULL is false -- a handle that is not there is a
- *         different thing from a member that is `null`, and the mask from the walk is what
- *         tells them apart.
+ *         different thing from a member that is `null`, and telling those two apart is what the
+ *         call is for.
  * @whisper A member that came all this way to say it holds nothing
  */
 bool arnm_json_read_is_null(arnm_json_value *json_value);

@@ -20,6 +20,52 @@ next build.
 Entries before 0.4.0 were reconstructed from the git history after the fact, so they summarise
 what the commits show rather than what was noted at the time.
 
+## 0.8.1 -- 2026-09-09
+
+`arnm/json_reader.h` learns what to do with a `null`, and its array read learns what its
+elements are. One of the two is a compile error and answers itself; the other compiles exactly
+as before and reads differently, which is the one to read.
+
+By the rule above this is a minor, not a patch: a call that used to refuse a document now reads
+it. It is numbered 0.8.1 anyway, knowingly -- the library has one consumer and that consumer is
+the author. The rule stands for the release after which that stops being true.
+
+### Changed
+
+**A member that is `null` is passed over instead of refusing the walk.**
+`arnm_json_read_object()` used to meet a `null` with `ARNM_ERROR_INVALID_ENUM_TYPE`, and every
+entry behind it in the table went unread. Now the target keeps whatever the caller put there,
+the entry's bit stays clear in the mask, and the walk carries on. A document that spells an
+absent field out as `"timeout": null` therefore costs nothing, and a target given a default
+before the walk keeps that default.
+
+Nothing about this stops compiling, so it is worth a look wherever a `null` used to be an error
+a caller acted on: that error is gone, and the mask is what says a field was not read. The one
+type that still takes a `null` is `ARNM_JSON_FIELD_TYPE_VALUE`, which converts nothing and hands
+the value over for `arnm_json_read_is_null()` to answer -- which is how "absent" and "there and
+empty" are still told apart.
+
+**`arnm_json_read_array()` takes an element type and fills a buffer of that type.**
+`arnm_json_read_array(items, elements, 32, &count)` is now
+`arnm_json_read_array(items, ARNM_JSON_FIELD_TYPE_VALUE, elements, 32, &count)`, and the buffer
+no longer has to be handles: `uint32_t[32]` with `ARNM_JSON_FIELD_TYPE_UINT32` reads the numbers
+straight into place, `arnm_memory_block[8]` reads strings, and the two decoding types work in an
+array as they do in a table. The type decides both the conversion and how wide a slot is, so the
+old call is the new one with a type argument added.
+
+A `null` element is read the way a `null` member is: as though it were not there. It takes no
+slot and is not counted, so `[1,null,3]` fills two slots with 1 and 3 and the values close up
+over the gap. `ARNM_JSON_FIELD_TYPE_VALUE` is the exception in an array as it is in a table --
+it converts nothing, so the `null` comes through as a handle and `arnm_json_read_is_null()`
+answers for it. An array whose `null`s have to be seen, or kept in line with the document's own
+indices, is read that way.
+
+Two smaller things came with it. `ARNM_ERROR_DESTINATION_BUFFER_TO_SMALL` now leaves the array's
+own length in `out_array_size`, so a caller who does not know the size ahead of time asks once,
+widens and asks again. And past that gate the fill is no longer all or nothing: an element the
+type cannot take stops the read where it stands, and `out_array_size` names how many elements
+were written before it.
+
 ## 0.8.0 -- 2026-09-07
 
 `arnm/json_writer.h` stops counting the text it is about to write, and stops escaping strings
