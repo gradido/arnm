@@ -691,7 +691,7 @@ TEST(JsonReader, AWalkRefusesAStringThatIsNotTheShapeItsEntryNames) {
 
 TEST(JsonReader, AWalkRefusesAMemberOfAnotherJsonType) {
   ArenaReader owner;
-  arnm_json_value *root = Parse(owner, "{\"n\":true,\"s\":5,\"b\":\"yes\",\"d\":null}");
+  arnm_json_value *root = Parse(owner, "{\"n\":true,\"s\":5,\"b\":\"yes\",\"d\":[]}");
   ASSERT_NE(root, nullptr);
 
   int64_t number = 0;
@@ -709,6 +709,9 @@ TEST(JsonReader, AWalkRefusesAMemberOfAnotherJsonType) {
   double real = 0.0;
   arnm_json_field wrong_double[] = {ARNM_JSON_FIELD_DOUBLE("d", &real)};
   EXPECT_EQ(arnm_json_read_object(root, wrong_double, 1, nullptr), ARNM_ERROR_INVALID_ENUM_TYPE);
+
+  // null is the one JSON type that is not a mismatch here -- it is passed over instead, which
+  // ANullMemberLeavesItsTargetAndItsBitAlone is about
 }
 
 // promise: there is no placeholder tag -- an entry nobody set is a mistake and is named as one
@@ -806,6 +809,120 @@ TEST(JsonReader, AWalkComparesKeysOverTheirLengthAndNotToATerminator) {
 // reading an array
 // ---------------------------------------------------------------------------
 
+// promise: the element type says both what to convert to and how wide a slot is, so a plain
+// typed buffer is what the call wants -- no array of pointers, no second pass
+TEST(JsonReader, AnArrayOfNumbersIsReadIntoAPlainBuffer) {
+  ArenaReader owner;
+  arnm_json_value *root = Parse(owner, "[1,2,3]");
+  ASSERT_NE(root, nullptr);
+
+  uint32_t numbers[4] = {0xffu, 0xffu, 0xffu, 0xffu};
+  uint32_t size = 0;
+  ASSERT_EQ(
+      arnm_json_read_array(root, ARNM_JSON_FIELD_TYPE_UINT32, numbers, 4, &size), ARNM_SUCCESS
+  );
+  EXPECT_EQ(size, 3u);
+  EXPECT_EQ(numbers[0], 1u);
+  EXPECT_EQ(numbers[1], 2u);
+  EXPECT_EQ(numbers[2], 3u);
+  EXPECT_EQ(numbers[3], 0xffu) << "nothing beyond the array's own length is touched";
+}
+
+// promise: every type walks the buffer by its own width, which is the whole of what the type
+// argument decides beyond the conversion itself
+TEST(JsonReader, EveryElementTypeWalksTheBufferByItsOwnWidth) {
+  ArenaReader owner;
+
+  arnm_json_value *signed_root = Parse(owner, "[-1,-2]");
+  ASSERT_NE(signed_root, nullptr);
+  int32_t small[2] = {0, 0};
+  uint32_t size = 0;
+  ASSERT_EQ(
+      arnm_json_read_array(signed_root, ARNM_JSON_FIELD_TYPE_INT32, small, 2, &size), ARNM_SUCCESS
+  );
+  EXPECT_EQ(small[0], -1);
+  EXPECT_EQ(small[1], -2);
+
+  int64_t wide[2] = {0, 0};
+  ASSERT_EQ(
+      arnm_json_read_array(signed_root, ARNM_JSON_FIELD_TYPE_INT64, wide, 2, &size), ARNM_SUCCESS
+  );
+  EXPECT_EQ(wide[0], -1);
+  EXPECT_EQ(wide[1], -2);
+
+  arnm_json_value *big_root = Parse(owner, "[18446744073709551615,0]");
+  ASSERT_NE(big_root, nullptr);
+  uint64_t big[2] = {0, 0};
+  ASSERT_EQ(
+      arnm_json_read_array(big_root, ARNM_JSON_FIELD_TYPE_UINT64, big, 2, &size), ARNM_SUCCESS
+  );
+  EXPECT_EQ(big[0], UINT64_MAX);
+  EXPECT_EQ(big[1], 0u);
+
+  arnm_json_value *ratio_root = Parse(owner, "[0.25,-1.5,3]");
+  ASSERT_NE(ratio_root, nullptr);
+  double ratios[3] = {0.0, 0.0, 0.0};
+  ASSERT_EQ(
+      arnm_json_read_array(ratio_root, ARNM_JSON_FIELD_TYPE_DOUBLE, ratios, 3, &size), ARNM_SUCCESS
+  );
+  EXPECT_DOUBLE_EQ(ratios[0], 0.25);
+  EXPECT_DOUBLE_EQ(ratios[1], -1.5);
+  EXPECT_DOUBLE_EQ(ratios[2], 3.0) << "every JSON number converts to a double";
+
+  arnm_json_value *flag_root = Parse(owner, "[true,false,true]");
+  ASSERT_NE(flag_root, nullptr);
+  bool flags[3] = {false, true, false};
+  ASSERT_EQ(
+      arnm_json_read_array(flag_root, ARNM_JSON_FIELD_TYPE_BOOL, flags, 3, &size), ARNM_SUCCESS
+  );
+  EXPECT_TRUE(flags[0]);
+  EXPECT_FALSE(flags[1]);
+  EXPECT_TRUE(flags[2]);
+}
+
+// promise: a string element is borrowed exactly as a string member is -- the document's own
+// bytes, and nothing allocated for them
+TEST(JsonReader, AnArrayOfStringsBorrowsFromTheDocument) {
+  ArenaReader owner;
+  const uint32_t before = owner.used();
+  arnm_json_value *root = Parse(owner, "[\"alpha\",\"\",\"gamma\"]");
+  ASSERT_NE(root, nullptr);
+  const uint32_t after_parse = owner.used();
+
+  arnm_memory_block words[3] = {};
+  uint32_t size = 0;
+  ASSERT_EQ(arnm_json_read_array(root, ARNM_JSON_FIELD_TYPE_STRING, words, 3, &size), ARNM_SUCCESS);
+  ASSERT_EQ(size, 3u);
+  EXPECT_EQ(std::string(reinterpret_cast<const char *>(words[0].data), words[0].size), "alpha");
+  EXPECT_EQ(words[1].size, 0u) << "the empty string is a string";
+  EXPECT_EQ(std::string(reinterpret_cast<const char *>(words[2].data), words[2].size), "gamma");
+  EXPECT_EQ(owner.used(), after_parse) << "the read itself allocates nothing";
+  EXPECT_GT(after_parse, before);
+}
+
+// promise: the two decoding types work in an array the way they work in a table -- the caller's
+// buffer and its size come in with the element, and the descriptor is not changed
+TEST(JsonReader, AnArrayOfHexStringsDecodesIntoTheBuffersItIsGiven) {
+  ArenaReader owner;
+  arnm_json_value *root = Parse(owner, "[\"00ff\",\"1234\"]");
+  ASSERT_NE(root, nullptr);
+
+  uint8_t first[2] = {0, 0};
+  uint8_t second[2] = {0, 0};
+  arnm_memory_block pairs[2] = {ARNM_JSON_BLOCK_OF(first), ARNM_JSON_BLOCK_OF(second)};
+  uint32_t size = 0;
+  ASSERT_EQ(
+      arnm_json_read_array(root, ARNM_JSON_FIELD_TYPE_HEX_FIXED, pairs, 2, &size), ARNM_SUCCESS
+  );
+  EXPECT_EQ(size, 2u);
+  EXPECT_EQ(first[0], 0x00u);
+  EXPECT_EQ(first[1], 0xffu);
+  EXPECT_EQ(second[0], 0x12u);
+  EXPECT_EQ(second[1], 0x34u);
+  EXPECT_EQ(pairs[0].size, 2u) << "the descriptor is read, not written";
+  EXPECT_EQ(pairs[0].data, first);
+}
+
 TEST(JsonReader, AnArrayComesBackInOrder) {
   ArenaReader owner;
   arnm_json_value *root = Parse(owner, "[{\"n\":1},{\"n\":2},{\"n\":3}]");
@@ -813,7 +930,9 @@ TEST(JsonReader, AnArrayComesBackInOrder) {
 
   arnm_json_value *elements[4] = {nullptr, nullptr, nullptr, nullptr};
   uint32_t size = 0;
-  ASSERT_EQ(arnm_json_read_array(root, elements, 4, &size), ARNM_SUCCESS);
+  ASSERT_EQ(
+      arnm_json_read_array(root, ARNM_JSON_FIELD_TYPE_VALUE, elements, 4, &size), ARNM_SUCCESS
+  );
   ASSERT_EQ(size, 3u);
 
   for (uint32_t index = 0; index < size; ++index) {
@@ -834,24 +953,148 @@ TEST(JsonReader, AnArrayThatExactlyFillsTheBufferIsAccepted) {
 
   arnm_json_value *exact[4] = {nullptr, nullptr, nullptr, nullptr};
   uint32_t size = 0;
-  EXPECT_EQ(arnm_json_read_array(root, exact, 4, &size), ARNM_SUCCESS);
+  EXPECT_EQ(arnm_json_read_array(root, ARNM_JSON_FIELD_TYPE_VALUE, exact, 4, &size), ARNM_SUCCESS);
   EXPECT_EQ(size, 4u);
   for (arnm_json_value *element : exact) { EXPECT_NE(element, nullptr); }
 }
 
-// promise: all or nothing -- an array longer than the buffer is refused, not truncated
-TEST(JsonReader, AnArrayLongerThanTheBufferIsRefusedWhole) {
+// promise: an array longer than the buffer is refused before anything is written, and the size
+// that comes back is the room it wants -- ask, widen, ask again
+TEST(JsonReader, AnArrayLongerThanTheBufferSaysHowMuchRoomItWants) {
   ArenaReader owner;
   arnm_json_value *root = Parse(owner, "[1,2,3,4,5]");
   ASSERT_NE(root, nullptr);
 
-  arnm_json_value *slots[4] = {nullptr, nullptr, nullptr, nullptr};
-  uint32_t size = 0xffu;
-  EXPECT_EQ(arnm_json_read_array(root, slots, 4, &size), ARNM_ERROR_DESTINATION_BUFFER_TO_SMALL);
-  EXPECT_EQ(size, 0u) << "the size is cleared before anything else is asked";
-  for (arnm_json_value *element : slots) {
-    EXPECT_EQ(element, nullptr) << "nothing is written on the path that refuses";
+  uint32_t few[4] = {0xffu, 0xffu, 0xffu, 0xffu};
+  uint32_t size = 0;
+  EXPECT_EQ(
+      arnm_json_read_array(root, ARNM_JSON_FIELD_TYPE_UINT32, few, 4, &size),
+      ARNM_ERROR_DESTINATION_BUFFER_TO_SMALL
+  );
+  EXPECT_EQ(size, 5u) << "the array's own length, which is what a second try has to hold";
+  for (uint32_t element : few) {
+    EXPECT_EQ(element, 0xffu) << "nothing is written on the path that refuses";
   }
+
+  uint32_t enough[5] = {0, 0, 0, 0, 0};
+  EXPECT_EQ(
+      arnm_json_read_array(root, ARNM_JSON_FIELD_TYPE_UINT32, enough, size, &size), ARNM_SUCCESS
+  );
+  EXPECT_EQ(size, 5u);
+  EXPECT_EQ(enough[4], 5u);
+}
+
+// promise: past the length gate the fill is not all or nothing -- an element the type cannot
+// take stops the read, and the size names how far it came
+TEST(JsonReader, AnElementTheTypeCannotTakeStopsTheFillWhereItStands) {
+  ArenaReader owner;
+  arnm_json_value *root = Parse(owner, "[1,2,\"three\",4]");
+  ASSERT_NE(root, nullptr);
+
+  uint32_t numbers[4] = {0xffu, 0xffu, 0xffu, 0xffu};
+  uint32_t size = 0xeeu;
+  EXPECT_EQ(
+      arnm_json_read_array(root, ARNM_JSON_FIELD_TYPE_UINT32, numbers, 4, &size),
+      ARNM_ERROR_INVALID_ENUM_TYPE
+  );
+  EXPECT_EQ(size, 2u) << "two elements were written before the third was refused";
+  EXPECT_EQ(numbers[0], 1u);
+  EXPECT_EQ(numbers[1], 2u);
+  EXPECT_EQ(numbers[2], 0xffu) << "the element that was refused was not written";
+  EXPECT_EQ(numbers[3], 0xffu) << "and neither was anything behind it";
+}
+
+// promise: a number that will not fit its element type is refused the same way a member is
+TEST(JsonReader, AnElementThatWillNotFitItsTypeIsRefused) {
+  ArenaReader owner;
+  arnm_json_value *root = Parse(owner, "[1,4294967296]");
+  ASSERT_NE(root, nullptr);
+
+  uint32_t numbers[2] = {0xffu, 0xffu};
+  uint32_t size = 0;
+  EXPECT_EQ(
+      arnm_json_read_array(root, ARNM_JSON_FIELD_TYPE_UINT32, numbers, 2, &size),
+      ARNM_ERROR_ARITHMETIC_OVERFLOW
+  );
+  EXPECT_EQ(size, 1u);
+  EXPECT_EQ(numbers[0], 1u);
+  EXPECT_EQ(numbers[1], 0xffu);
+}
+
+// promise: a null element is not an element -- it takes no slot and is not counted, and the
+// values around it close up over it in the order the array carried them
+TEST(JsonReader, ANullElementIsNotAnElement) {
+  ArenaReader owner;
+  arnm_json_value *root = Parse(owner, "[1,null,3]");
+  ASSERT_NE(root, nullptr);
+
+  uint32_t numbers[3] = {0xffu, 0xffu, 0xffu};
+  uint32_t size = 0;
+  ASSERT_EQ(
+      arnm_json_read_array(root, ARNM_JSON_FIELD_TYPE_UINT32, numbers, 3, &size), ARNM_SUCCESS
+  );
+  EXPECT_EQ(size, 2u) << "the array's length less its nulls";
+  EXPECT_EQ(numbers[0], 1u);
+  EXPECT_EQ(numbers[1], 3u) << "the value behind the null moved up into the slot it left";
+  EXPECT_EQ(numbers[2], 0xffu) << "and nothing past the fill is touched";
+
+  // the one type that still sees it: handles convert nothing, so a null is a handle like the
+  // rest and keeps both its slot and its place
+  arnm_json_value *elements[3] = {nullptr, nullptr, nullptr};
+  ASSERT_EQ(
+      arnm_json_read_array(root, ARNM_JSON_FIELD_TYPE_VALUE, elements, 3, &size), ARNM_SUCCESS
+  );
+  EXPECT_EQ(size, 3u);
+  EXPECT_FALSE(arnm_json_read_is_null(elements[0]));
+  EXPECT_TRUE(arnm_json_read_is_null(elements[1]));
+  EXPECT_FALSE(arnm_json_read_is_null(elements[2]));
+}
+
+// promise: closing up over a null means a slot is a place among the values and not an index into
+// the document -- which is what a decoding type has to know, because each of its slots names a
+// buffer of the caller's own
+TEST(JsonReader, ClosingUpOverANullMovesTheSlotsThatFollow) {
+  ArenaReader owner;
+  arnm_json_value *root = Parse(owner, "[\"aa\",null,\"bb\"]");
+  ASSERT_NE(root, nullptr);
+
+  uint8_t first[1] = {0};
+  uint8_t second[1] = {0};
+  uint8_t third[1] = {0};
+  arnm_memory_block into[3] = {
+      ARNM_JSON_BLOCK_OF(first), ARNM_JSON_BLOCK_OF(second), ARNM_JSON_BLOCK_OF(third)
+  };
+  uint32_t size = 0;
+  ASSERT_EQ(
+      arnm_json_read_array(root, ARNM_JSON_FIELD_TYPE_HEX_FIXED, into, 3, &size), ARNM_SUCCESS
+  );
+  EXPECT_EQ(size, 2u);
+  EXPECT_EQ(first[0], 0xaau);
+  EXPECT_EQ(second[0], 0xbbu) << "the third element decoded into the second slot's buffer";
+  EXPECT_EQ(third[0], 0x00u) << "and the third slot was never reached";
+}
+
+// promise: the length gate counts nulls, because it is asked before anything is read -- so it
+// asks for at most a slot more than the fill uses and never for less
+TEST(JsonReader, TheLengthGateCountsWhatTheFillLeavesOut) {
+  ArenaReader owner;
+  arnm_json_value *root = Parse(owner, "[1,null,3]");
+  ASSERT_NE(root, nullptr);
+
+  uint32_t few[2] = {0xffu, 0xffu};
+  uint32_t size = 0;
+  EXPECT_EQ(
+      arnm_json_read_array(root, ARNM_JSON_FIELD_TYPE_UINT32, few, 2, &size),
+      ARNM_ERROR_DESTINATION_BUFFER_TO_SMALL
+  );
+  EXPECT_EQ(size, 3u) << "the array's own length, null included";
+  EXPECT_EQ(few[0], 0xffu);
+
+  uint32_t enough[3] = {0xffu, 0xffu, 0xffu};
+  EXPECT_EQ(
+      arnm_json_read_array(root, ARNM_JSON_FIELD_TYPE_UINT32, enough, size, &size), ARNM_SUCCESS
+  );
+  EXPECT_EQ(size, 2u) << "and the fill then needed one less than the gate asked for";
 }
 
 TEST(JsonReader, AnEmptyArrayIsNotARefusal) {
@@ -861,21 +1104,30 @@ TEST(JsonReader, AnEmptyArrayIsNotARefusal) {
 
   arnm_json_value *slots[2] = {nullptr, nullptr};
   uint32_t size = 0xffu;
-  EXPECT_EQ(arnm_json_read_array(root, slots, 2, &size), ARNM_SUCCESS);
+  EXPECT_EQ(arnm_json_read_array(root, ARNM_JSON_FIELD_TYPE_VALUE, slots, 2, &size), ARNM_SUCCESS);
   EXPECT_EQ(size, 0u);
   EXPECT_EQ(slots[0], nullptr);
 }
 
-TEST(JsonReader, AnArrayReadRefusesWhatIsNoArray) {
+TEST(JsonReader, AnArrayReadRefusesWhatIsNoArrayAndWhatNamesNoType) {
   ArenaReader owner;
   arnm_json_value *root = Parse(owner, "{\"a\":1}");
   ASSERT_NE(root, nullptr);
 
   arnm_json_value *slots[2] = {nullptr, nullptr};
-  EXPECT_EQ(arnm_json_read_array(root, slots, 2, nullptr), ARNM_ERROR_INVALID_ENUM_TYPE);
-  EXPECT_EQ(arnm_json_read_array(nullptr, slots, 2, nullptr), ARNM_ERROR_NULL_POINTER);
-  EXPECT_EQ(arnm_json_read_array(root, nullptr, 2, nullptr), ARNM_ERROR_NULL_POINTER);
-  EXPECT_EQ(arnm_json_read_array(root, slots, 0, nullptr), ARNM_ERROR_INVALID_PARAM);
+  const arnm_json_field_type value = ARNM_JSON_FIELD_TYPE_VALUE;
+  EXPECT_EQ(arnm_json_read_array(root, value, slots, 2, nullptr), ARNM_ERROR_INVALID_ENUM_TYPE);
+  EXPECT_EQ(arnm_json_read_array(nullptr, value, slots, 2, nullptr), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_json_read_array(root, value, nullptr, 2, nullptr), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_json_read_array(root, value, slots, 0, nullptr), ARNM_ERROR_INVALID_PARAM);
+
+  // an element type is what says how wide a slot is, so there is no reading without one
+  arnm_json_value *empty = Parse(owner, "[]");
+  ASSERT_NE(empty, nullptr);
+  EXPECT_EQ(
+      arnm_json_read_array(empty, ARNM_JSON_FIELD_TYPE_NONE, slots, 2, nullptr),
+      ARNM_ERROR_INVALID_PARAM
+  ) << "and an empty array is refused for it just as a full one is";
 }
 
 // promise: an array of arrays is read the same way, one level at a time -- which is the whole
@@ -892,14 +1144,18 @@ TEST(JsonReader, AnArrayOfArraysIsReadOneLevelAtATime) {
 
   arnm_json_value *row[4] = {nullptr, nullptr, nullptr, nullptr};
   uint32_t row_count = 0;
-  ASSERT_EQ(arnm_json_read_array(rows, row, 4, &row_count), ARNM_SUCCESS);
+  ASSERT_EQ(
+      arnm_json_read_array(rows, ARNM_JSON_FIELD_TYPE_VALUE, row, 4, &row_count), ARNM_SUCCESS
+  );
   ASSERT_EQ(row_count, 3u);
 
   const uint32_t expected_widths[] = {2u, 1u, 3u};
   for (uint32_t index = 0; index < row_count; ++index) {
-    arnm_json_value *cell[4] = {nullptr, nullptr, nullptr, nullptr};
+    uint32_t cell[4] = {0, 0, 0, 0};
     uint32_t width = 0;
-    ASSERT_EQ(arnm_json_read_array(row[index], cell, 4, &width), ARNM_SUCCESS) << index;
+    ASSERT_EQ(
+        arnm_json_read_array(row[index], ARNM_JSON_FIELD_TYPE_UINT32, cell, 4, &width), ARNM_SUCCESS
+    ) << index;
     EXPECT_EQ(width, expected_widths[index]) << "row " << index;
   }
 }
@@ -908,22 +1164,80 @@ TEST(JsonReader, AnArrayOfArraysIsReadOneLevelAtATime) {
 // telling a member that is null from one that is not there
 // ---------------------------------------------------------------------------
 
-TEST(JsonReader, ANullMemberIsTheOnlyTypeATableCannotAskAbout) {
+// promise: a null member is passed over rather than refused -- the target keeps whatever the
+// caller put there, the bit stays clear, and everything behind it in the table is still read
+TEST(JsonReader, ANullMemberLeavesItsTargetAndItsBitAlone) {
   ArenaReader owner;
   arnm_json_value *root = Parse(owner, "{\"timeout\":null,\"retries\":3}");
   ASSERT_NE(root, nullptr);
 
-  // a typed entry refuses it like any other mismatch, and the walk stops there -- which is
-  // exactly why the handle has to be asked about instead
   double timeout = 1.0;
   uint32_t retries = 0;
   arnm_json_field typed[] = {
       ARNM_JSON_FIELD_DOUBLE("timeout", &timeout),
       ARNM_JSON_FIELD_UINT32("retries", &retries),
   };
-  EXPECT_EQ(arnm_json_read_object(root, typed, 2, nullptr), ARNM_ERROR_INVALID_ENUM_TYPE);
-  EXPECT_EQ(timeout, 1.0) << "the target keeps what it had";
-  EXPECT_EQ(retries, 0u) << "and the entry behind it was never reached";
+  uint64_t found = 0;
+  EXPECT_EQ(arnm_json_read_object(root, typed, 2, &found), ARNM_SUCCESS);
+  EXPECT_EQ(timeout, 1.0) << "the target keeps the default it was given";
+  EXPECT_EQ(retries, 3u) << "and the entry behind the null was read after all";
+  EXPECT_EQ(found, 0x2ull) << "the null left its bit clear, as an absent member would";
+}
+
+// promise: the rule holds for every family the walk knows, and a block is not touched at all --
+// which matters for the two decoding types, whose size is what the caller hands in
+TEST(JsonReader, ANullMemberLeavesEveryKindOfTargetAsItWas) {
+  ArenaReader owner;
+  arnm_json_value *root =
+      Parse(owner, "{\"count\":null,\"ratio\":null,\"flag\":null,\"text\":null,\"digest\":null}");
+  ASSERT_NE(root, nullptr);
+
+  uint32_t count = 7u;
+  double ratio = 0.5;
+  bool flag = true;
+  arnm_memory_block text = {reinterpret_cast<uint8_t *>(const_cast<char *>("kept")), 4u};
+  uint8_t digest[2] = {0xaau, 0xbbu};
+  arnm_memory_block block = ARNM_JSON_BLOCK_OF(digest);
+
+  arnm_json_field fields[] = {
+      ARNM_JSON_FIELD_UINT32("count", &count),     ARNM_JSON_FIELD_DOUBLE("ratio", &ratio),
+      ARNM_JSON_FIELD_BOOL("flag", &flag),         ARNM_JSON_FIELD_STRING("text", &text),
+      ARNM_JSON_FIELD_HEX_FIXED("digest", &block),
+  };
+  uint64_t found = 0;
+  ASSERT_EQ(arnm_json_read_object(root, fields, 5, &found), ARNM_SUCCESS);
+
+  EXPECT_EQ(found, 0u) << "nothing was read, so no bit is set";
+  EXPECT_EQ(count, 7u);
+  EXPECT_DOUBLE_EQ(ratio, 0.5);
+  EXPECT_TRUE(flag);
+  EXPECT_EQ(std::string(reinterpret_cast<const char *>(text.data), text.size), "kept");
+  EXPECT_EQ(block.size, sizeof(digest)) << "the buffer size the caller handed in survives";
+  EXPECT_EQ(block.data, digest);
+  EXPECT_EQ(digest[0], 0xaau) << "and the buffer itself was not written";
+
+  // the size surviving is the point: the same block reads a real member afterwards
+  arnm_json_value *again = Parse(owner, "{\"digest\":\"00ff\"}");
+  ASSERT_NE(again, nullptr);
+  arnm_json_field second[] = {ARNM_JSON_FIELD_HEX_FIXED("digest", &block)};
+  ASSERT_EQ(arnm_json_read_object(again, second, 1, nullptr), ARNM_SUCCESS);
+  EXPECT_EQ(digest[0], 0x00u);
+  EXPECT_EQ(digest[1], 0xffu);
+}
+
+// promise: a null spends its entry like any other match, so the duplicate rule does not change
+// shape around it -- the first of a pair still wins, even where the first says nothing
+TEST(JsonReader, ANullSpendsItsEntryTheWayAnyOtherMatchDoes) {
+  ArenaReader owner;
+  arnm_json_value *root = Parse(owner, "{\"a\":null,\"a\":1}");
+  ASSERT_NE(root, nullptr);
+
+  uint32_t a = 9u;
+  arnm_json_field fields[] = {ARNM_JSON_FIELD_UINT32("a", &a)};
+  uint64_t found = 0;
+  ASSERT_EQ(arnm_json_read_object(root, fields, 1, &found), ARNM_SUCCESS);
+  EXPECT_EQ(a, 9u) << "the first of the pair was the null, and it is the one that counted";
+  EXPECT_EQ(found, 0u);
 }
 
 TEST(JsonReader, IsNullSeparatesAMemberThatIsNullFromOneThatIsNot) {

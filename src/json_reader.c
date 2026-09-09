@@ -310,7 +310,12 @@ uint32_t arnm_json_reader_bytes_read(const arnm_json_reader *reader) {
 // ********** reading a shape in one walk *******************
 
 /**
- * @brief Read one member into the target its entry names, once the key has matched.
+ * @brief Convert one JSON value into the target a type names.
+ *
+ * The only conversion in this file, and both public reads come through it: the walk over an
+ * object calls it where a key matched, the read over an array once per element. What it takes
+ * is a bare target and a type rather than a table entry, because an array has no entries to
+ * hand it.
  *
  * Sorted into a family by two range tests before anything is converted, which is what the
  * enum's order exists for: the four integer types are one contiguous run and the three string
@@ -321,14 +326,20 @@ uint32_t arnm_json_reader_bytes_read(const arnm_json_reader *reader) {
  * target say what it cannot carry -- a negative into an unsigned, a magnitude past a narrow
  * width. Nothing is written where the answer is a refusal.
  *
- * @param[in]  field Entry whose key matched; its target is not NULL.
- * @param[in]  value The member; not NULL.
+ * `null` is not this function's business. Here it would be a value like any other and refused by
+ * every branch that names a type, but neither caller lets one through: the walk over an object
+ * leaves the target at its default, the read over an array passes the element over entirely, and
+ * both hand a `null` on only for ARNM_JSON_FIELD_TYPE_VALUE, which converts nothing anyway. What
+ * a `null` means is therefore a rule of the two shapes and never of the conversion.
+ *
+ * @param[out] target Where the value goes; not NULL. What it points at is what @p type names.
+ * @param[in]  type   What to make of @p value; not ARNM_JSON_FIELD_TYPE_NONE.
+ * @param[in]  value  The value to convert; not NULL.
  * @return ARNM_SUCCESS, or the refusal named at arnm_json_read_object().
  */
 // hand written by human, for highly optimized hot-path
-static arnm_result read_field(const arnm_json_field *field, yyjson_val *value) {
-  if (!field || !field->target || !value) return ARNM_ERROR_NULL_POINTER;
-  arnm_json_field_type type = (arnm_json_field_type)field->type;
+static arnm_result read_field(void *target, arnm_json_field_type type, yyjson_val *value) {
+  if (!target || !value) return ARNM_ERROR_NULL_POINTER;
   if (ARNM_JSON_FIELD_TYPE_NONE == type) return ARNM_ERROR_INVALID_PARAM;
 
   // for all four integer types
@@ -357,22 +368,22 @@ static arnm_result read_field(const arnm_json_field *field, yyjson_val *value) {
     switch (type) {
     case ARNM_JSON_FIELD_TYPE_UINT64:
       if (negative) return ARNM_ERROR_ARITHMETIC_OVERFLOW;
-      *(uint64_t *)field->target = integer_value;
+      *(uint64_t *)target = integer_value;
       return ARNM_SUCCESS;
     case ARNM_JSON_FIELD_TYPE_UINT32:
       if (negative) return ARNM_ERROR_ARITHMETIC_OVERFLOW;
       if (integer_value > (uint64_t)UINT32_MAX) return ARNM_ERROR_ARITHMETIC_OVERFLOW;
-      *(uint32_t *)field->target = (uint32_t)integer_value;
+      *(uint32_t *)target = (uint32_t)integer_value;
       return ARNM_SUCCESS;
     case ARNM_JSON_FIELD_TYPE_INT64:
       if (signed_overflow) return ARNM_ERROR_ARITHMETIC_OVERFLOW;
-      *(int64_t *)field->target = s_integer_value;
+      *(int64_t *)target = s_integer_value;
       return ARNM_SUCCESS;
     case ARNM_JSON_FIELD_TYPE_INT32:
       if (signed_overflow) return ARNM_ERROR_ARITHMETIC_OVERFLOW;
       if (s_integer_value < (int64_t)INT32_MIN || s_integer_value > (int64_t)INT32_MAX)
         return ARNM_ERROR_ARITHMETIC_OVERFLOW;
-      *(int32_t *)field->target = (int32_t)s_integer_value;
+      *(int32_t *)target = (int32_t)s_integer_value;
       return ARNM_SUCCESS;
     default:
       return ARNM_ERROR_INVALID_STATE;
@@ -381,8 +392,9 @@ static arnm_result read_field(const arnm_json_field *field, yyjson_val *value) {
   } else if ((type <= ARNM_JSON_FIELD_TYPE_UUID)) {
     if (!unsafe_yyjson_is_str((void *)value)) return ARNM_ERROR_INVALID_ENUM_TYPE;
     const char *str = unsafe_yyjson_get_str((void *)value);
-    uint32_t str_size = narrow_count(unsafe_yyjson_get_len((void *)value));
-    arnm_memory_block *out = (arnm_memory_block *)field->target;
+    // complete json cannot be bigger than uint32
+    uint32_t str_size = (uint32_t)unsafe_yyjson_get_len((void *)value);
+    arnm_memory_block *out = (arnm_memory_block *)target;
     if (ARNM_JSON_FIELD_TYPE_STRING == type) {
       out->data = (uint8_t *)str;
       out->size = str_size;
@@ -401,15 +413,15 @@ static arnm_result read_field(const arnm_json_field *field, yyjson_val *value) {
   }
   switch (type) {
   case ARNM_JSON_FIELD_TYPE_VALUE:
-    *(arnm_json_value **)field->target = to_public(value);
+    *(arnm_json_value **)target = to_public(value);
     return ARNM_SUCCESS;
   case ARNM_JSON_FIELD_TYPE_BOOL:
     if (!unsafe_yyjson_is_bool((void *)value)) { return ARNM_ERROR_INVALID_ENUM_TYPE; }
-    *(bool *)field->target = unsafe_yyjson_get_bool((void *)value);
+    *(bool *)target = unsafe_yyjson_get_bool((void *)value);
     return ARNM_SUCCESS;
   case ARNM_JSON_FIELD_TYPE_DOUBLE:
     if (!unsafe_yyjson_is_num((void *)value)) { return ARNM_ERROR_INVALID_ENUM_TYPE; }
-    *(double *)field->target = unsafe_yyjson_get_num((void *)value);
+    *(double *)target = unsafe_yyjson_get_num((void *)value);
     return ARNM_SUCCESS;
   case ARNM_JSON_FIELD_TYPE_NONE:
   default:
@@ -429,27 +441,39 @@ arnm_result arnm_json_read_object(
 
   const uint64_t valid_mask = (count == 64) ? UINT64_MAX : (UINT64_C(1) << count) - 1u;
   uint64_t found = 0;
+  uint64_t visited = 0;
   yyjson_val *key = NULL;
   while ((key = yyjson_obj_iter_next(&iter)) != NULL) {
     // use bitmask magic to start search by first not found key in fields
-    uint64_t remaining = ~found & valid_mask;
+    uint64_t remaining = ~visited & valid_mask;
     if (!remaining) {
       if (out_found) { *out_found = found; }
       return ARNM_SUCCESS;
     }
-    uint32_t key_size = narrow_count(unsafe_yyjson_get_len((void *)key));
+    // complete json cannot be bigger than uint32
+    uint32_t key_size = (uint32_t)unsafe_yyjson_get_len((void *)key);
     const char *key_string = unsafe_yyjson_get_str((void *)key);
     for (uint32_t i = (uint32_t)arnm_ctzll(remaining); i < count; ++i) {
       const uint64_t bit = (uint64_t)1u << i;
-      if ((found & bit) == bit) continue;
+      if ((visited & bit) == bit) continue;
 
       const arnm_json_field *field = &fields[i];
       if (key_size == field->key_length && 0 == memcmp(key_string, field->key, key_size)) {
-        const arnm_result result = read_field(field, yyjson_obj_iter_get_val(key));
+        yyjson_val *value = yyjson_obj_iter_get_val(key);
+        // A null member is passed over: the target keeps the default the caller gave it and the
+        // bit stays clear, exactly as for a member that is not there. VALUE is the one type that
+        // still takes it -- it converts nothing, so there is nothing for a null to be wrong for,
+        // and handing it over is what leaves arnm_json_read_is_null() something to answer.
+        if (unsafe_yyjson_is_null(value) && ARNM_JSON_FIELD_TYPE_VALUE != field->type) {
+          visited |= bit;
+          break;
+        }
+        const arnm_result result = read_field(field->target, field->type, value);
         if (ARNM_SUCCESS != result) {
           if (out_found) { *out_found = found; }
           return result;
         }
+        visited |= bit;
         found |= bit;
         break;
       }
@@ -460,23 +484,83 @@ arnm_result arnm_json_read_object(
   return ARNM_SUCCESS;
 }
 
+/**
+ * @brief Bytes one element of @p type occupies in the caller's buffer.
+ *
+ * What turns @ref arnm_json_read_array()'s single buffer into a row of targets: the type says
+ * what an element is, and therefore how far the next one sits. Asked once per call rather than
+ * once per element, so the loop advances by an addition with nothing looked up inside it.
+ *
+ * @param[in] type The element type; any value, including one no enumerator names.
+ * @return The element size, or 0 for @ref ARNM_JSON_FIELD_TYPE_NONE and for anything the enum
+ *         does not name -- which is what the caller turns into ARNM_ERROR_INVALID_PARAM.
+ */
+static uint32_t element_size(arnm_json_field_type type) {
+  switch (type) {
+  case ARNM_JSON_FIELD_TYPE_UINT64:
+    return (uint32_t)sizeof(uint64_t);
+  case ARNM_JSON_FIELD_TYPE_INT64:
+    return (uint32_t)sizeof(int64_t);
+  case ARNM_JSON_FIELD_TYPE_UINT32:
+    return (uint32_t)sizeof(uint32_t);
+  case ARNM_JSON_FIELD_TYPE_INT32:
+    return (uint32_t)sizeof(int32_t);
+  case ARNM_JSON_FIELD_TYPE_STRING:
+  case ARNM_JSON_FIELD_TYPE_HEX_FIXED:
+  case ARNM_JSON_FIELD_TYPE_UUID:
+    return (uint32_t)sizeof(arnm_memory_block);
+  case ARNM_JSON_FIELD_TYPE_DOUBLE:
+    return (uint32_t)sizeof(double);
+  case ARNM_JSON_FIELD_TYPE_BOOL:
+    return (uint32_t)sizeof(bool);
+  case ARNM_JSON_FIELD_TYPE_VALUE:
+    return (uint32_t)sizeof(arnm_json_value *);
+  default:
+    return 0u;
+  }
+}
+
 arnm_result arnm_json_read_array(
     arnm_json_value *array,
-    arnm_json_value **out_values,
+    arnm_json_field_type type,
+    void *out_values,
     uint32_t capacity,
     uint32_t *out_array_size
 ) {
   if (out_array_size) *out_array_size = 0;
   if (!array || !out_values) return ARNM_ERROR_NULL_POINTER;
   if (0 == capacity) return ARNM_ERROR_INVALID_PARAM;
+  const uint32_t stride = element_size(type);
+  if (0 == stride) return ARNM_ERROR_INVALID_PARAM;
   if (!unsafe_yyjson_is_arr((void *)array)) return ARNM_ERROR_INVALID_ENUM_TYPE;
-  if (unsafe_yyjson_get_len((void *)array) > capacity)
+  // complete json cannot be bigger than uint32
+  uint32_t array_length = (uint32_t)unsafe_yyjson_get_len((void *)array);
+  if (array_length > capacity) {
+    if (out_array_size) *out_array_size = array_length;
     return ARNM_ERROR_DESTINATION_BUFFER_TO_SMALL;
+  }
 
+  // A null element is not an element: it is passed over and the slot it would have taken goes to
+  // the next one, so what comes back is the values the array carried, in the order it carried
+  // them. VALUE is the exception, as in the walk over an object -- it converts nothing, so the
+  // null is a handle like any other and arnm_json_read_is_null() is left something to answer.
+  // The test is hoisted out of the loop because the type cannot change inside it.
+  const bool skip_null = (ARNM_JSON_FIELD_TYPE_VALUE != type);
+
+  uint8_t *slot = (uint8_t *)out_values;
   yyjson_val *val = NULL;
   yyjson_arr_iter iter = yyjson_arr_iter_with(to_yyjson(array));
   uint32_t count = 0;
-  while ((val = yyjson_arr_iter_next(&iter)) != NULL) { out_values[count++] = to_public(val); }
+  while ((val = yyjson_arr_iter_next(&iter)) != NULL) {
+    if (skip_null && unsafe_yyjson_is_null(val)) continue;
+    const arnm_result result = read_field(slot, type, val);
+    if (ARNM_SUCCESS != result) {
+      if (out_array_size) { *out_array_size = count; }
+      return result;
+    }
+    slot += stride;
+    ++count;
+  }
   if (out_array_size) { *out_array_size = count; }
   return ARNM_SUCCESS;
 }

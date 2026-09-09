@@ -382,7 +382,7 @@ static void walk_record(payload *one, int steps) {
   g_sink += sink;
 }
 
-/** The array read on its own: handles out, nothing converted. */
+/** The array read on its own: one handle per element, nothing converted. */
 static void read_items(payload *one, int steps) {
   uint64_t sink = 0;
   for (int step = 0; step < steps; ++step) {
@@ -392,7 +392,10 @@ static void read_items(payload *one, int steps) {
 
     arnm_json_value *elements[ARRAY_ELEMENTS];
     uint32_t count = 0;
-    require_ok(arnm_json_read_array(items, elements, ARRAY_ELEMENTS, &count), "array");
+    require_ok(
+        arnm_json_read_array(items, ARNM_JSON_FIELD_TYPE_VALUE, elements, ARRAY_ELEMENTS, &count),
+        "array"
+    );
     sink += count + (uintptr_t)elements[count - 1u];
   }
   g_sink += sink;
@@ -419,7 +422,10 @@ static void traverse_whole(payload *one, int steps) {
 
     arnm_json_value *elements[ARRAY_ELEMENTS];
     uint32_t count = 0;
-    require_ok(arnm_json_read_array(items, elements, ARRAY_ELEMENTS, &count), "array");
+    require_ok(
+        arnm_json_read_array(items, ARNM_JSON_FIELD_TYPE_VALUE, elements, ARRAY_ELEMENTS, &count),
+        "array"
+    );
     for (uint32_t index = 0; index < count; ++index) {
       record_target into = {0}; /* as in walk_record(): the walk fills only what is there */
       require_ok(read_record(elements[index], &into, NULL), "walk");
