@@ -239,6 +239,7 @@ pub fn build(b: *std.Build) void {
         processBuildTarget(&context, .{ .name = "bench_binaryToString", .srcs = &.{"bench_binaryToString.c"} }, path);
         processBuildTarget(&context, .{ .name = "bench_byte_buffer", .srcs = &.{"bench_byte_buffer.c"} }, path);
         processBuildTarget(&context, .{ .name = "bench_json", .srcs = &.{"bench_json.c"} }, path);
+        processBuildTarget(&context, .{ .name = "bench_key_map", .srcs = &.{"bench_key_map.c"} }, path);
     }
 
     if (enable_tests) {
@@ -253,8 +254,10 @@ pub fn build(b: *std.Build) void {
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_fixed_arena_pool", .srcs = &.{"test_fixed_arena_pool.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_graded_arena_pool", .srcs = &.{"test_graded_arena_pool.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_fixed_ring", .srcs = &.{"test_fixed_ring.cpp"} }, path);
+        processBuildTarget(&context, .{ .link_googletest = true, .name = "test_hash", .srcs = &.{"test_hash.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_json_reader", .srcs = &.{"test_json_reader.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_json_writer", .srcs = &.{"test_json_writer.cpp"} }, path);
+        processBuildTarget(&context, .{ .link_googletest = true, .name = "test_key_map", .srcs = &.{"test_key_map.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_multi_arena", .srcs = &.{"test_multi_arena.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_result", .srcs = &.{"test_result.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_utf8", .srcs = &.{"test_utf8.cpp"} }, path);
