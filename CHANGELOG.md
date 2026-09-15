@@ -20,6 +20,73 @@ next build.
 Entries before 0.4.0 were reconstructed from the git history after the fact, so they summarise
 what the commits show rather than what was noted at the time.
 
+## 0.8.2 -- 2026-09-15
+
+Two new headers, and nothing else moves: code built against 0.8.1 builds and behaves the same.
+By the rule above that is a patch.
+
+### Added
+
+- **`arnm/hash.h`: two hashes over every byte of a buffer, `static inline`.** `arnm_hash_fast()`
+  is an unkeyed multiply-rotate mix with a splitmix64 finalizer; `arnm_hash_siphash13()` is
+  SipHash-1-3 under a 128 bit key, with the general `arnm_hash_siphash()` beside it for other
+  round counts. Inline because a caller that knows its input length at compile time lets the
+  loops unroll -- which `ARNM_KEY_MAP_DEFINE` below relies on. The fast hash's values may change
+  between versions: place data in memory by them, do not name data on disk by them. SipHash is
+  fixed by its specification. `test_hash` checks SipHash against all 64 SipHash-2-4 reference
+  vectors and SipHash-1-3 vectors from a reference implementation that reproduces them, pins the
+  fast hash for ten lengths, and flips every bit of a 45 byte input to see both results change.
+- **`arnm/key_map.h`: fixed size keys turned into dense ids.** `arnm_key_map_get_or_insert()`
+  hands a key it has not seen the next id -- 0, 1, 2, ... -- and every later call with the same
+  bytes that id again; `arnm_key_map_find()` asks without inserting. There is no value type on
+  purpose: the id is the value, and the payload belongs in an `arnm_bvec` at that index. Written
+  for the gradido transaction index, which maps 32 byte public keys to the slot its per address
+  sets live in, and measured there against stb_ds, a key-in-slot table and a sorted array before
+  this layout was chosen.
+
+  The table is 8 byte slots of a 32 bit hash and an id, with the keys stored once beside it in an
+  `arnm_bvec`; linear probing, at most three quarters full, no delete and so no tombstones. Both
+  hashes read every key byte, so keys that share a prefix or a suffix do not share a slot -- which
+  a hash picking a few bytes cannot promise for keys of any shape. Which one a map uses is the
+  init call:
+
+  - `arnm_key_map_init()` -- an unkeyed multiply-rotate mix with a splitmix64 finalizer. The fast
+    one; keys built to collide on purpose are kept apart only as fast as the key comparison
+    allows. Answers stay right, probes get long.
+  - `arnm_key_map_init_keyed()` -- SipHash-1-3 under a 128 bit hash key from the caller, for keys
+    an adversary may choose. arnm has no source of randomness, so the hash key is an argument.
+    About 8 ns more per lookup at 10k keys of 32 bytes, 40 ns at 1M.
+
+  **`ARNM_KEY_MAP_DEFINE(name, key_size)` generates the calls for one key size**, the way
+  `ARNM_BVEC_DEFINE` generates a typed vector. `name##_get_or_insert()` and `name##_find()` are
+  inline copies of the lookup with the key size a constant, so the key comparison and the hash
+  loop compile to a few word operations instead of a `memcmp` call and a loop over a run-time
+  count; the rest forwards to the library. At 1M keys of 32 bytes a find hit measured 133 ns
+  through the untyped call and 78 ns through the generated one, on the fast hash; on SipHash,
+  where the hash dominates, 170 against 168 ns. Both are built from the same inline blocks in the
+  header -- `arnm_key_map_slot_hash()`, `arnm_key_map_probe()` -- so there is one algorithm, and
+  a new key leaves the inline copy through `arnm_key_map_insert_absent()`, the one call where the
+  insert path allocates. A generated call refuses a map opened for another key size.
+
+  A key the map already holds never allocates, not even when the table is due to grow. A refused
+  grow or key bucket adds nothing and every other key keeps its id. `arnm_key_map_reserve()` sizes
+  table and key buckets up front -- the call to make behind an arena, where a grow leaves the old
+  table behind.
+- **`bench_key_map`**: insert growing and reserved behind an arena and on the host, get_or_insert
+  on known keys, find hit and miss, at 10k, 100k and 1M keys of 32 bytes -- every row on both
+  hashes, the lookups and the reserved insert once more through `ARNM_KEY_MAP_DEFINE`.
+
+### Notes
+
+- `test_key_map` checks on both hashes that keys differing only in their first or only in their
+  last eight bytes stay within a short probe of their home slot, that each map's slots carry the
+  hash of `arnm/hash.h` it was opened with, and that the generated calls build a slot table
+  identical byte for byte to the untyped ones.
+- Found on the way, not changed here: a bucket vector that grows push by push stops a few buckets
+  short of `ARNM_BVEC_MAX_INDEX_CAPACITY` (its index steps by the grow step and refuses the step
+  that would pass the ceiling), while `arnm_bvec_reserve()` reaches it exactly. A key map inherits
+  both limits; `test_key_map` pins them.
+
 ## 0.8.1 -- 2026-09-09
 
 `arnm/json_reader.h` learns what to do with a `null`, and its array read learns what its
