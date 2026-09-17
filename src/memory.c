@@ -68,7 +68,6 @@ void arnm_reset(arnm *m) {
 static inline void graded_block_pool_release(arnm_graded_block_pool_state *pool) {
   graded_block_pool_reset(pool);
   arnm_release(pool->source);
-  pool->source = NULL;
 }
 
 void arnm_release(arnm *m) {
@@ -109,6 +108,7 @@ arnm_result arnm_destroy(arnm *m, arnm *allocator) {
     uint32_t allocation_size = sizeof(arnm) + sizeof(arnm_multi_arena);
     return arnm_free((uint8_t *)memory, allocation_size, allocator);
   } else if (is_graded_block_pool(memory)) {
+    arnm_destroy(memory->graded_block_pool->source, allocator);
     uint32_t allocation_size = sizeof(arnm) + sizeof(arnm_graded_block_pool_state);
     return arnm_free((uint8_t *)memory, allocation_size, allocator);
   } else {
@@ -641,17 +641,17 @@ static arnm_result graded_block_pool_realloc(
 
 arnm_result arnm_realloc(uint8_t **buffer, uint32_t old_size, uint32_t new_size, arnm *m) {
   if (!buffer) { return ARNM_ERROR_NULL_POINTER; }
-  if (!*buffer) { return arnm_alloc(buffer, new_size, m); }
+  if (!*buffer && new_size) { return arnm_alloc(buffer, new_size, m); }
 
   arnm_intern *memory = (arnm_intern *)m;
 
   // realloc in non arena mode
   if (is_default_alloc(memory)) {
     uint8_t *resized = (uint8_t *)realloc(*buffer, new_size);
-    if (!resized) { return ARNM_ERROR_OUT_OF_MEMORY; }
+    if (new_size && !resized) { return ARNM_ERROR_OUT_OF_MEMORY; }
     *buffer = resized;
     return ARNM_SUCCESS;
-  }
+  }//*/
 
   uint32_t new_size_aligned = arnm_align8_u32(new_size);
   uint32_t old_size_aligned = arnm_align8_u32(old_size);
