@@ -7,12 +7,12 @@
 #include <stdint.h>
 
 static inline uint32_t bucket_bytes(size_t type_size, uint8_t bucket_capacity_log2) {
-  return mul_pow2_u32(type_size, bucket_capacity_log2);
+  return arnm_mul_pow2_u32(type_size, bucket_capacity_log2);
 }
 
 /* _init caps the exponent at 15, so a full bucket always fits the uint16_t it is counted in */
 static inline uint16_t bucket_capacity(uint8_t bucket_capacity_log2) {
-  return pow2_u16(bucket_capacity_log2);
+  return arnm_pow2_u16(bucket_capacity_log2);
 }
 
 static inline uint32_t bucket_mask(uint8_t bucket_capacity_log2) {

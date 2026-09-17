@@ -1,19 +1,26 @@
+#ifndef ARNM_BIT_H
+#define ARNM_BIT_H
+
 #include "bitmap.h"
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-static inline uint32_t pow2_u32(uint8_t exponent) {
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+static inline uint32_t arnm_pow2_u32(uint8_t exponent) {
   return (uint32_t)1u << exponent;
 }
 
 // scale a value with power of 2, value * 2^exponent
-static inline uint32_t mul_pow2_u32(size_t value, uint8_t exponent) {
+static inline uint32_t arnm_mul_pow2_u32(size_t value, uint8_t exponent) {
   return (uint32_t)(value << exponent);
 }
 
-static inline uint16_t pow2_u16(uint8_t exponent) {
+static inline uint16_t arnm_pow2_u16(uint8_t exponent) {
   return (uint16_t)(1u << exponent);
 }
 
@@ -24,7 +31,7 @@ static inline uint16_t pow2_u16(uint8_t exponent) {
  *
  * @p value must be > 0 and <= 2^31.
  */
-static inline uint32_t ceil_power_of_two(uint32_t value) {
+static inline uint32_t arnm_ceil_power_of_two(uint32_t value) {
   value--;
   value |= value >> 1;
   value |= value >> 2;
@@ -42,8 +49,8 @@ static inline uint32_t ceil_power_of_two(uint32_t value) {
  *
  * @p value must be > 0 and <= 2^31.
  */
-static inline uint8_t log2_power_of_two(uint32_t value) {
-  return (uint8_t)arnm_ctz(ceil_power_of_two(value));
+static inline uint8_t arnm_log2_power_of_two(uint32_t value) {
+  return (uint8_t)arnm_ctz(arnm_ceil_power_of_two(value));
 }
 
 /**
@@ -51,6 +58,12 @@ static inline uint8_t log2_power_of_two(uint32_t value) {
  *
  * @p size must be > 0.
  */
-static inline bool is_power_of_two(uint32_t size) {
+static inline bool arnm_is_power_of_two(uint32_t size) {
   return size && (size & (size - 1u)) == 0u;
 }
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif //ARNM_BIT_H

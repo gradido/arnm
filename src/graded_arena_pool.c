@@ -66,7 +66,7 @@ static uint16_t grade_for_size(const arnm_graded_arena_pool *pool, uint32_t size
   if (size > ARNM_GRADED_MAX_SIZE) { return pool->grade_count; }
   // every grade whose capacity reaches the request. A size under the smallest arena needs no
   // special case: the bits it would keep below exponent 3 are never set.
-  const uint32_t at_or_above = pool->grade_bits & ~(ceil_power_of_two(size) - 1u);
+  const uint32_t at_or_above = pool->grade_bits & ~(arnm_ceil_power_of_two(size) - 1u);
   if (!at_or_above) { return pool->grade_count; }
   return (uint16_t)arnm_popcount(pool->grade_bits & ~at_or_above);
 }
@@ -74,7 +74,7 @@ static uint16_t grade_for_size(const arnm_graded_arena_pool *pool, uint32_t size
 /** The grade whose capacity is exactly @p capacity, or grade_count when there is none. */
 static uint16_t grade_for_capacity(const arnm_graded_arena_pool *pool, uint32_t capacity) {
   /* not a power of two means it was never one of ours, whatever else it may be */
-  if (!is_power_of_two(capacity)) { return pool->grade_count; }
+  if (!arnm_is_power_of_two(capacity)) { return pool->grade_count; }
 
   /* the grades below this size, counted: the slot a grade of this size would occupy */
   const uint16_t slot = (uint16_t)arnm_popcount(pool->grade_bits & (capacity - 1u));
@@ -111,7 +111,7 @@ arnm_result arnm_graded_arena_pool_init(
     const uint32_t capacity = sizes[i];
     // nothing is rounded: a ladder is what it says it is, and a size that is not a rung is a
     // mistake in the caller's list rather than a number to be repaired
-    if (!is_power_of_two(capacity)) { return ARNM_ERROR_INVALID_PARAM; }
+    if (!arnm_is_power_of_two(capacity)) { return ARNM_ERROR_INVALID_PARAM; }
     if (capacity < ARNM_GRADED_MIN_SIZE || capacity > ARNM_GRADED_MAX_SIZE) {
       return ARNM_ERROR_INVALID_PARAM;
     }

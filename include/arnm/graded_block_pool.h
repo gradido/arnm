@@ -110,14 +110,22 @@ typedef struct arnm_graded_block_pool_options {
   uint8_t alloc_arena_capacity; // as multiple of largest grade
 } arnm_graded_block_pool_options;
 
-/** @brief What a pool holds, read in one call. Byte counts are whole blocks, not requests. */
-typedef struct arnm_graded_block_pool_stats {
-  uint64_t lent_bytes;      /**< In graded blocks handed out and not yet freed. */
-  uint64_t cached_bytes;    /**< In graded blocks waiting on a free list. */
-  uint64_t oversized_bytes; /**< Handed to the source past the largest grade, rounded to 8. */
-  uint8_t min_block_log2;   /**< The pool's smallest grade. */
-  uint8_t max_block_log2;   /**< The pool's largest grade. */
-} arnm_graded_block_pool_stats;
+/**
+ * @brief What a graded block pool holds: a free list per grade, the source, three counters.
+ *
+ * Lives directly behind the pool's handle, in the one allocation arnm_create_graded_block_pool()
+ * takes from the source. @c free_head is indexed by the grade's exponent itself, so the entries
+ * below @c min_log2 are never used -- 24 bytes spent to keep every lookup a plain index.
+ */
+typedef struct arnm_graded_block_pool {
+  arnm *source; /**< Where blocks come from and return to; NULL for the host. Borrowed. */
+  uint8_t *free_head[ARNM_GRADED_BLOCK_POOL_MAX_LOG2 + 1u]; /**< First free block per grade. */
+  uint64_t lent_bytes;      /**< Graded block bytes out with callers. */
+  uint64_t cached_bytes;    /**< Graded block bytes on the free lists. */
+  uint64_t oversized_bytes; /**< Bytes handed to the source past the largest grade. */
+  uint8_t min_log2;         /**< Smallest grade. */
+  uint8_t max_log2;         /**< Largest grade. */
+} arnm_graded_block_pool;
 
 // ********** manage the allocator itself *******************
 
@@ -145,29 +153,30 @@ arnm_result arnm_graded_block_pool_options_validate(arnm_graded_block_pool_optio
  * @note Give it back with @ref arnm_destroy(), naming the same @p source.
  * @whisper Basins dug in a row, the smallest first, the stream not yet let in
  */
-arnm *arnm_create_graded_block_pool(arnm_graded_block_pool_options *options, arnm *source);
+arnm_graded_block_pool *arnm_create_graded_block_pool(arnm_graded_block_pool_options *options, arnm *source);
 
-/**
- * @brief Is @p memory a graded block pool?
- *
- * @param[in] memory Handle to ask; NULL answers false.
- * @return true only for a pool. A pool is not an arena: @ref arnm_is_arena() answers false for
- *         it. A true answer implies `memory != NULL`.
- */
-bool arnm_is_graded_block_pool(const arnm *memory);
+arnm_result arnm_init_graded_block_pool(arnm_graded_block_pool* pool, arnm_graded_block_pool_options *options, arnm *source);
 
-/**
- * @brief Read what the pool holds.
- *
- * Counters, not a walk: the call costs the same however many blocks are out or cached.
- *
- * @param[in]  memory Pool to ask; not NULL.
- * @param[out] out    Receives the figures; not NULL. Untouched on failure.
- * @retval ARNM_SUCCESS             @p out is filled in.
- * @retval ARNM_ERROR_NULL_POINTER  @p memory or @p out is NULL.
- * @retval ARNM_ERROR_INVALID_STATE @p memory is not a pool.
- */
-arnm_result arnm_graded_block_pool_measure(const arnm *memory, arnm_graded_block_pool_stats *out);
+arnm_result arnm_graded_block_pool_alloc(
+    arnm_graded_block_pool *pool, uint8_t **buffer, uint32_t aligned_size
+);
+
+arnm_result arnm_graded_block_pool_realloc(
+    arnm_graded_block_pool *pool,
+    uint8_t **buffer,
+    uint32_t old_size,
+    uint32_t new_size
+);
+
+arnm_result arnm_graded_block_pool_free(
+    arnm_graded_block_pool *pool, uint8_t *buffer, uint32_t size
+);
+
+void arnm_graded_block_pool_reset(arnm_graded_block_pool *pool);
+
+void arnm_graded_block_pool_release(arnm_graded_block_pool *pool);
+
+arnm_result arnm_graded_block_pool_destroy(arnm_graded_block_pool *pool, arnm *allocator)
 
 /** @} */
 
