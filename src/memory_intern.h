@@ -114,7 +114,7 @@ static inline bool is_graded_block_pool(const arnm_intern *memory) {
 }
 
 static inline bool is_default_alloc(const arnm_intern *memory) {
-  return !memory ||ARNM_ALLOC_TYPE_DEFAULT == memory->allocation_type;
+  return !memory || ARNM_ALLOC_TYPE_DEFAULT == memory->allocation_type;
 }
 
 /*

@@ -1,7 +1,7 @@
 #include "arnm/bucket_vector.h"
 
-#include "arnm/bit.h"
 #include "arnm/arena.h"
+#include "arnm/bit.h"
 #include "arnm/memory.h"
 #include "arnm/result.h"
 #include <stdint.h>

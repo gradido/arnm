@@ -1,20 +1,20 @@
 #include "bitmap.h"
 
 #include <stdbool.h>
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 
 static inline uint32_t pow2_u32(uint8_t exponent) {
-    return (uint32_t)1u << exponent;
+  return (uint32_t)1u << exponent;
 }
 
 // scale a value with power of 2, value * 2^exponent
 static inline uint32_t mul_pow2_u32(size_t value, uint8_t exponent) {
-    return (uint32_t)(value << exponent);
+  return (uint32_t)(value << exponent);
 }
 
 static inline uint16_t pow2_u16(uint8_t exponent) {
-    return (uint16_t)(1u << exponent);
+  return (uint16_t)(1u << exponent);
 }
 
 /**

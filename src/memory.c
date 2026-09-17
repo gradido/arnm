@@ -1,8 +1,8 @@
 #include "arnm/memory.h"
 #include "arnm/arena.h"
 #include "arnm/bit.h"
-#include "arnm/bytes.h"
 #include "arnm/bucket_vector.h"
+#include "arnm/bytes.h"
 #include "arnm/multi_arena.h"
 #include "arnm/result.h"
 #include "memory_intern.h"
@@ -60,9 +60,7 @@ void arnm_reset(arnm *m) {
     break;
   case ARNM_ALLOC_TYPE_GRADED_BLOCK_POOL:
     // the source is borrowed and stays as it is; see arnm/graded_block_pool.h
-    if (memory->graded_block_pool) {
-      graded_block_pool_reset(memory->graded_block_pool);
-    }
+    if (memory->graded_block_pool) { graded_block_pool_reset(memory->graded_block_pool); }
     break;
   }
 }
@@ -439,19 +437,25 @@ typedef struct graded_block_pool_request {
   uint32_t grade_bytes;
   uint8_t grade_index;
   bool is_oversized;
+  bool belong_to_pool;
 } graded_block_pool_request;
 
-static arnm_result graded_pool_classify_request(graded_block_pool_request* state, const arnm_graded_block_pool_state *pool, uint32_t aligned_size) {
+static arnm_result graded_pool_classify_request(
+    graded_block_pool_request *state,
+    const arnm_graded_block_pool_state *pool,
+    uint32_t aligned_size
+) {
+  state->belong_to_pool = true;
   uint8_t grade_exp = log2_power_of_two(aligned_size);
   // if requested memory size exceed biggest grade
   state->is_oversized = grade_exp > pool->max_log2;
   if (state->is_oversized && pool->oversized_bytes < aligned_size) {
-    return ARNM_ERROR_INVALID_STATE;
+    state->belong_to_pool = false;
   }
   state->grade_index = grade_exp < pool->min_log2 ? 0 : grade_exp - pool->min_log2;
   state->grade_bytes = pow2_u32(grade_exp < pool->min_log2 ? pool->min_log2 : grade_exp);
   if (pool->lent_bytes < state->grade_bytes) {
-    return ARNM_ERROR_INVALID_STATE;
+    state->belong_to_pool = false;
   }
   return ARNM_SUCCESS;
 }
@@ -526,7 +530,10 @@ static arnm_result multi_arena_alloc(uint8_t **buffer, uint32_t aligned_size, ar
 }
 
 static arnm_result graded_block_pool_alloc_classified(
-    arnm_graded_block_pool_state *pool, uint8_t **buffer, graded_block_pool_request* request, uint32_t aligned_size
+    arnm_graded_block_pool_state *pool,
+    uint8_t **buffer,
+    graded_block_pool_request *request,
+    uint32_t aligned_size
 ) {
   // if requested memory size exceed biggest grade
   if (request->is_oversized) {
@@ -579,7 +586,10 @@ arnm_result arnm_alloc(uint8_t **buffer, uint32_t size, arnm *m) {
   return arena_alloc_aligned(buffer, aligned_size, m);
 }
 static arnm_result graded_block_pool_free_classified(
-    arnm_graded_block_pool_state *pool, uint8_t *buffer, graded_block_pool_request* request, uint32_t aligned_size
+    arnm_graded_block_pool_state *pool,
+    uint8_t *buffer,
+    graded_block_pool_request *request,
+    uint32_t aligned_size
 );
 
 static arnm_result graded_block_pool_realloc(
@@ -597,12 +607,13 @@ static arnm_result graded_block_pool_realloc(
   graded_block_pool_request old_size_request;
   arnm_result result = ARNM_SUCCESS;
   result = graded_pool_classify_request(&new_size_request, pool, new_aligned);
-  if(result != ARNM_SUCCESS) { return result; }
+  if (result != ARNM_SUCCESS) { return result; }
   result = graded_pool_classify_request(&old_size_request, pool, old_aligned);
-  if(result != ARNM_SUCCESS) { return result; }
+  if (result != ARNM_SUCCESS) { return result; }
 
   // the block already has room for anything its grade serves
-  if (!old_size_request.is_oversized && !new_size_request.is_oversized && old_size_request.grade_index == new_size_request.grade_index) {
+  if (!old_size_request.is_oversized && !new_size_request.is_oversized &&
+      old_size_request.grade_index == new_size_request.grade_index) {
     return ARNM_SUCCESS;
   }
 
@@ -745,11 +756,14 @@ arnm_result arnm_clone(uint8_t **dst_buffer, const uint8_t *src, uint32_t size, 
 }
 
 static arnm_result graded_block_pool_free_classified(
-    arnm_graded_block_pool_state *pool, uint8_t *buffer, graded_block_pool_request* request, uint32_t aligned_size
+    arnm_graded_block_pool_state *pool,
+    uint8_t *buffer,
+    graded_block_pool_request *request,
+    uint32_t aligned_size
 ) {
+  if (!request->belong_to_pool) { return ARNM_ERROR_INVALID_STATE; }
   // if requested memory size exceed biggest grade
   if (request->is_oversized) {
-    if(pool->oversized_bytes < aligned_size) { return ARNM_ERROR_INVALID_STATE; }
     const arnm_result result = arnm_free(buffer, aligned_size, pool->source);
     // a warning means the free happened and the source keeps the bytes; either way they are no
     // longer out. Only a refusal leaves the block where it was.
@@ -759,7 +773,7 @@ static arnm_result graded_block_pool_free_classified(
     return result;
   }
 
-  memcpy(buffer, &pool->free_head[request->grade_index], sizeof(uint8_t*));
+  memcpy(buffer, &pool->free_head[request->grade_index], sizeof(uint8_t *));
   pool->free_head[request->grade_index] = buffer;
   pool->lent_bytes -= request->grade_bytes;
   pool->cached_bytes += request->grade_bytes;

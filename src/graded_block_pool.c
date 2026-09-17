@@ -60,7 +60,8 @@ arnm *arnm_create_graded_block_pool(arnm_graded_block_pool_options *options, arn
   uint32_t max_grade_size = pow2_u32(options->max_block_log2);
   multi_arena_options.arena_capacity = max_grade_size * options->alloc_arena_capacity;
   // detect overflow/wrap
-  if (multi_arena_options.arena_capacity < max_grade_size || multi_arena_options.arena_capacity > ARNM_MAX_ALLOC_SIZE) {
+  if (multi_arena_options.arena_capacity < max_grade_size ||
+      multi_arena_options.arena_capacity > ARNM_MAX_ALLOC_SIZE) {
     multi_arena_options.arena_capacity = ARNM_MAX_ALLOC_SIZE;
   }
   multi_arena_options.full_remaining = pow2_u32(options->min_block_log2) - 1u;

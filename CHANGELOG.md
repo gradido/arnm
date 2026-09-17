@@ -20,6 +20,44 @@ next build.
 Entries before 0.4.0 were reconstructed from the git history after the fact, so they summarise
 what the commits show rather than what was noted at the time.
 
+## Unreleased
+
+A new kind of handle. Nothing that existed changes what it does: code built against 0.8.2 builds
+and behaves the same, so by the rule above this is a patch.
+
+### Added
+
+- **`arnm/graded_block_pool.h`: blocks in power of two grades, reused once given back.**
+  `arnm_create_graded_block_pool(&options, source)` returns an ordinary `arnm *` whose
+  `arnm_alloc()` rounds a request up to 8 and then to the next grade -- 16 bytes to 1 MiB unless
+  the options say otherwise -- and takes the block from that grade's free list, or from `source`
+  when the list is empty. `arnm_free()` puts the block back on the list; the link lives in the
+  free block's first 8 bytes, so nothing is stored per block. `arnm_realloc()` keeps a block
+  that its grade still fits and moves it otherwise.
+
+  What it is for: an arena takes back only its newest allocation, so every block a growing
+  container outgrows stays behind in it. Over a pool the next request of that grade gets it back
+  wherever it lies. Five key maps of 200000 keys built and freed one after another took 47.5 MiB
+  of arena straight and 17.5 MiB through a pool; a working set of 4096 blocks replaced 4 million
+  times stayed within 11.5 MiB, where the arena alone had used 498 MiB after a sixteenth of the
+  steps. Against malloc and free on the same churn a replacement cost 10 ns instead of 77 ns.
+
+  The source is borrowed. A request past the largest grade goes straight to it, and so does its
+  free, whose answer comes back unchanged. `arnm_release()` hands every cached block back to the
+  source; `arnm_destroy()` releases and returns the pool's own bytes. `arnm_reset()` over an
+  arena or a chain forgets the free lists and leaves the source alone, whose own reset collects
+  the blocks; over the host or another pool, where forgetting would lose them, it does what
+  `arnm_release()` does -- a reset that leaks by design would only punish the wrong call. `arnm_graded_block_pool_measure()` reads the bytes
+  lent out, cached and oversized. A free the counters cannot account for -- the plain double
+  free -- is refused with `ARNM_ERROR_INVALID_STATE`.
+- **`bench_graded_block_pool`**: the churn and growth figures above.
+
+### Changed
+
+- `arnm_alloc_type` in the private `src/memory_intern.h` gains `ARNM_ALLOC_TYPE_GRADED_BLOCK_POOL`
+  past the arena range, and the handle's union a pointer to the pool's state. `arnm_is_arena()`
+  answers false for a pool, so `arnm_bvec` and the JSON writer treat it as they treat the host.
+
 ## 0.8.2 -- 2026-09-15
 
 Two new headers, and nothing else moves: code built against 0.8.1 builds and behaves the same.

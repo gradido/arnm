@@ -238,7 +238,7 @@ arnm_result arnm_graded_arena_pool_free(arnm_graded_arena_pool *pool, arnm *aren
   if (!pool->grades) { return ARNM_ERROR_NOT_INITIALIZED; }
   // a chain or a host handle carries no capacity to match, and a released arena carries 0 --
   // both fall to the same refusal below, which is the honest one either way
-  const arnm_intern * a = (const arnm_intern *)arena;
+  const arnm_intern *a = (const arnm_intern *)arena;
   if (!is_single_arena(a)) { return ARNM_ERROR_INVALID_PARAM; }
 
   // the arena says which grade it belongs to, so nothing had to be remembered between the two
