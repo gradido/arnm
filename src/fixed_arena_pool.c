@@ -1,7 +1,6 @@
 #include "arnm/fixed_arena_pool.h"
 
 #include "arena_free_list.h"
-#include "memory_intern.h"
 
 #include "arnm/arena.h"
 #include "arnm/memory.h"

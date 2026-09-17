@@ -9,6 +9,7 @@
  */
 
 #include "arnm/bucket_vector.h"
+#include "arnm/graded_block_pool.h"
 #include "arnm/memory.h"
 
 #include <assert.h>
@@ -25,7 +26,9 @@ typedef enum arnm_alloc_type {
   ARNM_ALLOC_TYPE_ARENA_OWNED,
   ARNM_ALLOC_TYPE_ARENA_EXTERNAL,
   ARNM_ALLOC_TYPE_MULTI_ARENA_DYNAMIC,
-  ARNM_ALLOC_TYPE_MULTI_ARENA_FIXED
+  ARNM_ALLOC_TYPE_MULTI_ARENA_FIXED,
+  /* not an arena, and deliberately past the contiguous arena range is_arena() checks */
+  ARNM_ALLOC_TYPE_GRADED_BLOCK_POOL
 } arnm_alloc_type;
 
 static_assert(
@@ -45,7 +48,24 @@ typedef struct arnm_multi_arena {
 } arnm_multi_arena;
 
 /**
- * @brief The layout behind the opaque @ref arnm -- one of two shapes, told apart by @c
+ * @brief What a graded block pool holds: a free list per grade, the source, three counters.
+ *
+ * Lives directly behind the pool's handle, in the one allocation arnm_create_graded_block_pool()
+ * takes from the source. @c free_head is indexed by the grade's exponent itself, so the entries
+ * below @c min_log2 are never used -- 24 bytes spent to keep every lookup a plain index.
+ */
+typedef struct arnm_graded_block_pool_state {
+  arnm *source; /**< Where blocks come from and return to; NULL for the host. Borrowed. */
+  uint8_t *free_head[ARNM_GRADED_BLOCK_POOL_MAX_LOG2 + 1u]; /**< First free block per grade. */
+  uint64_t lent_bytes;      /**< Graded block bytes out with callers. */
+  uint64_t cached_bytes;    /**< Graded block bytes on the free lists. */
+  uint64_t oversized_bytes; /**< Bytes handed to the source past the largest grade. */
+  uint8_t min_log2;         /**< Smallest grade. */
+  uint8_t max_log2;         /**< Largest grade. */
+} arnm_graded_block_pool_state;
+
+/**
+ * @brief The layout behind the opaque @ref arnm -- one of three shapes, told apart by @c
  *        allocation_type.
  *
  * A single arena carries its block and the index into it; a chain carries only a pointer to
@@ -61,6 +81,7 @@ typedef struct arnm_intern {
       uint32_t out_of_memory_capacity; /**< Accumulated overflow since last reset, saturating. */
     };
     arnm_multi_arena *multi_arena;
+    arnm_graded_block_pool_state *graded_block_pool;
   };
 
   uint8_t allocation_type; /**< arnm_alloc_type, one byte is enough. */
@@ -86,6 +107,37 @@ static inline bool is_multi_arena(const arnm_intern *memory) {
   const arnm_alloc_type type = (arnm_alloc_type)memory->allocation_type;
   return ARNM_ALLOC_TYPE_MULTI_ARENA_DYNAMIC == type || ARNM_ALLOC_TYPE_MULTI_ARENA_FIXED == type;
 }
+
+static inline bool is_graded_block_pool(const arnm_intern *memory) {
+  return memory && memory->graded_block_pool &&
+         ARNM_ALLOC_TYPE_GRADED_BLOCK_POOL == memory->allocation_type;
+}
+
+static inline bool is_default_alloc(const arnm_intern *memory) {
+  return !memory ||ARNM_ALLOC_TYPE_DEFAULT == memory->allocation_type;
+}
+
+/*
+ * The pool's half of the four allocation calls, for memory.c to dispatch to. Sizes arrive
+ * already rounded to 8 and checked for overflow; the raw sizes a realloc needs to copy travel
+ * beside them. Implemented in graded_block_pool.c.
+ */
+arnm_result arnm_graded_block_pool_alloc_intern(
+    arnm_graded_block_pool_state *pool, uint8_t **buffer, uint32_t aligned_size
+);
+arnm_result arnm_graded_block_pool_free_intern(
+    arnm_graded_block_pool_state *pool, uint8_t *buffer, uint32_t aligned_size
+);
+arnm_result arnm_graded_block_pool_realloc_intern(
+    arnm_graded_block_pool_state *pool,
+    uint8_t **buffer,
+    uint32_t old_size,
+    uint32_t old_aligned,
+    uint32_t new_size,
+    uint32_t new_aligned
+);
+void arnm_graded_block_pool_reset_intern(arnm_graded_block_pool_state *pool);
+void arnm_graded_block_pool_release_intern(arnm_graded_block_pool_state *pool);
 
 /**
  * Has an arena's remainder fallen to where its chain writes it off?

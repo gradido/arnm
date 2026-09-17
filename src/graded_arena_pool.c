@@ -2,6 +2,7 @@
 
 #include "memory_intern.h"
 
+#include "arnm/bit.h"
 #include "arnm/bitmap.h"
 #include "arnm/dynamic_arena_pool.h"
 #include "arnm/memory.h"
@@ -46,31 +47,6 @@ static void forget_everything(arnm_graded_arena_pool *pool) {
   pool->grades = NULL;
   pool->grade_count = 0;
   pool->grade_bits = 0;
-}
-
-/** Is @p size a power of two? A ladder accepts nothing else, and 0 is not one. */
-static bool is_power_of_two(uint32_t size) {
-  return size && (size & (size - 1u)) == 0u;
-}
-
-/**
- * @p size rounded up to a power of two, branchless.
- *
- * Every bit below the highest set one is filled in, which leaves a run of ones ending where the
- * value did, and one more turns that run into the next power of two. Local rather than shared:
- * it is the one place in arnm that rounds to anything but 8, and it belongs to this rule.
- *
- * @param size Must be > 0 and at most ARNM_GRADED_MAX_SIZE; above that the answer would need a
- *             33rd bit and comes back as 0. Callers refuse that range before asking.
- */
-static uint32_t ceil_power_of_two(uint32_t size) {
-  size--;
-  size |= size >> 1;
-  size |= size >> 2;
-  size |= size >> 4;
-  size |= size >> 8;
-  size |= size >> 16;
-  return size + 1u;
 }
 
 /**
@@ -262,11 +238,12 @@ arnm_result arnm_graded_arena_pool_free(arnm_graded_arena_pool *pool, arnm *aren
   if (!pool->grades) { return ARNM_ERROR_NOT_INITIALIZED; }
   // a chain or a host handle carries no capacity to match, and a released arena carries 0 --
   // both fall to the same refusal below, which is the honest one either way
-  if (!is_single_arena(arnm_intern_of_const(arena))) { return ARNM_ERROR_INVALID_PARAM; }
+  const arnm_intern * a = (const arnm_intern *)arena;
+  if (!is_single_arena(a)) { return ARNM_ERROR_INVALID_PARAM; }
 
   // the arena says which grade it belongs to, so nothing had to be remembered between the two
   // calls; a capacity is a power of two and names at most one grade
-  const uint16_t index = grade_for_capacity(pool, arnm_intern_of_const(arena)->capacity);
+  const uint16_t index = grade_for_capacity(pool, a->capacity);
   if (index >= pool->grade_count) { return ARNM_ERROR_INVALID_PARAM; }
 
   return arnm_dynamic_arena_pool_free(&pool->grades[index], arena);

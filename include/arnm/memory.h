@@ -14,7 +14,7 @@ extern "C" {
 
 /**
  * @defgroup arnm_memory arnm_memory
- * @brief One handle, four calls, three strategies behind them.
+ * @brief One handle, four calls, four strategies behind them.
  *
  * Every allocation in arnm goes through @ref arnm and the four calls at the bottom of this
  * file. Which strategy answers them is decided when the handle is made, and callers never
@@ -25,8 +25,9 @@ extern "C" {
  * | `NULL`, or a zeroed @ref arnm | nothing, or @ref arnm_create() | hands the request to the host (malloc/free) |
  * | arena | @ref arnm_init_arena(), @ref arnm_init_arena_borrow() | bumps an index inside one fixed block |
  * | chain | @ref arnm_create_multi_arena() | bumps an index in the first arena with room |
+ * | graded block pool | @ref arnm_create_graded_block_pool() | takes a block of the request's power of two grade from a free list, or from the allocator it was built over |
  *
- * A function that takes an `arnm *` therefore works against all three, and a caller with no
+ * A function that takes an `arnm *` therefore works against all four, and a caller with no
  * opinion passes NULL and gets the host. That is the point of the handle being one type.
  *
  * ### Sizes come back with the pointer
@@ -97,7 +98,8 @@ static inline uint32_t arnm_align8_u32(uint32_t size) {
  * @ref arnm_is_multi_arena() and @ref arnm_multi_arena_measure().
  *
  * All zeroes is a valid, usable state: the host allocator. Everything else comes from
- * @ref arnm_init_arena(), @ref arnm_init_arena_borrow() or @ref arnm_create_multi_arena().
+ * @ref arnm_init_arena(), @ref arnm_init_arena_borrow(), @ref arnm_create_multi_arena() or
+ * @ref arnm_create_graded_block_pool().
  *
  * The union is not a choice between members but an alignment floor. The layout behind these
  * bytes holds pointers, and a bare `uint8_t[]` is aligned for nothing -- so a handle placed
@@ -132,11 +134,21 @@ arnm *arnm_create(arnm *allocator);
  * @brief Hand everything back and start over, keeping the memory.
  *
  * An arena moves its index to 0; a chain resets every arena it holds and starts its search at
- * the front again. No memory is returned to the host -- that is the point: the next round of
+ * the front again. Neither returns memory to the host -- that is the point: the next round of
  * work reuses ground that is already warm. Host mode has nothing to reset.
  *
+ * A graded block pool lets go of the blocks waiting on its free lists. Over an arena or a chain
+ * it simply forgets them: their bytes stay in the source until the source is reset, and that
+ * reset ends the pool as well, whose own bytes live there too -- make a new one afterwards. Over
+ * the host or another pool, where forgotten blocks would be lost for good, it hands them back as
+ * @ref arnm_release() does.
+ *
  * @param[in,out] memory Allocator to empty; NULL is a no-op.
- * @warning Every block ever handed out by @p memory is dangling afterwards.
+ * @warning Arena and chain: every block handed out is dangling afterwards, its bytes go to the
+ *          next request. Graded block pool over an arena or a chain: a block still out keeps its
+ *          bytes, which belong to the source, but the pool no longer knows it and refuses to take
+ *          it back; it dies with the source's reset. Over the host or another pool: as
+ *          @ref arnm_release(), a block still out stays the caller's.
  * @whisper The ground is swept, not carried away
  */
 void arnm_reset(arnm *memory);
@@ -145,11 +157,14 @@ void arnm_reset(arnm *memory);
  * @brief Give the memory back to the host, keep the handle.
  *
  * An owned arena frees its block; a borrowed one simply lets go, leaving the caller's buffer
- * untouched. A chain releases every arena it opened and its descriptor vector. The handle
- * itself survives and can be initialized again.
+ * untouched. A chain releases every arena it opened and its descriptor vector. A graded block
+ * pool hands every block on its free lists back to the allocator it draws from; the blocks still
+ * out stay the caller's. The handle itself survives and can be initialized again.
  *
  * @param[in,out] memory Allocator to empty out; NULL is a no-op.
- * @warning Every block ever handed out by @p memory is dangling afterwards.
+ * @warning Arena and chain: every block handed out is dangling afterwards. Graded block pool:
+ *          the cached blocks are gone, given back to the source; a block still out keeps its
+ *          bytes and stays the caller's, and the pool still takes it back.
  * @whisper What was borrowed returns, what was owned is let go
  */
 void arnm_release(arnm *memory);
