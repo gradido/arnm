@@ -37,7 +37,9 @@ static inline uint32_t arnm_pow2_u32(uint8_t exponent) {
 /**
  * @brief @p value * 2^@p exponent, narrowed to a uint32_t.
  * @param[in] value    Factor; the product must fit a uint32_t, the bits above are dropped.
- * @param[in] exponent 0 to 63, and small enough for the product to fit.
+ * @param[in] exponent Below the width of size_t (64 or 32 bits, depending on the target), and
+ *                     small enough for the product to fit. At the width and above the shift
+ *                     underneath is undefined; nothing here checks, the caller has already.
  */
 static inline uint32_t arnm_mul_pow2_u32(size_t value, uint8_t exponent) {
   return (uint32_t)(value << exponent);
@@ -45,7 +47,8 @@ static inline uint32_t arnm_mul_pow2_u32(size_t value, uint8_t exponent) {
 
 /**
  * @brief 2^@p exponent as a uint16_t.
- * @param[in] exponent 0 to 15; above that the bit falls off and the answer is 0.
+ * @param[in] exponent 0 to 15. 16 to 31 give 0, the bit falling off the uint16_t; 32 and above
+ *                     is undefined, as the shift underneath is.
  */
 static inline uint16_t arnm_pow2_u16(uint8_t exponent) {
   return (uint16_t)(1u << exponent);
