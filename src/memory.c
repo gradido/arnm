@@ -82,14 +82,11 @@ arnm_result arnm_destroy(arnm *m, arnm *allocator) {
   if (!m) { return ARNM_SUCCESS; }
   arnm_release(m);
   arnm_intern *memory = (arnm_intern *)m;
-  if (is_multi_arena(memory)) {
-    uint32_t allocation_size = sizeof(arnm) + sizeof(arnm_multi_arena);
-    return arnm_free((uint8_t *)memory, allocation_size, allocator);
-  } else {
-    // whatever the arena it was carved from answers is the caller's to see: the descriptor is
-    // gone from their point of view either way, but its bytes may only come back on reset
-    return arnm_free((uint8_t *)memory, sizeof(arnm), allocator);
-  }
+  uint32_t allocation_size = sizeof(arnm);
+  if (is_multi_arena(memory)) { allocation_size = sizeof(arnm) + sizeof(arnm_multi_arena); }
+  // whatever the arena it was carved from answers is the caller's to see: the descriptor is gone
+  // from their point of view either way, but its bytes may only come back on reset
+  return arnm_free((uint8_t *)memory, allocation_size, allocator);
 }
 // **************** arena functions *******************************************************
 
@@ -406,7 +403,6 @@ arnm_result arnm_multi_arena_measure(const arnm *m, arnm_multi_arena_stats *out)
 }
 
 // ********** manage memory allocations with data ptr and size explicit *******************
-//
 
 static arnm_result multi_arena_alloc(uint8_t **buffer, uint32_t aligned_size, arnm_multi_arena *m);
 
@@ -477,8 +473,9 @@ static arnm_result multi_arena_alloc(uint8_t **buffer, uint32_t aligned_size, ar
 arnm_result arnm_alloc(uint8_t **buffer, uint32_t size, arnm *m) {
   if (!buffer) { return ARNM_ERROR_NULL_POINTER; }
   if (!size) { return ARNM_ERROR_INVALID_PARAM; }
+
   arnm_intern *memory = (arnm_intern *)m;
-  if (!is_arena(memory)) {
+  if (is_default_alloc(memory)) {
     uint8_t *allocated = (uint8_t *)malloc(size);
     if (!allocated) { return ARNM_ERROR_OUT_OF_MEMORY; }
     *buffer = allocated;
@@ -488,19 +485,21 @@ arnm_result arnm_alloc(uint8_t **buffer, uint32_t size, arnm *m) {
   // align with 8 Bytes
   uint32_t aligned_size = arnm_align8_u32(size);
   if (!aligned_size) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
-
   return arena_alloc_aligned(buffer, aligned_size, m);
 }
 
 arnm_result arnm_realloc(uint8_t **buffer, uint32_t old_size, uint32_t new_size, arnm *m) {
   if (!buffer) { return ARNM_ERROR_NULL_POINTER; }
+
+  arnm_intern *memory = (arnm_intern *)m;
+
   uint32_t new_size_aligned = arnm_align8_u32(new_size);
   uint32_t old_size_aligned = arnm_align8_u32(old_size);
   if ((new_size && !new_size_aligned) || (old_size && !old_size_aligned))
     return ARNM_ERROR_ARITHMETIC_OVERFLOW;
 
   // release on arnm_free's terms and with its return value, so that freeing through here and
-  // calling arnm_free directly cannot drift apart. An empty buffer takes the same route.
+  // calling arnm_free directly cannot drift apart.
   if (!new_size_aligned) {
     arnm_result result = arnm_free(*buffer, old_size_aligned, m);
     if (ARNM_SUCCESS == result) { *buffer = NULL; }
@@ -509,17 +508,6 @@ arnm_result arnm_realloc(uint8_t **buffer, uint32_t old_size, uint32_t new_size,
 
   // deliberately below the release check: (0, 0) means free, not "same size, nothing to do"
   if (*buffer && old_size == new_size) { return ARNM_SUCCESS; }
-
-  arnm_intern *memory = (arnm_intern *)m;
-  // realloc in non arena mode
-  if (!is_arena(memory)) {
-    // realloc(NULL, n) is malloc(n), so a fresh buffer works here too
-    uint8_t *resized = (uint8_t *)realloc(*buffer, new_size);
-    if (!resized) { return ARNM_ERROR_OUT_OF_MEMORY; }
-
-    *buffer = resized;
-    return ARNM_SUCCESS;
-  }
 
   arnm_intern *single_arena = memory;
   uint32_t owner_index = 0;
@@ -571,6 +559,15 @@ arnm_result arnm_realloc(uint8_t **buffer, uint32_t old_size, uint32_t new_size,
     // the allocation above may well have walked first_open past this arena; it has room again
     multi_arena_reopen(memory->multi_arena, single_arena, owner_index);
     *buffer = moved;
+    return ARNM_SUCCESS;
+  }
+
+  // host: below the arena paths, which a NULL handle passes straight through. realloc(NULL, n)
+  // is malloc(n), so a fresh buffer works here too
+  if (is_default_alloc(memory)) {
+    uint8_t *resized = (uint8_t *)realloc(*buffer, new_size);
+    if (!resized) { return ARNM_ERROR_OUT_OF_MEMORY; }
+    *buffer = resized;
     return ARNM_SUCCESS;
   }
 

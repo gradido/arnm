@@ -20,6 +20,43 @@ next build.
 Entries before 0.4.0 were reconstructed from the git history after the fact, so they summarise
 what the commits show rather than what was noted at the time.
 
+## Unreleased
+
+New headers only. Nothing that existed changes what it does: code built against 0.8.2 builds and
+behaves the same, so by the rule above this is a patch.
+
+### Added
+
+- **`arnm/graded_block_pool.h`: blocks in power of two grades, reused once given back.**
+  A pool is its own struct with its own calls -- `arnm_graded_block_pool_init()` /
+  `_release()` or `_create()` / `_destroy()`, then `_alloc()`, `_realloc()` and `_free()` -- and
+  not an `arnm` handle, so no other allocator pays a branch for it. A request is rounded up to 8
+  and then to the next grade, 16 bytes to 1 MiB unless the options say otherwise, and the block
+  comes from that grade's free list, or new from a chain of arenas the pool owns. `_free()` puts
+  it back on the list; the link lives in the free block's first 8 bytes, so nothing is stored
+  per block. A request past the largest grade is refused with `ARNM_ERROR_RESOURCE_SIZE_EXCEED`.
+  `_realloc()` always moves, also within a grade: the pool serves containers that grow a grade at
+  a time, and the check would cost every call. The source named at init carries only the
+  bookkeeping -- the chain's descriptor and its list of arenas, and with `_create()` the pool
+  struct; the arenas themselves come from the host, `alloc_arena_capacity` blocks of the largest
+  grade each. `_reset()` keeps the arenas and ends every block, `_release()` gives everything
+  back. `lent_bytes` and `cached_bytes` in the struct are the measure; a free the lent counter
+  cannot account for -- the plain double free -- is refused with `ARNM_ERROR_INVALID_STATE`.
+
+  What it is for: an arena takes back only its newest allocation, so every block a growing
+  container outgrows stays behind in it. 4096 containers grown from 16 bytes to 8 KiB in turn,
+  eight rounds, held 64 MiB through a pool and 511 MiB on an arena. A working set of 4096 blocks
+  of 1 to 4096 bytes replaced 4 million times stayed within 12 MiB of pool, where an arena alone
+  had used 498 MiB after a sixteenth of the steps; a replacement cost 10 ns instead of the 79 ns
+  of malloc and free.
+- **`arnm/bit.h`**: `arnm_pow2_u32()`, `arnm_pow2_u16()`, `arnm_mul_pow2_u32()`,
+  `arnm_ceil_power_of_two()`, `arnm_log2_power_of_two()` and `arnm_is_power_of_two()`, the power of
+  two arithmetic that bucket vector, graded arena pool and graded block pool used to spell out
+  each on its own.
+- **`arnm/bytes.h`**: `arnm_load_ptr()`, a pointer read out of bytes of any alignment.
+- **`arnm_clz()`** in `arnm/bitmap.h`, the mirror of `arnm_ctz()`.
+- **`bench_graded_block_pool`**: the churn and growth figures above.
+
 ## 0.8.2 -- 2026-09-15
 
 Two new headers, and nothing else moves: code built against 0.8.1 builds and behaves the same.

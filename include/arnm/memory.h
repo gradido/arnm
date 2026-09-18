@@ -145,8 +145,9 @@ void arnm_reset(arnm *memory);
  * @brief Give the memory back to the host, keep the handle.
  *
  * An owned arena frees its block; a borrowed one simply lets go, leaving the caller's buffer
- * untouched. A chain releases every arena it opened and its descriptor vector. The handle
- * itself survives and can be initialized again.
+ * untouched. A chain releases every arena it opened and its descriptor vector. Afterwards the
+ * handle holds nothing: a local one may go out of scope, or be initialized again. A chain's
+ * descriptor itself stays until arnm_destroy().
  *
  * @param[in,out] memory Allocator to empty out; NULL is a no-op.
  * @warning Every block ever handed out by @p memory is dangling afterwards.

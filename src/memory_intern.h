@@ -87,6 +87,11 @@ static inline bool is_multi_arena(const arnm_intern *memory) {
   return ARNM_ALLOC_TYPE_MULTI_ARENA_DYNAMIC == type || ARNM_ALLOC_TYPE_MULTI_ARENA_FIXED == type;
 }
 
+/** The host: no handle, or one still zeroed. */
+static inline bool is_default_alloc(const arnm_intern *memory) {
+  return !memory || ARNM_ALLOC_TYPE_DEFAULT == memory->allocation_type;
+}
+
 /**
  * Has an arena's remainder fallen to where its chain writes it off?
  *

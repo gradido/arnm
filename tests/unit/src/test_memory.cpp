@@ -727,6 +727,14 @@ TEST(MemoryTest, ReallocFromNullAllocates) {
   arnm_release(&mem);
 }
 
+TEST(MemoryTest, ReallocFromNullWithEqualSizesStillAllocatesOnTheHost) {
+  // equal sizes are "nothing to do" only for a buffer that exists; realloc(NULL, n) is malloc(n)
+  uint8_t *heap = nullptr;
+  EXPECT_EQ(arnm_realloc(&heap, 32, 32, nullptr), ARNM_SUCCESS);
+  ASSERT_TRUE(heap);
+  EXPECT_EQ(arnm_free(heap, 32, nullptr), ARNM_SUCCESS);
+}
+
 TEST(MemoryTest, ReallocArenaTailShrinkReclaims) {
   arnm mem{};
   ASSERT_EQ(arnm_init_arena(&mem, 256), ARNM_SUCCESS);
