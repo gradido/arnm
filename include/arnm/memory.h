@@ -157,9 +157,8 @@ void arnm_reset(arnm *memory);
  * @brief Give the memory back to the host, keep the handle.
  *
  * An owned arena frees its block; a borrowed one simply lets go, leaving the caller's buffer
- * untouched. A chain releases every arena it opened and its descriptor vector. A graded block
- * pool hands every block on its free lists back to the allocator it draws from; the blocks still
- * out stay the caller's. The handle itself survives and can be initialized again.
+ * untouched. A chain releases every arena it opened and its descriptor vector.
+ * The handle itself survives and can be initialized again.
  *
  * @param[in,out] memory Allocator to empty out; NULL is a no-op.
  * @warning Arena and chain: every block handed out is dangling afterwards. Graded block pool:

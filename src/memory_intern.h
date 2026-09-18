@@ -45,7 +45,6 @@ typedef struct arnm_multi_arena {
   uint32_t first_open;      /**< Earliest arena that may still have room; only walks forward. */
 } arnm_multi_arena;
 
-
 /**
  * @brief The layout behind the opaque @ref arnm -- one of three shapes, told apart by @c
  *        allocation_type.

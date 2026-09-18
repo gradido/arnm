@@ -30,6 +30,7 @@ static inline uint16_t arnm_pow2_u16(uint8_t exponent) {
  * For example: 13 -> 16, 16 -> 16, 17 -> 32.
  *
  * @p value must be > 0 and <= 2^31.
+ * for values > 2^31 0 will be returned
  */
 static inline uint32_t arnm_ceil_power_of_two(uint32_t value) {
   value--;
@@ -47,10 +48,9 @@ static inline uint32_t arnm_ceil_power_of_two(uint32_t value) {
  * For example: 13 -> 4, because 16 is the smallest power of two >= 13
  * and 16 = 2^4.
  *
- * @p value must be > 0 and <= 2^31.
  */
 static inline uint8_t arnm_log2_power_of_two(uint32_t value) {
-  return (uint8_t)arnm_ctz(arnm_ceil_power_of_two(value));
+  return value <= 1u ? 0u : (uint8_t)(32u - (uint32_t)arnm_clz(value - 1u));
 }
 
 /**
@@ -66,4 +66,4 @@ static inline bool arnm_is_power_of_two(uint32_t size) {
 }
 #endif
 
-#endif //ARNM_BIT_H
+#endif // ARNM_BIT_H

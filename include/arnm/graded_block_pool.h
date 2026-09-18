@@ -153,19 +153,20 @@ arnm_result arnm_graded_block_pool_options_validate(arnm_graded_block_pool_optio
  * @note Give it back with @ref arnm_destroy(), naming the same @p source.
  * @whisper Basins dug in a row, the smallest first, the stream not yet let in
  */
-arnm_graded_block_pool *arnm_create_graded_block_pool(arnm_graded_block_pool_options *options, arnm *source);
+arnm_graded_block_pool *arnm_create_graded_block_pool(
+    arnm_graded_block_pool_options *options, arnm *source
+);
 
-arnm_result arnm_init_graded_block_pool(arnm_graded_block_pool* pool, arnm_graded_block_pool_options *options, arnm *source);
+arnm_result arnm_init_graded_block_pool(
+    arnm_graded_block_pool *pool, arnm_graded_block_pool_options *options, arnm *source
+);
 
 arnm_result arnm_graded_block_pool_alloc(
     arnm_graded_block_pool *pool, uint8_t **buffer, uint32_t aligned_size
 );
 
 arnm_result arnm_graded_block_pool_realloc(
-    arnm_graded_block_pool *pool,
-    uint8_t **buffer,
-    uint32_t old_size,
-    uint32_t new_size
+    arnm_graded_block_pool *pool, uint8_t **buffer, uint32_t old_size, uint32_t new_size
 );
 
 arnm_result arnm_graded_block_pool_free(
@@ -174,9 +175,9 @@ arnm_result arnm_graded_block_pool_free(
 
 void arnm_graded_block_pool_reset(arnm_graded_block_pool *pool);
 
-void arnm_graded_block_pool_release(arnm_graded_block_pool *pool);
+void arnm_graded_block_pool_release(arnm_graded_block_pool *pool, arnm *source);
 
-arnm_result arnm_graded_block_pool_destroy(arnm_graded_block_pool *pool, arnm *allocator)
+arnm_result arnm_graded_block_pool_destroy(arnm_graded_block_pool *pool, arnm *allocator);
 
 /** @} */
 

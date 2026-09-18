@@ -70,6 +70,18 @@ static inline int arnm_ctz(unsigned int bitmap) {
 #endif
 }
 
+// a value of 0 for bitmap is undefined behaviour
+static inline int arnm_clz(unsigned int bitmap) {
+#if defined(_MSC_VER)
+  unsigned long index;
+  _BitScanReverse(&index, (unsigned long)bitmap);
+  return 31 - (int)index;
+#else
+  return __builtin_clz(bitmap);
+#endif
+}
+
+
 /**
  * @brief The position of the lowest set bit of a 64 bit mask.
  *

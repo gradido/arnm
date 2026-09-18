@@ -85,9 +85,7 @@ arnm_result arnm_destroy(arnm *m, arnm *allocator) {
   arnm_release(m);
   arnm_intern *memory = (arnm_intern *)m;
   uint32_t allocation_size = sizeof(arnm);
-  if (is_multi_arena(memory)) {
-    allocation_size = sizeof(arnm) + sizeof(arnm_multi_arena);
-  }
+  if (is_multi_arena(memory)) { allocation_size = sizeof(arnm) + sizeof(arnm_multi_arena); }
   return arnm_free((uint8_t *)memory, allocation_size, allocator);
 }
 // **************** arena functions *******************************************************
@@ -404,7 +402,6 @@ arnm_result arnm_multi_arena_measure(const arnm *m, arnm_multi_arena_stats *out)
   return ARNM_SUCCESS;
 }
 
-
 // ********** manage memory allocations with data ptr and size explicit *******************
 
 static arnm_result multi_arena_alloc(uint8_t **buffer, uint32_t aligned_size, arnm_multi_arena *m);
@@ -473,7 +470,6 @@ static arnm_result multi_arena_alloc(uint8_t **buffer, uint32_t aligned_size, ar
   return arena_alloc_aligned(buffer, aligned_size, arnm_bvec_back(&m->arenas));
 }
 
-
 arnm_result arnm_alloc(uint8_t **buffer, uint32_t size, arnm *m) {
   if (!buffer) { return ARNM_ERROR_NULL_POINTER; }
   if (!size) { return ARNM_ERROR_INVALID_PARAM; }
@@ -494,7 +490,6 @@ arnm_result arnm_alloc(uint8_t **buffer, uint32_t size, arnm *m) {
 
 arnm_result arnm_realloc(uint8_t **buffer, uint32_t old_size, uint32_t new_size, arnm *m) {
   if (!buffer) { return ARNM_ERROR_NULL_POINTER; }
-  if (!*buffer) { return arnm_alloc(buffer, new_size, m); }
 
   arnm_intern *memory = (arnm_intern *)m;
 
@@ -601,7 +596,6 @@ arnm_result arnm_clone(uint8_t **dst_buffer, const uint8_t *src, uint32_t size, 
   memcpy(*dst_buffer, src, size);
   return ARNM_SUCCESS;
 }
-
 
 arnm_result arnm_free(uint8_t *buffer, uint32_t size, arnm *m) {
   arnm_intern *memory = (arnm_intern *)m;

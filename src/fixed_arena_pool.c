@@ -53,6 +53,15 @@ static void forget_everything(arnm_fixed_arena_pool *pool) {
   pool->arena_count = 0;
   pool->acquired_count = 0;
 }
+static inline arnm_result calculate_total_reserved_memory_size(uint32_t* out_size, uint16_t arena_count, uint32_t aligned_arena_capacity) {
+  uint32_t arena_count_u32 = (uint32_t)arena_count;
+  uint32_t descriptors_size = (uint32_t)sizeof(arnm) * arena_count_u32;
+  if ((ARNM_MAX_ALLOC_SIZE - descriptors_size) / arena_count_u32 < aligned_arena_capacity) {
+    return ARNM_ERROR_ARITHMETIC_OVERFLOW;
+  }
+  *out_size = ((uint32_t)sizeof(arnm) + aligned_arena_capacity) * arena_count_u32;
+  return ARNM_SUCCESS;
+}
 
 // ********** manage the pool itself *******************
 
@@ -62,19 +71,16 @@ arnm_result arnm_fixed_arena_pool_init(
   if (!pool) { return ARNM_ERROR_NULL_POINTER; }
   if (!arena_capacity || !arena_count) { return ARNM_ERROR_INVALID_PARAM; }
 
-  uint32_t capacity = arnm_align8_u32(arena_capacity);
-  if (!capacity) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
+  uint32_t aligned_arena_capacity = arnm_align8_u32(arena_capacity);
+  if (!aligned_arena_capacity) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
 
-  uint32_t arena_count_u32 = (uint32_t)arena_count;
-  uint32_t descriptors_size = (uint32_t)sizeof(arnm) * arena_count_u32;
-  if ((ARNM_MAX_ALLOC_SIZE - descriptors_size) / arena_count_u32 < capacity) {
-    return ARNM_ERROR_ARITHMETIC_OVERFLOW;
-  }
+  uint32_t total_memory_size = 0;
+  arnm_result result = calculate_total_reserved_memory_size(&total_memory_size, arena_count, aligned_arena_capacity);
+  if (ARNM_SUCCESS != result) { return result; }
 
-  uint32_t total = ((uint32_t)sizeof(arnm) + capacity) * arena_count_u32;
   // one block for everything, so one call gets it and one call gives it back
   uint8_t *block = NULL;
-  arnm_result result = arnm_alloc(&block, total, source);
+  result = arnm_alloc(&block, total_memory_size, source);
   if (ARNM_SUCCESS != result) { return result; }
 
   arnm *descriptors = (arnm *)block;
@@ -86,13 +92,13 @@ arnm_result arnm_fixed_arena_pool_init(
   arnm *head = NULL;
   for (uint32_t i = arena_count; i > 0; --i) {
     arnm *arena = &descriptors[i - 1];
-    uint8_t *buffer = buffers + (uint64_t)(i - 1) * capacity;
+    uint8_t *buffer = buffers + (uint64_t)(i - 1) * aligned_arena_capacity;
 
-    result = arnm_init_arena_borrow(arena, buffer, capacity);
+    result = arnm_init_arena_borrow(arena, buffer, aligned_arena_capacity);
     if (ARNM_SUCCESS != result) {
       // unreachable with a layout this file laid out itself; handled rather than assumed, and
       // the block goes straight back so a failure leaves nothing behind
-      arnm_free(block, (uint32_t)total, source);
+      arnm_free(block, total_memory_size, source);
       return result;
     }
     arnm_arena_set_next_free(arena, head);
@@ -103,7 +109,7 @@ arnm_result arnm_fixed_arena_pool_init(
   // leaves whatever the caller had
   pool->arenas = descriptors;
   pool->free_head = head;
-  pool->arena_capacity = capacity;
+  pool->arena_capacity = aligned_arena_capacity;
   pool->arena_count = arena_count;
   pool->acquired_count = 0;
   return ARNM_SUCCESS;
@@ -136,13 +142,15 @@ arnm_result arnm_fixed_arena_pool_release(arnm_fixed_arena_pool *pool, arnm *sou
 
   // the size is recomputed from what the pool holds, the allocator comes from the caller -- the
   // same split every free in this library uses, and the same duty it puts on the caller
-  const uint32_t total = (uint32_t)block_bytes(pool);
+  uint32_t total_memory_size = 0;
+  arnm_result result = calculate_total_reserved_memory_size(&total_memory_size, pool->arena_count, pool->arena_capacity);
+  if (ARNM_SUCCESS != result) { return ARNM_ERROR_INVALID_STATE; }
   uint8_t *block = (uint8_t *)pool->arenas;
 
   // emptied first: whatever the source answers, the pool has let go of the block and must not
   // be left pointing at it
   forget_everything(pool);
-  return arnm_free(block, total, source);
+  return arnm_free(block, total_memory_size, source);
 }
 
 arnm_result arnm_fixed_arena_pool_destroy(
@@ -151,14 +159,14 @@ arnm_result arnm_fixed_arena_pool_destroy(
   // nothing to give back is not a failure
   if (!pool) { return ARNM_SUCCESS; }
 
-  const arnm_result released = arnm_fixed_arena_pool_release(pool, source);
+  const arnm_result release_result = arnm_fixed_arena_pool_release(pool, source);
   // the descriptor outlives a refusal on purpose: the caller still has arenas to return and
   // needs the pool to return them to
-  if (ARNM_ERROR_RESOURCE_IN_USE == released) { return released; }
+  if (ARNM_ERROR_RESOURCE_IN_USE == release_result) { return release_result; }
 
-  const arnm_result freed = arnm_free((uint8_t *)pool, sizeof(arnm_fixed_arena_pool), allocator);
+  const arnm_result free_result = arnm_free((uint8_t *)pool, sizeof(arnm_fixed_arena_pool), allocator);
   // a warning from either step is worth more to the caller than the success of the other
-  return (ARNM_SUCCESS != released) ? released : freed;
+  return (ARNM_SUCCESS != release_result) ? release_result : free_result;
 }
 
 uint32_t arnm_fixed_arena_pool_reserved(const arnm_fixed_arena_pool *pool) {

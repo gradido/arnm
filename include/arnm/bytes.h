@@ -19,4 +19,4 @@ static inline uint8_t *arnm_load_ptr(const uint8_t *data) {
 }
 #endif
 
-#endif //ARNM_BYTES_H
+#endif // ARNM_BYTES_H
