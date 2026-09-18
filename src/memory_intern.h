@@ -9,7 +9,6 @@
  */
 
 #include "arnm/bucket_vector.h"
-#include "arnm/graded_block_pool.h"
 #include "arnm/memory.h"
 
 #include <assert.h>

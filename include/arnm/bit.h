@@ -1,7 +1,7 @@
 #ifndef ARNM_BIT_H
 #define ARNM_BIT_H
 
-#include "bitmap.h"
+#include "arnm/bitmap.h"
 
 #include <stdbool.h>
 #include <stddef.h>

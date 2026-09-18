@@ -6,9 +6,7 @@
 #include "arnm/multi_arena.h"
 #include "arnm/result.h"
 
-#include <stdbool.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
 
 /*
@@ -35,11 +33,10 @@ typedef struct graded_block_pool_request {
 static arnm_result graded_pool_classify_request(
     graded_block_pool_request *state, const arnm_graded_block_pool *pool, uint32_t size
 ) {
-  if (!state || !pool) { return ARNM_ERROR_NULL_POINTER; }
   if (!size) { return ARNM_ERROR_INVALID_PARAM; }
 
   uint32_t aligned_bytes = arnm_align8_u32(size);
-  if ((size && !aligned_bytes)) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
+  if (!aligned_bytes) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
 
   uint8_t grade_exp = arnm_log2_power_of_two(aligned_bytes);
   // if requested memory size exceed biggest grade
@@ -81,7 +78,6 @@ arnm_result arnm_graded_block_pool_init(
   arnm_multi_arena_options multi_arena_options = {0};
   uint32_t max_grade_size = arnm_pow2_u32(options->max_block_log2);
   uint64_t full_capacity = (uint64_t)max_grade_size * (uint64_t)options->alloc_arena_capacity;
-  multi_arena_options.arena_capacity = max_grade_size * options->alloc_arena_capacity;
   // detect overflow
   if (full_capacity > ARNM_MAX_ALLOC_SIZE) {
     multi_arena_options.arena_capacity = ARNM_MAX_ALLOC_SIZE;
@@ -196,7 +192,7 @@ void arnm_graded_block_pool_release(arnm_graded_block_pool *pool, arnm *source) 
 }
 
 arnm_result arnm_graded_block_pool_destroy(arnm_graded_block_pool *pool, arnm *source) {
-  if (!pool) { return ARNM_ERROR_NULL_POINTER; }
+  if (!pool) { return ARNM_SUCCESS; }
   arnm_result result = arnm_destroy(pool->source, source);
   if (ARNM_SUCCESS != result) { return result; }
   return arnm_free((uint8_t *)pool, sizeof(arnm_graded_block_pool), source);

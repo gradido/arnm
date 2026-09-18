@@ -1,8 +1,9 @@
 #ifndef ARNM_BYTES_H
 #define ARNM_BYTES_H
 
-#include <memory.h>
+#include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {

@@ -161,7 +161,7 @@ arnm_result arnm_graded_block_pool_init(
 );
 
 arnm_result arnm_graded_block_pool_alloc(
-    arnm_graded_block_pool *pool, uint8_t **buffer, uint32_t aligned_size
+    arnm_graded_block_pool *pool, uint8_t **buffer, uint32_t size
 );
 
 /**
