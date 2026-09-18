@@ -52,7 +52,7 @@ allocator is on no path this library takes.
 | `arnm/byte_buffer.h` | one block filled from the front, records packed back to back; handed to a stream in one piece |
 | `arnm/multi_arena.h` | a chain of arenas that opens another one instead of running dry |
 | `arnm/fixed_arena_pool.h` | a fixed set of equal sized arenas, lent out and returned; the peak is known at init |
-| `arnm/graded_block_pool.h` | blocks in power of two grades over an allocator you name; a freed block goes on a free list and serves the next request of its grade, so what a growing container outgrows in an arena is used again |
+| `arnm/graded_block_pool.h` | blocks in power of two grades on a free list per grade, from a chain of arenas the pool owns; what a growing container outgrows serves its next request instead of staying behind in an arena |
 | `arnm/bucket_vector.h` | growing sequence with stable element addresses; no copy on growth |
 | `arnm/hash.h` | a fast hash and SipHash-1-3, both over every byte and inline, so a length known at compile time unrolls the loops |
 | `arnm/key_map.h` | fixed size keys to dense ids 0, 1, 2, ...; linear probing over a hash of every key byte -- a fast one, or SipHash under your key -- the keys stored once beside the table; `ARNM_KEY_MAP_DEFINE` inlines the lookup for one key size |

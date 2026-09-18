@@ -10,26 +10,31 @@
 #include <string.h>
 
 /*
- * A pool is one allocation from its source:
+ * A pool is a plain struct and a chain of arenas it owns:
  *
- *   [ arnm handle, 32 bytes ][ arnm_graded_block_pool_state ]
+ *   arnm_graded_block_pool { source -> chain, free_head[grade], lent_bytes, cached_bytes, ... }
  *
- * The handle's union points at the state behind it, the way a chain's points at its
- * arnm_multi_arena. Every block lives in the source; the state only holds the head of one free
- * list per grade, and a free block holds the link to the next in its first 8 bytes. Nothing is
- * kept per block, so the pool's own size does not grow with what it hands out.
+ * Every block lives in the chain. The struct holds the head of one free list per grade, and a
+ * free block holds the link to the next in its first 8 bytes, so nothing is kept per block and
+ * the struct does not grow with what it hands out. A block never goes back to the chain: the
+ * chain could only take back its tail, and the free list serves the next request better.
  *
  * The counters are uint64_t because they sum blocks: each block fits a uint32_t, a pool full of
  * them need not.
  */
 
-// ************* graded pool functions ***************************************************
+// ********** grades *******************
 
+/** Where a size lands: which free list, and how large the block on it is. */
 typedef struct graded_block_pool_request {
   uint32_t grade_bytes;
   uint8_t grade_index;
 } graded_block_pool_request;
 
+/*
+ * The one place a size becomes a grade, shared by alloc and free so that both always agree on
+ * the list. No NULL checks: every caller has made them already, and this runs on every call.
+ */
 static arnm_result graded_pool_classify_request(
     graded_block_pool_request *state, const arnm_graded_block_pool *pool, uint32_t size
 ) {
@@ -39,14 +44,14 @@ static arnm_result graded_pool_classify_request(
   if (!aligned_bytes) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
 
   uint8_t grade_exp = arnm_log2_power_of_two(aligned_bytes);
-  // if requested memory size exceed biggest grade
+  // 2^31 and above land on 32, past every grade a pool can have
   if (grade_exp > pool->max_log2) { return ARNM_ERROR_RESOURCE_SIZE_EXCEED; }
   state->grade_index = grade_exp < pool->min_log2 ? 0 : grade_exp - pool->min_log2;
   state->grade_bytes = arnm_pow2_u32(grade_exp < pool->min_log2 ? pool->min_log2 : grade_exp);
   return ARNM_SUCCESS;
 }
 
-// ********** manage the allocator itself *******************
+// ********** manage the pool itself *******************
 
 arnm_result arnm_graded_block_pool_options_validate(arnm_graded_block_pool_options *options) {
   if (!options) { return ARNM_ERROR_NULL_POINTER; }
@@ -78,15 +83,18 @@ arnm_result arnm_graded_block_pool_init(
   arnm_multi_arena_options multi_arena_options = {0};
   uint32_t max_grade_size = arnm_pow2_u32(options->max_block_log2);
   uint64_t full_capacity = (uint64_t)max_grade_size * (uint64_t)options->alloc_arena_capacity;
-  // detect overflow
+  // capped rather than refused: a chain opens an arena of exactly the request's size when one
+  // does not fit, so even the largest grade is still served
   if (full_capacity > ARNM_MAX_ALLOC_SIZE) {
     multi_arena_options.arena_capacity = ARNM_MAX_ALLOC_SIZE;
   } else {
     multi_arena_options.arena_capacity = (uint32_t)full_capacity;
   }
+  // an arena with less than the smallest grade left can serve nothing more
   multi_arena_options.full_remaining = arnm_pow2_u32(options->min_block_log2) - 1u;
   arnm *multi_arena = arnm_create_multi_arena(&multi_arena_options, source);
   if (!multi_arena) { return ARNM_ERROR_OUT_OF_MEMORY; }
+  // written only now, so a failure above leaves the caller's struct as it was
   memset(pool, 0, sizeof(arnm_graded_block_pool));
   pool->source = multi_arena;
   pool->min_log2 = options->min_block_log2;
@@ -100,7 +108,7 @@ arnm_graded_block_pool *arnm_graded_block_pool_create(
 ) {
   if (ARNM_SUCCESS != arnm_graded_block_pool_options_validate(options)) { return NULL; }
   uint8_t *block = NULL;
-  const size_t allocation_capacity = sizeof(arnm_graded_block_pool);
+  const uint32_t allocation_capacity = (uint32_t)sizeof(arnm_graded_block_pool);
   if (ARNM_SUCCESS != arnm_alloc(&block, allocation_capacity, source)) { return NULL; }
   arnm_graded_block_pool *pool = (arnm_graded_block_pool *)(void *)block;
   if (ARNM_SUCCESS != arnm_graded_block_pool_init(pool, options, source)) {
@@ -110,7 +118,7 @@ arnm_graded_block_pool *arnm_graded_block_pool_create(
   return pool;
 }
 
-// ********** manage memory allocations with data ptr and size explicit *******************
+// ********** blocks *******************
 
 arnm_result arnm_graded_block_pool_alloc(
     arnm_graded_block_pool *pool, uint8_t **buffer, uint32_t size
@@ -138,8 +146,7 @@ arnm_result arnm_graded_block_pool_realloc(
     arnm_graded_block_pool *pool, uint8_t **buffer, uint32_t old_size, uint32_t new_size
 ) {
   if (!buffer) { return ARNM_ERROR_NULL_POINTER; }
-  // another grade, or across the largest one: a new block, the contents, the old block back.
-  // The old block is checked above, so its free below cannot be refused by the counters.
+  // always a new block, even within one grade: see the header for why the hot path wins
   uint8_t *moved = NULL;
   arnm_result result = arnm_graded_block_pool_alloc(pool, &moved, new_size);
   if (ARNM_SUCCESS != result) { return result; }
@@ -147,6 +154,7 @@ arnm_result arnm_graded_block_pool_realloc(
   if (*buffer && old_size) {
     memcpy(moved, *buffer, old_size < new_size ? old_size : new_size);
     result = arnm_graded_block_pool_free(pool, *buffer, old_size);
+    // the move happened; the old block is simply not ours to take back
     if (ARNM_SUCCESS != result) {
       *buffer = moved;
       return ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED;
@@ -167,6 +175,7 @@ arnm_result arnm_graded_block_pool_free(
   graded_block_pool_request request;
   arnm_result result = graded_pool_classify_request(&request, pool, size);
   if (result != ARNM_SUCCESS) { return result; }
+  // the plainest double free: more coming back than is out
   if (pool->lent_bytes < request.grade_bytes) { return ARNM_ERROR_INVALID_STATE; }
 
   memcpy(buffer, &pool->free_head[request.grade_index], sizeof(uint8_t *));
@@ -178,6 +187,7 @@ arnm_result arnm_graded_block_pool_free(
 
 void arnm_graded_block_pool_reset(arnm_graded_block_pool *pool) {
   if (!pool) { return; }
+  // the chain keeps its arenas, so the free lists would point into ground that is now open
   arnm_reset(pool->source);
   memset(pool->free_head, 0, sizeof(pool->free_head));
   pool->lent_bytes = 0;

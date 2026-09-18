@@ -45,7 +45,7 @@ typedef struct arnm_multi_arena {
 } arnm_multi_arena;
 
 /**
- * @brief The layout behind the opaque @ref arnm -- one of three shapes, told apart by @c
+ * @brief The layout behind the opaque @ref arnm -- one of two shapes, told apart by @c
  *        allocation_type.
  *
  * A single arena carries its block and the index into it; a chain carries only a pointer to
@@ -87,6 +87,7 @@ static inline bool is_multi_arena(const arnm_intern *memory) {
   return ARNM_ALLOC_TYPE_MULTI_ARENA_DYNAMIC == type || ARNM_ALLOC_TYPE_MULTI_ARENA_FIXED == type;
 }
 
+/** The host: no handle, or one still zeroed. */
 static inline bool is_default_alloc(const arnm_intern *memory) {
   return !memory || ARNM_ALLOC_TYPE_DEFAULT == memory->allocation_type;
 }

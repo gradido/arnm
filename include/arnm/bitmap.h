@@ -70,7 +70,15 @@ static inline int arnm_ctz(unsigned int bitmap) {
 #endif
 }
 
-// a value of 0 for bitmap is undefined behaviour
+/**
+ * @brief The number of zeros above the highest set bit of a 32 bit mask.
+ *
+ * The mirror of @ref arnm_ctz(): 31 minus the answer is the index of the highest set bit.
+ *
+ * @param[in] bitmap Mask to scan; must have at least one bit set.
+ * @return 0 to 31. Undefined where @p bitmap is 0, for the same reason as @ref arnm_ctz().
+ * @whisper The last light in a row of dark windows
+ */
 static inline int arnm_clz(unsigned int bitmap) {
 #if defined(_MSC_VER)
   unsigned long index;

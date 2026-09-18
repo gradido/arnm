@@ -22,41 +22,40 @@ what the commits show rather than what was noted at the time.
 
 ## Unreleased
 
-A new kind of handle. Nothing that existed changes what it does: code built against 0.8.2 builds
-and behaves the same, so by the rule above this is a patch.
+New headers only. Nothing that existed changes what it does: code built against 0.8.2 builds and
+behaves the same, so by the rule above this is a patch.
 
 ### Added
 
 - **`arnm/graded_block_pool.h`: blocks in power of two grades, reused once given back.**
-  `arnm_create_graded_block_pool(&options, source)` returns an ordinary `arnm *` whose
-  `arnm_alloc()` rounds a request up to 8 and then to the next grade -- 16 bytes to 1 MiB unless
-  the options say otherwise -- and takes the block from that grade's free list, or from `source`
-  when the list is empty. `arnm_free()` puts the block back on the list; the link lives in the
-  free block's first 8 bytes, so nothing is stored per block. `arnm_realloc()` keeps a block
-  that its grade still fits and moves it otherwise.
+  A pool is its own struct with its own calls -- `arnm_graded_block_pool_init()` /
+  `_release()` or `_create()` / `_destroy()`, then `_alloc()`, `_realloc()` and `_free()` -- and
+  not an `arnm` handle, so no other allocator pays a branch for it. A request is rounded up to 8
+  and then to the next grade, 16 bytes to 1 MiB unless the options say otherwise, and the block
+  comes from that grade's free list, or new from a chain of arenas the pool owns. `_free()` puts
+  it back on the list; the link lives in the free block's first 8 bytes, so nothing is stored
+  per block. A request past the largest grade is refused with `ARNM_ERROR_RESOURCE_SIZE_EXCEED`.
+  `_realloc()` always moves, also within a grade: the pool serves containers that grow a grade at
+  a time, and the check would cost every call. The source named at init carries only the
+  bookkeeping -- the chain's descriptor and its list of arenas, and with `_create()` the pool
+  struct; the arenas themselves come from the host, `alloc_arena_capacity` blocks of the largest
+  grade each. `_reset()` keeps the arenas and ends every block, `_release()` gives everything
+  back. `lent_bytes` and `cached_bytes` in the struct are the measure; a free the lent counter
+  cannot account for -- the plain double free -- is refused with `ARNM_ERROR_INVALID_STATE`.
 
   What it is for: an arena takes back only its newest allocation, so every block a growing
-  container outgrows stays behind in it. Over a pool the next request of that grade gets it back
-  wherever it lies. Five key maps of 200000 keys built and freed one after another took 47.5 MiB
-  of arena straight and 17.5 MiB through a pool; a working set of 4096 blocks replaced 4 million
-  times stayed within 11.5 MiB, where the arena alone had used 498 MiB after a sixteenth of the
-  steps. Against malloc and free on the same churn a replacement cost 10 ns instead of 77 ns.
-
-  The source is borrowed. A request past the largest grade goes straight to it, and so does its
-  free, whose answer comes back unchanged. `arnm_release()` hands every cached block back to the
-  source; `arnm_destroy()` releases and returns the pool's own bytes. `arnm_reset()` over an
-  arena or a chain forgets the free lists and leaves the source alone, whose own reset collects
-  the blocks; over the host or another pool, where forgetting would lose them, it does what
-  `arnm_release()` does -- a reset that leaks by design would only punish the wrong call. `arnm_graded_block_pool_measure()` reads the bytes
-  lent out, cached and oversized. A free the counters cannot account for -- the plain double
-  free -- is refused with `ARNM_ERROR_INVALID_STATE`.
+  container outgrows stays behind in it. 4096 containers grown from 16 bytes to 8 KiB in turn,
+  eight rounds, held 64 MiB through a pool and 511 MiB on an arena. A working set of 4096 blocks
+  of 1 to 4096 bytes replaced 4 million times stayed within 12 MiB of pool, where an arena alone
+  had used 498 MiB after a sixteenth of the steps; a replacement cost 10 ns instead of the 79 ns
+  of malloc and free.
+- **`arnm/bit.h`**: `arnm_pow2_u32()`, `arnm_pow2_u16()`, `arnm_mul_pow2_u32()`,
+  `arnm_ceil_power_of_two()`, `arnm_log2_power_of_two()` and `arnm_is_power_of_two()`, the power of
+  two arithmetic that bucket vector, graded arena pool and graded block pool used to spell out
+  each on its own.
+- **`arnm/bytes.h`**: `arnm_load_ptr()`, a pointer read out of bytes of any alignment.
+- **`arnm_clz()`** in `arnm/bitmap.h`, the mirror of `arnm_ctz()`.
 - **`bench_graded_block_pool`**: the churn and growth figures above.
-
-### Changed
-
-- `arnm_alloc_type` in the private `src/memory_intern.h` gains `ARNM_ALLOC_TYPE_GRADED_BLOCK_POOL`
-  past the arena range, and the handle's union a pointer to the pool's state. `arnm_is_arena()`
-  answers false for a pool, so `arnm_bvec` and the JSON writer treat it as they treat the host.
 
 ## 0.8.2 -- 2026-09-15
 

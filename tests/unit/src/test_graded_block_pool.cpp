@@ -1,7 +1,5 @@
 #include "arnm/arena.h"
-#include "arnm/bucket_vector.h"
 #include "arnm/graded_block_pool.h"
-#include "arnm/key_map.h"
 #include "arnm/memory.h"
 #include "arnm/multi_arena.h"
 #include "arnm/result.h"
@@ -15,9 +13,10 @@
 #include <vector>
 
 /*
- * The graded block pool as a handle: created over a source, then driven only through the calls
- * every allocator answers. Most tests put it over a borrowed arena, because an arena's remaining
- * bytes say exactly what the pool took from its source and when -- which is what reuse means.
+ * The graded block pool: its own calls, its own chain. Blocks come from the chain the pool opens
+ * for itself, so the chain's measure says what the pool took and when -- which is what reuse
+ * means. The source named at init only carries the bookkeeping; a borrowed arena as that source
+ * shows how little.
  */
 
 namespace {
@@ -37,33 +36,45 @@ struct Arena {
   arnm arena{};
 };
 
-arnm *MakePool(arnm *source, uint8_t min_log2 = 0, uint8_t max_log2 = 0) {
-  arnm_graded_block_pool_options options{};
-  options.min_block_log2 = min_log2;
-  options.max_block_log2 = max_log2;
-  return arnm_graded_block_pool_create(&options, source);
-}
-
-arnm_graded_block_pool_stats Stats(const arnm *pool) {
-  arnm_graded_block_pool_stats stats{};
-  EXPECT_EQ(arnm_graded_block_pool_measure(pool, &stats), ARNM_SUCCESS);
-  return stats;
-}
-
-const uint32_t kPoolBytes = [] {
-  // what create takes from the source: the handle and the state behind it, rounded to 8
-  Arena probe(4096);
-  const uint32_t before = probe.Remaining();
-  arnm *pool = MakePool(&probe.arena);
-  const uint32_t taken = before - probe.Remaining();
-  arnm_destroy(pool, &probe.arena);
-  return taken;
-}();
+/** A pool on the stack, released when the test leaves -- the init/release pair as a scope. */
+struct Pool {
+  explicit Pool(
+      uint8_t min_log2 = 0,
+      uint8_t max_log2 = 0,
+      uint8_t arena_capacity = 0,
+      arnm *source_ = nullptr
+  )
+      : source(source_) {
+    arnm_graded_block_pool_options options{};
+    options.min_block_log2 = min_log2;
+    options.max_block_log2 = max_log2;
+    options.alloc_arena_capacity = arena_capacity;
+    EXPECT_EQ(arnm_graded_block_pool_init(&pool, &options, source), ARNM_SUCCESS);
+  }
+  ~Pool() {
+    arnm_graded_block_pool_release(&pool, source);
+  }
+  uint8_t *Alloc(uint32_t size) {
+    uint8_t *block = nullptr;
+    EXPECT_EQ(arnm_graded_block_pool_alloc(&pool, &block, size), ARNM_SUCCESS) << size;
+    return block;
+  }
+  void Free(uint8_t *block, uint32_t size) {
+    EXPECT_EQ(arnm_graded_block_pool_free(&pool, block, size), ARNM_SUCCESS) << size;
+  }
+  arnm_multi_arena_stats Chain() const {
+    arnm_multi_arena_stats stats{};
+    EXPECT_EQ(arnm_multi_arena_measure(pool.source, &stats), ARNM_SUCCESS);
+    return stats;
+  }
+  arnm_graded_block_pool pool{};
+  arnm *source;
+};
 
 } // namespace
 
 // ---------------------------------------------------------------------------
-// creation
+// setting up
 // ---------------------------------------------------------------------------
 
 TEST(GradedBlockPool, OptionsTakeDefaultsAndRefuseWhatCannotBe) {
@@ -71,6 +82,7 @@ TEST(GradedBlockPool, OptionsTakeDefaultsAndRefuseWhatCannotBe) {
   ASSERT_EQ(arnm_graded_block_pool_options_validate(&options), ARNM_SUCCESS);
   EXPECT_EQ(options.min_block_log2, ARNM_GRADED_BLOCK_POOL_DEFAULT_MIN_LOG2);
   EXPECT_EQ(options.max_block_log2, ARNM_GRADED_BLOCK_POOL_DEFAULT_MAX_LOG2);
+  EXPECT_EQ(options.alloc_arena_capacity, ARNM_GRADED_BLOCK_POOL_DEFAULT_ALLOC_ARENA_CAPACITY);
 
   EXPECT_EQ(arnm_graded_block_pool_options_validate(nullptr), ARNM_ERROR_NULL_POINTER);
   for (auto bad : {std::pair<uint8_t, uint8_t>{2, 10}, {3, 32}, {12, 11}}) {
@@ -86,36 +98,65 @@ TEST(GradedBlockPool, OptionsTakeDefaultsAndRefuseWhatCannotBe) {
   EXPECT_EQ(arnm_graded_block_pool_create(nullptr, nullptr), nullptr);
 }
 
-TEST(GradedBlockPool, CreateTakesOnlyItsOwnBytesAndIsNoArena) {
-  Arena source(4096);
-  arnm *pool = MakePool(&source.arena, 5, 12);
-  ASSERT_NE(pool, nullptr);
-  EXPECT_EQ(source.Remaining(), 4096u - kPoolBytes);
-  EXPECT_TRUE(arnm_is_graded_block_pool(pool));
-  EXPECT_FALSE(arnm_is_arena(pool));
-  EXPECT_FALSE(arnm_is_multi_arena(pool));
-  EXPECT_EQ(arnm_arena_remaining(pool), 0u);
-  EXPECT_FALSE(arnm_is_graded_block_pool(&source.arena));
-  EXPECT_FALSE(arnm_is_graded_block_pool(nullptr));
+TEST(GradedBlockPool, InitReadsNothingAndLeavesThePoolAloneOnFailure) {
+  arnm_graded_block_pool pool;
+  std::memset(&pool, 0xab, sizeof(pool));
+  arnm_graded_block_pool garbage;
+  std::memset(&garbage, 0xab, sizeof(garbage));
+  arnm_graded_block_pool_options options{};
 
-  const auto stats = Stats(pool);
-  EXPECT_EQ(stats.lent_bytes, 0u);
-  EXPECT_EQ(stats.cached_bytes, 0u);
-  EXPECT_EQ(stats.oversized_bytes, 0u);
-  EXPECT_EQ(stats.min_block_log2, 5u);
-  EXPECT_EQ(stats.max_block_log2, 12u);
+  // refused: the struct is exactly as it was
+  options.min_block_log2 = 2;
+  EXPECT_EQ(arnm_graded_block_pool_init(&pool, &options, nullptr), ARNM_ERROR_INVALID_PARAM);
+  EXPECT_EQ(std::memcmp(&pool, &garbage, sizeof(pool)), 0);
+  EXPECT_EQ(arnm_graded_block_pool_init(nullptr, &options, nullptr), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_graded_block_pool_init(&pool, nullptr, nullptr), ARNM_ERROR_NULL_POINTER);
 
-  arnm_graded_block_pool_stats untouched{};
-  untouched.lent_bytes = 99;
-  EXPECT_EQ(arnm_graded_block_pool_measure(&source.arena, &untouched), ARNM_ERROR_INVALID_STATE);
-  EXPECT_EQ(arnm_graded_block_pool_measure(nullptr, &untouched), ARNM_ERROR_NULL_POINTER);
-  EXPECT_EQ(arnm_graded_block_pool_measure(pool, nullptr), ARNM_ERROR_NULL_POINTER);
-  EXPECT_EQ(untouched.lent_bytes, 99u);
-
-  // a source with no room for the pool itself
+  // a source without room for the chain's descriptor
   Arena tiny(16);
-  EXPECT_EQ(MakePool(&tiny.arena), nullptr);
-  EXPECT_EQ(arnm_destroy(pool, &source.arena), ARNM_SUCCESS);
+  options.min_block_log2 = 0;
+  EXPECT_EQ(arnm_graded_block_pool_init(&pool, &options, &tiny.arena), ARNM_ERROR_OUT_OF_MEMORY);
+  EXPECT_EQ(std::memcmp(&pool, &garbage, sizeof(pool)), 0);
+
+  // garbage in, a working pool out
+  ASSERT_EQ(arnm_graded_block_pool_init(&pool, &options, nullptr), ARNM_SUCCESS);
+  EXPECT_NE(pool.source, nullptr);
+  EXPECT_EQ(pool.lent_bytes, 0u);
+  EXPECT_EQ(pool.cached_bytes, 0u);
+  EXPECT_EQ(pool.min_log2, ARNM_GRADED_BLOCK_POOL_DEFAULT_MIN_LOG2);
+  EXPECT_EQ(pool.max_log2, ARNM_GRADED_BLOCK_POOL_DEFAULT_MAX_LOG2);
+  for (uint8_t *head : pool.free_head) { EXPECT_EQ(head, nullptr); }
+  uint8_t *block = nullptr;
+  EXPECT_EQ(arnm_graded_block_pool_alloc(&pool, &block, 100), ARNM_SUCCESS);
+  arnm_graded_block_pool_release(&pool, nullptr);
+}
+
+TEST(GradedBlockPool, TheSourceCarriesOnlyTheBookkeeping) {
+  Arena source(4096);
+  Pool pool(4, 12, 0, &source.arena);
+  EXPECT_LT(source.Remaining(), 4096u);
+
+  // no arena until the first block; then one, from the host
+  EXPECT_EQ(pool.Chain().arena_count, 0u);
+  pool.Alloc(64);
+  const uint32_t after_first = source.Remaining();
+  EXPECT_EQ(pool.Chain().arena_count, 1u);
+
+  // everything else the first arena holds costs the source nothing more
+  for (int i = 0; i < 100; ++i) { pool.Alloc(64); }
+  EXPECT_EQ(pool.Chain().arena_count, 1u);
+  EXPECT_EQ(source.Remaining(), after_first);
+}
+
+TEST(GradedBlockPool, AnArenaHoldsTheNamedNumberOfLargestBlocks) {
+  Pool pool(4, 12, 2); // arenas of 2 * 4 KiB
+  pool.Alloc(4096);
+  pool.Alloc(4096);
+  EXPECT_EQ(pool.Chain().arena_count, 1u);
+  EXPECT_EQ(pool.Chain().reserved, 8192u);
+  pool.Alloc(4096);
+  EXPECT_EQ(pool.Chain().arena_count, 2u);
+  EXPECT_EQ(pool.Chain().reserved, 16384u);
 }
 
 // ---------------------------------------------------------------------------
@@ -123,420 +164,316 @@ TEST(GradedBlockPool, CreateTakesOnlyItsOwnBytesAndIsNoArena) {
 // ---------------------------------------------------------------------------
 
 TEST(GradedBlockPool, RequestsRoundUpToTheirGrade) {
-  Arena source(1u << 20);
-  arnm *pool = MakePool(&source.arena, 4, 12);
+  Pool pool(4, 12);
   const struct {
     uint32_t request;
     uint32_t block;
-  } cases[] = {{1, 16},    {8, 16},    {16, 16},   {17, 32},     {24, 32},    {33, 64},
-               {100, 128}, {128, 128}, {129, 256}, {1000, 1024}, {4096, 4096}};
+  } cases[] = {{1, 16}, {16, 16}, {17, 32}, {20, 32}, {100, 128}, {129, 256}, {4096, 4096}};
   uint64_t lent = 0;
-  std::vector<std::pair<uint8_t *, uint32_t>> blocks;
   for (const auto &c : cases) {
-    const uint32_t before = source.Remaining();
-    uint8_t *block = nullptr;
-    ASSERT_EQ(arnm_alloc(&block, c.request, pool), ARNM_SUCCESS) << c.request;
-    EXPECT_EQ(reinterpret_cast<uintptr_t>(block) % 8u, 0u);
-    EXPECT_EQ(before - source.Remaining(), c.block) << "request " << c.request;
-    memset(block, 0xa5, c.block); // the whole block is the caller's
+    uint8_t *block = pool.Alloc(c.request);
+    ASSERT_NE(block, nullptr);
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(block) % 8u, 0u) << c.request;
     lent += c.block;
-    EXPECT_EQ(Stats(pool).lent_bytes, lent);
-    blocks.push_back({block, c.request});
+    EXPECT_EQ(pool.pool.lent_bytes, lent) << c.request;
+    // the whole grade is the caller's to write
+    std::memset(block, 0x5a, c.block);
   }
-  for (const auto &[block, request] : blocks) {
-    ASSERT_EQ(arnm_free(block, request, pool), ARNM_SUCCESS);
-  }
-  EXPECT_EQ(Stats(pool).lent_bytes, 0u);
-  EXPECT_EQ(Stats(pool).cached_bytes, lent);
-  arnm_destroy(pool, &source.arena);
+  EXPECT_EQ(pool.Chain().used, lent);
 }
 
 TEST(GradedBlockPool, AFreedBlockServesTheNextRequestOfItsGrade) {
-  Arena source(1u << 16);
-  arnm *pool = MakePool(&source.arena);
-  uint8_t *first = nullptr, *second = nullptr, *other = nullptr;
-  ASSERT_EQ(arnm_alloc(&first, 40, pool), ARNM_SUCCESS);  // 64 byte grade
-  ASSERT_EQ(arnm_alloc(&second, 60, pool), ARNM_SUCCESS); // 64 byte grade
-  ASSERT_EQ(arnm_alloc(&other, 20, pool), ARNM_SUCCESS);  // 32 byte grade
-  const uint32_t remaining = source.Remaining();
+  Pool pool(4, 12);
+  uint8_t *a = pool.Alloc(40);
+  uint8_t *b = pool.Alloc(64);
 
-  ASSERT_EQ(arnm_free(first, 40, pool), ARNM_SUCCESS);
-  ASSERT_EQ(arnm_free(second, 60, pool), ARNM_SUCCESS);
-  uint8_t *again = nullptr;
-  ASSERT_EQ(arnm_alloc(&again, 33, pool), ARNM_SUCCESS);
-  EXPECT_EQ(again, second) << "last freed, first served";
-  ASSERT_EQ(arnm_alloc(&again, 64, pool), ARNM_SUCCESS);
-  EXPECT_EQ(again, first);
-  EXPECT_EQ(source.Remaining(), remaining) << "both came from the free list, not the source";
+  pool.Free(a, 40);
+  EXPECT_EQ(pool.pool.cached_bytes, 64u);
+  EXPECT_EQ(pool.pool.lent_bytes, 64u);
 
-  // a different grade does not take them
-  ASSERT_EQ(arnm_free(again, 64, pool), ARNM_SUCCESS);
-  uint8_t *small = nullptr;
-  ASSERT_EQ(arnm_alloc(&small, 20, pool), ARNM_SUCCESS);
-  EXPECT_NE(small, again);
-  EXPECT_EQ(source.Remaining(), remaining - 32u);
-  arnm_destroy(pool, &source.arena);
+  // another grade does not take it
+  EXPECT_NE(pool.Alloc(128), a);
+  // any size of the grade does, and the chain gives nothing new
+  const uint64_t used = pool.Chain().used;
+  EXPECT_EQ(pool.Alloc(33), a);
+  EXPECT_EQ(pool.Chain().used, used);
+  EXPECT_EQ(pool.pool.cached_bytes, 0u);
+
+  // last in, first out
+  pool.Free(a, 64);
+  pool.Free(b, 64);
+  EXPECT_EQ(pool.Alloc(64), b);
+  EXPECT_EQ(pool.Alloc(64), a);
+  EXPECT_EQ(pool.Chain().used, used);
 }
 
-TEST(GradedBlockPool, ChurnOfMixedSizesStopsTakingFromTheSource) {
-  // a working set of 200 blocks of random sizes, replaced one at a time for many rounds: once the
-  // free lists hold the peak of each grade, the source is not asked again
-  Arena source(1u << 22);
-  arnm *pool = MakePool(&source.arena, 4, 16);
-  std::mt19937_64 rng(7);
+TEST(GradedBlockPool, ChurnOfMixedSizesStopsTakingFromTheChain) {
+  Pool pool(4, 12);
+  std::mt19937 random(7);
+  std::uniform_int_distribution<uint32_t> size_of(1, 4096);
   struct Held {
     uint8_t *block;
     uint32_t size;
-    uint8_t fill;
   };
-  std::vector<Held> held;
-  auto take = [&] {
-    Held h{nullptr, 1u + static_cast<uint32_t>(rng() % 3000u), static_cast<uint8_t>(rng())};
-    ASSERT_EQ(arnm_alloc(&h.block, h.size, pool), ARNM_SUCCESS);
-    memset(h.block, h.fill, h.size);
-    held.push_back(h);
-  };
-  for (int i = 0; i < 200; ++i) { take(); }
-  uint32_t remaining_after_warmup = 0;
-  for (int round = 0; round < 20000; ++round) {
-    const size_t victim = rng() % held.size();
-    for (uint32_t b = 0; b < held[victim].size; ++b) {
-      ASSERT_EQ(held[victim].block[b], held[victim].fill) << "a block was handed out twice";
+  std::vector<Held> held(256);
+  for (auto &h : held) {
+    h.size = size_of(random);
+    h.block = pool.Alloc(h.size);
+  }
+  auto churn = [&](int steps) {
+    for (int i = 0; i < steps; ++i) {
+      Held &h = held[random() % held.size()];
+      pool.Free(h.block, h.size);
+      h.size = size_of(random);
+      h.block = pool.Alloc(h.size);
+      h.block[0] = 1;
+      h.block[h.size - 1] = 2;
     }
-    ASSERT_EQ(arnm_free(held[victim].block, held[victim].size, pool), ARNM_SUCCESS);
-    held.erase(held.begin() + static_cast<long>(victim));
-    take();
-    if (round == 10000) { remaining_after_warmup = source.Remaining(); }
-  }
-  // the last half asked for nothing new that the first half had not already cached, give or take
-  // a grade whose peak rose once more
-  EXPECT_LE(remaining_after_warmup - source.Remaining(), 4u * 4096u);
-  const auto stats = Stats(pool);
-  uint64_t lent = 0;
-  for (const auto &h : held) {
-    uint32_t block = 16;
-    while (block < ((h.size + 7u) & ~7u)) { block <<= 1; }
-    lent += block;
-  }
-  EXPECT_EQ(stats.lent_bytes, lent);
-  EXPECT_EQ((1u << 22) - kPoolBytes - source.Remaining(), stats.lent_bytes + stats.cached_bytes);
-  arnm_destroy(pool, &source.arena);
+  };
+  // warm up until every grade has come near its peak, then the chain has to stand nearly still
+  churn(20000);
+  const uint64_t used = pool.Chain().used;
+  churn(20000);
+  EXPECT_LE(pool.Chain().used, used + 64u * 1024u);
+
+  // the counters add up to what the chain handed out, and nothing is handed out twice
+  EXPECT_EQ(pool.pool.lent_bytes + pool.pool.cached_bytes, pool.Chain().used);
+  std::set<uint8_t *> distinct;
+  for (const auto &h : held) { EXPECT_TRUE(distinct.insert(h.block).second); }
 }
 
 // ---------------------------------------------------------------------------
-// past the largest grade
+// refusals
 // ---------------------------------------------------------------------------
 
-TEST(GradedBlockPool, OversizedGoesStraightToTheSource) {
-  Arena source(1u << 16);
-  arnm *pool = MakePool(&source.arena, 4, 10); // largest grade 1024
-  const uint32_t before = source.Remaining();
-  uint8_t *big = nullptr;
-  ASSERT_EQ(arnm_alloc(&big, 1025, pool), ARNM_SUCCESS);
-  EXPECT_EQ(before - source.Remaining(), 1032u) << "rounded to 8, not to a grade";
-  EXPECT_EQ(Stats(pool).oversized_bytes, 1032u);
-  EXPECT_EQ(Stats(pool).lent_bytes, 0u);
+TEST(GradedBlockPool, WhatNoGradeHoldsIsRefusedAndChangesNothing) {
+  Pool pool(4, 12);
+  uint8_t *const sentinel = reinterpret_cast<uint8_t *>(uintptr_t{0x1000});
+  uint8_t *block = sentinel;
+  EXPECT_EQ(
+      arnm_graded_block_pool_alloc(&pool.pool, &block, 4097), ARNM_ERROR_RESOURCE_SIZE_EXCEED
+  );
+  EXPECT_EQ(arnm_graded_block_pool_alloc(&pool.pool, &block, 0), ARNM_ERROR_INVALID_PARAM);
+  EXPECT_EQ(
+      arnm_graded_block_pool_alloc(&pool.pool, &block, UINT32_MAX), ARNM_ERROR_ARITHMETIC_OVERFLOW
+  );
+  EXPECT_EQ(block, sentinel);
+  EXPECT_EQ(arnm_graded_block_pool_alloc(nullptr, &block, 16), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(arnm_graded_block_pool_alloc(&pool.pool, nullptr, 16), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(pool.pool.lent_bytes, 0u);
+  EXPECT_EQ(pool.Chain().arena_count, 0u);
 
-  // at the tail of the arena, so the source takes it back
-  ASSERT_EQ(arnm_free(big, 1025, pool), ARNM_SUCCESS);
-  EXPECT_EQ(source.Remaining(), before);
-  EXPECT_EQ(Stats(pool).oversized_bytes, 0u);
-  EXPECT_EQ(Stats(pool).cached_bytes, 0u) << "never cached";
+  // above 2^31 the grade would need a 33rd bit; still refused, not wrapped around
+  Pool widest(3, 31);
+  EXPECT_EQ(
+      arnm_graded_block_pool_alloc(&widest.pool, &block, 0x80000001u),
+      ARNM_ERROR_RESOURCE_SIZE_EXCEED
+  );
+  EXPECT_EQ(block, sentinel);
+}
 
-  // buried: the source's warning comes through
-  ASSERT_EQ(arnm_alloc(&big, 2000, pool), ARNM_SUCCESS);
-  uint8_t *after = nullptr;
-  ASSERT_EQ(arnm_alloc(&after, 16, pool), ARNM_SUCCESS);
-  EXPECT_EQ(arnm_free(big, 2000, pool), ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED);
-  EXPECT_EQ(Stats(pool).oversized_bytes, 0u);
-  arnm_destroy(pool, &source.arena);
+TEST(GradedBlockPool, MisuseTheCountersCanSeeIsRefused) {
+  Pool pool(4, 12);
+  uint8_t *block = pool.Alloc(64);
+
+  // more coming back than is out
+  EXPECT_EQ(arnm_graded_block_pool_free(&pool.pool, block, 128), ARNM_ERROR_INVALID_STATE);
+  pool.Free(block, 64);
+  EXPECT_EQ(arnm_graded_block_pool_free(&pool.pool, block, 64), ARNM_ERROR_INVALID_STATE);
+  EXPECT_EQ(pool.pool.cached_bytes, 64u);
+
+  EXPECT_EQ(arnm_graded_block_pool_free(&pool.pool, block, 0), ARNM_ERROR_INVALID_PARAM);
+  EXPECT_EQ(arnm_graded_block_pool_free(&pool.pool, block, 4097), ARNM_ERROR_RESOURCE_SIZE_EXCEED);
+  EXPECT_EQ(arnm_graded_block_pool_free(nullptr, block, 64), ARNM_ERROR_NULL_POINTER);
+  // nothing handed back is nothing to do, as free(NULL) is
+  EXPECT_EQ(arnm_graded_block_pool_free(&pool.pool, nullptr, 64), ARNM_SUCCESS);
+  EXPECT_EQ(arnm_graded_block_pool_free(nullptr, nullptr, 64), ARNM_SUCCESS);
+}
+
+TEST(GradedBlockPool, AFailingChainLeavesTheBufferAlone) {
+  // one arena of the largest grade, more than the host is allowed to give
+  if (!ArnmTestAllocationMustFail(uint64_t{1} << 31)) {
+    GTEST_SKIP() << "no address space cap, a 2 GiB malloc cannot be promised to fail";
+  }
+  Pool pool(4, 31, 1);
+  uint8_t *const sentinel = reinterpret_cast<uint8_t *>(uintptr_t{0x1000});
+  uint8_t *block = sentinel;
+  EXPECT_EQ(
+      arnm_graded_block_pool_alloc(&pool.pool, &block, 0x80000000u), ARNM_ERROR_OUT_OF_MEMORY
+  );
+  EXPECT_EQ(block, sentinel);
+  EXPECT_EQ(pool.pool.lent_bytes, 0u);
 }
 
 // ---------------------------------------------------------------------------
 // realloc
 // ---------------------------------------------------------------------------
 
-TEST(GradedBlockPool, ReallocStaysInItsGradeAndMovesAcrossOne) {
-  Arena source(1u << 16);
-  arnm *pool = MakePool(&source.arena, 4, 10);
-  uint8_t *block = nullptr;
-  ASSERT_EQ(arnm_realloc(&block, 0, 40, pool), ARNM_SUCCESS) << "NULL is an allocation";
-  for (uint8_t i = 0; i < 40; ++i) { block[i] = i; }
-  const uint8_t *first = block;
-  const uint32_t remaining = source.Remaining();
+TEST(GradedBlockPool, ReallocMovesEvenWithinItsGrade) {
+  Pool pool(4, 12);
+  uint8_t *block = pool.Alloc(20);
+  std::memcpy(block, "0123456789abcdefghi", 20);
+  uint8_t *const old = block;
 
-  ASSERT_EQ(arnm_realloc(&block, 40, 64, pool), ARNM_SUCCESS);
-  EXPECT_EQ(block, first) << "33..64 is one grade";
-  ASSERT_EQ(arnm_realloc(&block, 64, 33, pool), ARNM_SUCCESS);
-  EXPECT_EQ(block, first);
-  EXPECT_EQ(source.Remaining(), remaining);
-
-  ASSERT_EQ(arnm_realloc(&block, 33, 300, pool), ARNM_SUCCESS);
-  EXPECT_NE(block, first);
-  for (uint8_t i = 0; i < 33; ++i) { ASSERT_EQ(block[i], i); }
-  EXPECT_EQ(Stats(pool).lent_bytes, 512u);
-  EXPECT_EQ(Stats(pool).cached_bytes, 64u) << "the old block went to its free list";
-
-  // into oversized and back, contents carried both ways
-  for (uint32_t i = 0; i < 300; ++i) { block[i] = static_cast<uint8_t>(i * 7u); }
-  ASSERT_EQ(arnm_realloc(&block, 300, 5000, pool), ARNM_SUCCESS);
-  for (uint32_t i = 0; i < 300; ++i) { ASSERT_EQ(block[i], static_cast<uint8_t>(i * 7u)); }
-  EXPECT_EQ(Stats(pool).oversized_bytes, 5000u);
-  EXPECT_EQ(Stats(pool).lent_bytes, 0u);
-  ASSERT_EQ(arnm_realloc(&block, 5000, 6000, pool), ARNM_SUCCESS) << "the arena's tail grows";
-  EXPECT_EQ(Stats(pool).oversized_bytes, 6000u);
-  const arnm_result back = arnm_realloc(&block, 6000, 100, pool);
-  EXPECT_TRUE(back == ARNM_SUCCESS || back == ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED);
-  for (uint32_t i = 0; i < 100; ++i) { ASSERT_EQ(block[i], static_cast<uint8_t>(i * 7u)); }
-  EXPECT_EQ(Stats(pool).oversized_bytes, 0u);
-  EXPECT_EQ(Stats(pool).lent_bytes, 128u);
-
-  ASSERT_EQ(arnm_realloc(&block, 100, 0, pool), ARNM_SUCCESS) << "0 is a free";
-  EXPECT_EQ(block, nullptr);
-  EXPECT_EQ(Stats(pool).lent_bytes, 0u);
-  arnm_destroy(pool, &source.arena);
+  ASSERT_EQ(arnm_graded_block_pool_realloc(&pool.pool, &block, 20, 30), ARNM_SUCCESS);
+  EXPECT_NE(block, old);
+  EXPECT_EQ(std::memcmp(block, "0123456789abcdefghi", 20), 0);
+  EXPECT_EQ(pool.pool.lent_bytes, 32u);
+  EXPECT_EQ(pool.pool.cached_bytes, 32u);
+  // the old block went onto its list
+  EXPECT_EQ(pool.Alloc(32), old);
 }
 
-TEST(GradedBlockPool, RefusalLeavesEverythingAsItWas) {
-  Arena source(kPoolBytes + 64u);
-  arnm *pool = MakePool(&source.arena, 4, 10);
-  ASSERT_NE(pool, nullptr);
-  uint8_t *block = nullptr;
-  ASSERT_EQ(arnm_alloc(&block, 50, pool), ARNM_SUCCESS); // the arena's last 64 bytes
-  memset(block, 0x3c, 50);
+TEST(GradedBlockPool, ReallocCarriesTheContentsAcrossGrades) {
+  Pool pool(4, 12);
+  uint8_t *block = pool.Alloc(16);
+  for (uint8_t i = 0; i < 16; ++i) { block[i] = i; }
 
-  uint8_t *untouched = reinterpret_cast<uint8_t *>(0x1000);
-  EXPECT_EQ(arnm_alloc(&untouched, 8, pool), ARNM_ERROR_OUT_OF_MEMORY);
-  EXPECT_EQ(untouched, reinterpret_cast<uint8_t *>(0x1000));
-  EXPECT_EQ(arnm_alloc(&untouched, 4000, pool), ARNM_ERROR_OUT_OF_MEMORY) << "oversized too";
+  ASSERT_EQ(arnm_graded_block_pool_realloc(&pool.pool, &block, 16, 1000), ARNM_SUCCESS);
+  for (uint8_t i = 0; i < 16; ++i) { EXPECT_EQ(block[i], i); }
+  EXPECT_EQ(pool.pool.lent_bytes, 1024u);
+  EXPECT_EQ(pool.pool.cached_bytes, 16u);
 
-  uint8_t *kept = block;
-  EXPECT_EQ(arnm_realloc(&kept, 50, 200, pool), ARNM_ERROR_OUT_OF_MEMORY);
-  EXPECT_EQ(kept, block);
-  for (int i = 0; i < 50; ++i) { ASSERT_EQ(kept[i], 0x3c); }
-  const auto stats = Stats(pool);
-  EXPECT_EQ(stats.lent_bytes, 64u);
-  EXPECT_EQ(stats.cached_bytes, 0u);
-  EXPECT_EQ(stats.oversized_bytes, 0u);
-
-  // what was freed can still be had
-  ASSERT_EQ(arnm_free(block, 50, pool), ARNM_SUCCESS);
-  ASSERT_EQ(arnm_alloc(&block, 64, pool), ARNM_SUCCESS);
-  arnm_destroy(pool, &source.arena);
+  // shrinking copies only what the new size holds
+  for (uint32_t i = 0; i < 1000; ++i) { block[i] = uint8_t(i); }
+  ASSERT_EQ(arnm_graded_block_pool_realloc(&pool.pool, &block, 1000, 40), ARNM_SUCCESS);
+  for (uint32_t i = 0; i < 40; ++i) { EXPECT_EQ(block[i], uint8_t(i)); }
+  EXPECT_EQ(pool.pool.lent_bytes, 64u);
+  EXPECT_EQ(pool.pool.cached_bytes, 16u + 1024u);
 }
 
-TEST(GradedBlockPool, MisuseTheCountersCanSeeIsRefused) {
-  Arena source(1u << 14);
-  arnm *pool = MakePool(&source.arena, 4, 10);
+TEST(GradedBlockPool, ReallocFromNothingAllocates) {
+  Pool pool(4, 12);
   uint8_t *block = nullptr;
-  ASSERT_EQ(arnm_alloc(&block, 16, pool), ARNM_SUCCESS);
-  ASSERT_EQ(arnm_free(block, 16, pool), ARNM_SUCCESS);
-  EXPECT_EQ(arnm_free(block, 16, pool), ARNM_ERROR_INVALID_STATE) << "plain double free";
-  EXPECT_EQ(Stats(pool).cached_bytes, 16u);
+  ASSERT_EQ(arnm_graded_block_pool_realloc(&pool.pool, &block, 0, 100), ARNM_SUCCESS);
+  EXPECT_NE(block, nullptr);
+  EXPECT_EQ(pool.pool.lent_bytes, 128u);
+  EXPECT_EQ(pool.pool.cached_bytes, 0u);
+}
 
-  ASSERT_EQ(arnm_alloc(&block, 16, pool), ARNM_SUCCESS);
-  EXPECT_EQ(arnm_free(block, 1000, pool), ARNM_ERROR_INVALID_STATE) << "a larger grade than out";
-  EXPECT_EQ(arnm_free(block, 4000, pool), ARNM_ERROR_INVALID_STATE) << "oversized never out";
-  EXPECT_EQ(arnm_free(block, 0, pool), ARNM_ERROR_INVALID_PARAM);
-  uint8_t *moving = block;
-  EXPECT_EQ(arnm_realloc(&moving, 0, 64, pool), ARNM_ERROR_INVALID_PARAM);
-  EXPECT_EQ(arnm_realloc(&moving, 4000, 64, pool), ARNM_ERROR_INVALID_STATE);
-  EXPECT_EQ(moving, block);
-  EXPECT_EQ(arnm_free(nullptr, 16, pool), ARNM_SUCCESS) << "nothing back is nothing to do";
-  EXPECT_EQ(Stats(pool).lent_bytes, 16u);
+TEST(GradedBlockPool, ReallocRefusalLeavesTheBlockWhereItWas) {
+  Pool pool(4, 12);
+  uint8_t *block = pool.Alloc(64);
+  uint8_t *const old = block;
+  EXPECT_EQ(
+      arnm_graded_block_pool_realloc(&pool.pool, &block, 64, 4097), ARNM_ERROR_RESOURCE_SIZE_EXCEED
+  );
+  // a size of 0 is refused, not a free
+  EXPECT_EQ(arnm_graded_block_pool_realloc(&pool.pool, &block, 64, 0), ARNM_ERROR_INVALID_PARAM);
+  EXPECT_EQ(arnm_graded_block_pool_realloc(&pool.pool, nullptr, 64, 128), ARNM_ERROR_NULL_POINTER);
+  EXPECT_EQ(block, old);
+  EXPECT_EQ(pool.pool.lent_bytes, 64u);
+  EXPECT_EQ(pool.pool.cached_bytes, 0u);
+}
 
-  uint8_t *out = nullptr;
-  EXPECT_EQ(arnm_alloc(&out, 0, pool), ARNM_ERROR_INVALID_PARAM);
-  EXPECT_EQ(arnm_alloc(nullptr, 8, pool), ARNM_ERROR_NULL_POINTER);
-  EXPECT_EQ(arnm_alloc(&out, UINT32_MAX, pool), ARNM_ERROR_ARITHMETIC_OVERFLOW);
-  arnm_destroy(pool, &source.arena);
+TEST(GradedBlockPool, ReallocOfABlockThePoolCannotTakeBackStillMoves) {
+  Pool pool(4, 12);
+  uint8_t *block = pool.Alloc(16);
+  uint8_t *const old = block;
+  // told a grade larger than anything out: the move happens, the old block is not taken back
+  EXPECT_EQ(
+      arnm_graded_block_pool_realloc(&pool.pool, &block, 1024, 16),
+      ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED
+  );
+  EXPECT_NE(block, old);
+  EXPECT_EQ(pool.pool.lent_bytes, 32u);
+  EXPECT_EQ(pool.pool.cached_bytes, 0u);
 }
 
 // ---------------------------------------------------------------------------
 // reset, release, destroy
 // ---------------------------------------------------------------------------
 
-TEST(GradedBlockPool, ResetOverAnArenaForgetsTheListsAndLeavesTheSourceAlone) {
-  Arena source(1u << 14);
-  arnm *pool = MakePool(&source.arena);
-  uint8_t *a = nullptr, *b = nullptr;
-  ASSERT_EQ(arnm_alloc(&a, 100, pool), ARNM_SUCCESS);
-  ASSERT_EQ(arnm_free(a, 100, pool), ARNM_SUCCESS);
-  const uint32_t remaining = source.Remaining();
+TEST(GradedBlockPool, ResetKeepsTheArenasAndStartsOver) {
+  Pool pool(4, 12, 2);
+  uint8_t *first = pool.Alloc(64);
+  for (int i = 0; i < 300; ++i) { pool.Alloc(64); }
+  pool.Free(first, 64);
+  const auto before = pool.Chain();
+  EXPECT_GT(before.arena_count, 1u);
 
-  arnm_reset(pool);
-  EXPECT_EQ(source.Remaining(), remaining) << "the source is borrowed";
-  auto stats = Stats(pool);
-  EXPECT_EQ(stats.lent_bytes + stats.cached_bytes + stats.oversized_bytes, 0u);
-  ASSERT_EQ(arnm_alloc(&b, 100, pool), ARNM_SUCCESS);
-  EXPECT_NE(b, a) << "the cached block was forgotten";
-  EXPECT_EQ(source.Remaining(), remaining - 128u);
-  arnm_destroy(pool, &source.arena);
+  arnm_graded_block_pool_reset(&pool.pool);
+  EXPECT_EQ(pool.pool.lent_bytes, 0u);
+  EXPECT_EQ(pool.pool.cached_bytes, 0u);
+  for (uint8_t *head : pool.pool.free_head) { EXPECT_EQ(head, nullptr); }
+  const auto after = pool.Chain();
+  EXPECT_EQ(after.arena_count, before.arena_count);
+  EXPECT_EQ(after.reserved, before.reserved);
+  EXPECT_EQ(after.used, 0u);
+
+  // the ground is used again from the front
+  EXPECT_EQ(pool.Alloc(64), first);
+  arnm_graded_block_pool_reset(nullptr);
 }
 
-TEST(GradedBlockPool, ResetOverTheHostGivesTheBlocksBackInstead) {
-  // Forgetting a malloc'd block loses it, so over the host a reset is a release: the cached
-  // blocks are freed (ASan reports them otherwise) and a block still out can still come back.
-  // The same for a zeroed handle, which is the host too.
-  arnm zeroed{};
-  for (arnm *source : {static_cast<arnm *>(nullptr), &zeroed}) {
-    SCOPED_TRACE(source ? "zeroed handle" : "NULL");
-    arnm *pool = MakePool(source, 4, 12);
-    ASSERT_NE(pool, nullptr);
-    uint8_t *kept = nullptr, *cached = nullptr, *big = nullptr;
-    ASSERT_EQ(arnm_alloc(&kept, 40, pool), ARNM_SUCCESS);
-    ASSERT_EQ(arnm_alloc(&cached, 300, pool), ARNM_SUCCESS);
-    ASSERT_EQ(arnm_alloc(&big, 10000, pool), ARNM_SUCCESS);
-    ASSERT_EQ(arnm_free(cached, 300, pool), ARNM_SUCCESS);
+TEST(GradedBlockPool, ReleaseLeavesNothingAndAnswersNotInitialized) {
+  arnm_graded_block_pool pool;
+  arnm_graded_block_pool_options options{};
+  ASSERT_EQ(arnm_graded_block_pool_init(&pool, &options, nullptr), ARNM_SUCCESS);
+  uint8_t *block = nullptr;
+  ASSERT_EQ(arnm_graded_block_pool_alloc(&pool, &block, 64), ARNM_SUCCESS);
 
-    arnm_reset(pool);
-    auto stats = Stats(pool);
-    EXPECT_EQ(stats.cached_bytes, 0u);
-    EXPECT_EQ(stats.lent_bytes, 64u) << "the block still out is still counted";
-    EXPECT_EQ(stats.oversized_bytes, 10000u);
-    EXPECT_EQ(arnm_free(kept, 40, pool), ARNM_SUCCESS) << "and the pool still takes it back";
-    EXPECT_EQ(arnm_free(big, 10000, pool), ARNM_SUCCESS);
-    EXPECT_EQ(arnm_destroy(pool, source), ARNM_SUCCESS);
+  arnm_graded_block_pool_release(&pool, nullptr);
+  EXPECT_EQ(pool.source, nullptr);
+  EXPECT_EQ(pool.lent_bytes, 0u);
+  EXPECT_EQ(pool.cached_bytes, 0u);
+  uint8_t *after = nullptr;
+  EXPECT_EQ(arnm_graded_block_pool_alloc(&pool, &after, 64), ARNM_ERROR_NOT_INITIALIZED);
+  EXPECT_EQ(arnm_graded_block_pool_free(&pool, block, 64), ARNM_ERROR_NOT_INITIALIZED);
+  EXPECT_EQ(after, nullptr);
+
+  // twice is harmless, and so is NULL
+  arnm_graded_block_pool_release(&pool, nullptr);
+  arnm_graded_block_pool_reset(&pool);
+  arnm_graded_block_pool_release(nullptr, nullptr);
+
+  // and it can start over
+  ASSERT_EQ(arnm_graded_block_pool_init(&pool, &options, nullptr), ARNM_SUCCESS);
+  EXPECT_EQ(arnm_graded_block_pool_alloc(&pool, &after, 64), ARNM_SUCCESS);
+  arnm_graded_block_pool_release(&pool, nullptr);
+}
+
+TEST(GradedBlockPool, ReleaseOverAnArenaGivesTheBookkeepingBack) {
+  Arena source(4096);
+  arnm_graded_block_pool pool;
+  arnm_graded_block_pool_options options{};
+  ASSERT_EQ(arnm_graded_block_pool_init(&pool, &options, &source.arena), ARNM_SUCCESS);
+  uint8_t *block = nullptr;
+  for (int i = 0; i < 10; ++i) {
+    ASSERT_EQ(arnm_graded_block_pool_alloc(&pool, &block, 1u << 20), ARNM_SUCCESS);
   }
+  EXPECT_LT(source.Remaining(), 4096u);
+  arnm_graded_block_pool_release(&pool, &source.arena);
+  EXPECT_EQ(source.Remaining(), 4096u);
 }
 
-TEST(GradedBlockPool, ResetOverAnotherPoolGivesTheBlocksBackToIt) {
-  // the outer pool would count a block the inner one forgot as lent for good
-  arnm *outer = MakePool(nullptr, 4, 16);
-  ASSERT_NE(outer, nullptr);
-  const uint64_t outer_lent_empty = Stats(outer).lent_bytes; // the inner pool's own bytes, later
-  arnm *inner = MakePool(outer, 5, 10);
-  ASSERT_NE(inner, nullptr);
-  const uint64_t outer_lent_with_inner = Stats(outer).lent_bytes;
-  EXPECT_GT(outer_lent_with_inner, outer_lent_empty);
-
-  uint8_t *a = nullptr, *b = nullptr;
-  ASSERT_EQ(arnm_alloc(&a, 100, inner), ARNM_SUCCESS);
-  ASSERT_EQ(arnm_alloc(&b, 500, inner), ARNM_SUCCESS);
-  ASSERT_EQ(arnm_free(b, 500, inner), ARNM_SUCCESS);
-  EXPECT_EQ(Stats(outer).lent_bytes, outer_lent_with_inner + 128u + 512u);
-
-  arnm_reset(inner);
-  EXPECT_EQ(Stats(inner).cached_bytes, 0u);
-  EXPECT_EQ(Stats(inner).lent_bytes, 128u);
-  EXPECT_EQ(Stats(outer).lent_bytes, outer_lent_with_inner + 128u) << "the 512 went back";
-  EXPECT_EQ(Stats(outer).cached_bytes, 512u);
-
-  ASSERT_EQ(arnm_free(a, 100, inner), ARNM_SUCCESS);
-  EXPECT_EQ(arnm_destroy(inner, outer), ARNM_SUCCESS);
-  EXPECT_EQ(Stats(outer).lent_bytes, outer_lent_empty);
-  EXPECT_EQ(arnm_destroy(outer, nullptr), ARNM_SUCCESS);
-}
-
-TEST(GradedBlockPool, ReleaseGivesCachedBlocksBackAndKeepsWorking) {
-  // on the host, so a block release forgets is a leak ASan reports
-  arnm *pool = MakePool(nullptr, 4, 12);
+TEST(GradedBlockPool, CreateAndDestroyOverAnArena) {
+  Arena source(4096);
+  arnm_graded_block_pool_options options{};
+  arnm_graded_block_pool *pool = arnm_graded_block_pool_create(&options, &source.arena);
   ASSERT_NE(pool, nullptr);
-  std::vector<std::pair<uint8_t *, uint32_t>> blocks;
-  for (uint32_t size : {10u, 50u, 50u, 300u, 3000u, 9000u}) {
-    uint8_t *block = nullptr;
-    ASSERT_EQ(arnm_alloc(&block, size, pool), ARNM_SUCCESS);
-    blocks.push_back({block, size});
-  }
-  // free all but one, so release has cached and lent blocks to tell apart
-  for (size_t i = 1; i < blocks.size(); ++i) {
-    ASSERT_EQ(arnm_free(blocks[i].first, blocks[i].second, pool), ARNM_SUCCESS);
-  }
-  EXPECT_GT(Stats(pool).cached_bytes, 0u);
+  uint8_t *block = nullptr;
+  ASSERT_EQ(arnm_graded_block_pool_alloc(pool, &block, 100), ARNM_SUCCESS);
+  EXPECT_EQ(arnm_graded_block_pool_destroy(pool, &source.arena), ARNM_SUCCESS);
+  EXPECT_EQ(source.Remaining(), 4096u);
 
-  arnm_release(pool);
-  auto stats = Stats(pool);
-  EXPECT_EQ(stats.cached_bytes, 0u);
-  EXPECT_EQ(stats.lent_bytes, 16u) << "the block still out is the caller's";
-  EXPECT_TRUE(arnm_is_graded_block_pool(pool));
+  EXPECT_EQ(arnm_graded_block_pool_destroy(nullptr, nullptr), ARNM_SUCCESS);
 
-  uint8_t *again = nullptr;
-  ASSERT_EQ(arnm_alloc(&again, 50, pool), ARNM_SUCCESS);
-  ASSERT_EQ(arnm_free(again, 50, pool), ARNM_SUCCESS);
-  ASSERT_EQ(arnm_free(blocks[0].first, blocks[0].second, pool), ARNM_SUCCESS);
-  EXPECT_EQ(arnm_destroy(pool, nullptr), ARNM_SUCCESS);
+  // no room for the struct, and room for the struct but not the chain
+  Arena tiny(16);
+  EXPECT_EQ(arnm_graded_block_pool_create(&options, &tiny.arena), nullptr);
+  Arena small(uint32_t(sizeof(arnm_graded_block_pool)) + 8u);
+  EXPECT_EQ(arnm_graded_block_pool_create(&options, &small.arena), nullptr);
+  EXPECT_EQ(small.Remaining(), sizeof(arnm_graded_block_pool) + 8u);
 }
 
-TEST(GradedBlockPool, WorksOverAChainAndOverAnotherPool) {
-  arnm_multi_arena_options chain_options{};
-  chain_options.arena_capacity = 4096;
-  arnm *chain = arnm_create_multi_arena(&chain_options, nullptr);
-  ASSERT_NE(chain, nullptr);
-  arnm *outer = MakePool(chain, 4, 14);
-  ASSERT_NE(outer, nullptr);
-  arnm *inner = MakePool(outer, 5, 8);
-  ASSERT_NE(inner, nullptr);
-
-  std::vector<std::pair<uint8_t *, uint32_t>> blocks;
-  for (uint32_t i = 1; i < 400; ++i) {
-    uint8_t *block = nullptr;
-    const uint32_t size = (i * 37u) % 1500u + 1u;
-    ASSERT_EQ(arnm_alloc(&block, size, inner), ARNM_SUCCESS);
-    memset(block, static_cast<int>(i), size);
-    blocks.push_back({block, size});
+TEST(GradedBlockPool, CreateAndDestroyOverTheHost) {
+  arnm_graded_block_pool_options options{};
+  arnm_graded_block_pool *pool = arnm_graded_block_pool_create(&options, nullptr);
+  ASSERT_NE(pool, nullptr);
+  uint8_t *block = nullptr;
+  for (uint32_t size = 1; size <= (1u << 20); size *= 3) {
+    ASSERT_EQ(arnm_graded_block_pool_alloc(pool, &block, size), ARNM_SUCCESS);
   }
-  std::set<uint8_t *> distinct;
-  for (const auto &[block, size] : blocks) { distinct.insert(block); }
-  EXPECT_EQ(distinct.size(), blocks.size());
-  for (const auto &[block, size] : blocks) {
-    ASSERT_EQ(arnm_free(block, size, inner), ARNM_SUCCESS);
-  }
-
-  EXPECT_EQ(arnm_destroy(inner, outer), ARNM_SUCCESS) << "a graded block always goes back";
-  // the outer pool's own bytes sit buried in one of the chain's arenas
-  EXPECT_EQ(arnm_destroy(outer, chain), ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED);
-  arnm_destroy(chain, nullptr);
-}
-
-// ---------------------------------------------------------------------------
-// containers over a pool
-// ---------------------------------------------------------------------------
-
-TEST(GradedBlockPool, ContainersOverAPoolReuseWhatTheyOutgrow) {
-  // The same key map filled twice behind the same arena size: directly, every superseded table
-  // stays in the arena; through a pool, a table outgrown is reused by the next growth of a
-  // smaller grade -- here the key vector's index array and the next map's first tables.
-  const uint32_t capacity = 8u * 1024u * 1024u;
-  auto fill = [](arnm *memory) {
-    for (int round = 0; round < 4; ++round) {
-      arnm_key_map map;
-      EXPECT_EQ(arnm_key_map_init(&map, 8, 10, memory), ARNM_SUCCESS);
-      for (uint64_t k = 0; k < 20000; ++k) {
-        uint32_t id = 0;
-        EXPECT_EQ(
-            arnm_key_map_get_or_insert(&map, reinterpret_cast<const uint8_t *>(&k), &id, nullptr),
-            ARNM_SUCCESS
-        );
-        EXPECT_EQ(id, k);
-      }
-      for (uint64_t k = 0; k < 20000; k += 101) {
-        uint32_t id = 0;
-        EXPECT_TRUE(arnm_key_map_find(&map, reinterpret_cast<const uint8_t *>(&k), &id));
-        EXPECT_EQ(id, k);
-      }
-      arnm_key_map_free(&map);
-    }
-  };
-
-  Arena direct(capacity);
-  fill(&direct.arena);
-  const uint32_t direct_used = capacity - direct.Remaining();
-
-  Arena under_pool(capacity);
-  arnm *pool = MakePool(&under_pool.arena, 4, 20);
-  fill(pool);
-  const uint32_t pool_used = capacity - under_pool.Remaining();
-  EXPECT_LT(pool_used, direct_used / 2u)
-      << "direct " << direct_used << " bytes, through the pool " << pool_used;
-  EXPECT_EQ(Stats(pool).lent_bytes, 0u) << "every map gave everything back";
-
-  arnm_bvec vec;
-  ASSERT_EQ(arnm_bvec_init(&vec, 6, 1, sizeof(uint64_t), pool), ARNM_SUCCESS);
-  for (uint64_t i = 0; i < 50000; ++i) { ASSERT_EQ(arnm_bvec_push_ptr(&vec, &i), ARNM_SUCCESS); }
-  for (uint64_t i = 0; i < 50000; i += 997) {
-    ASSERT_EQ(*static_cast<uint64_t *>(arnm_bvec_get(&vec, static_cast<uint32_t>(i))), i);
-  }
-  arnm_bvec_free(&vec);
-  EXPECT_EQ(Stats(pool).lent_bytes, 0u);
-  arnm_destroy(pool, &under_pool.arena);
+  EXPECT_EQ(arnm_graded_block_pool_destroy(pool, nullptr), ARNM_SUCCESS);
 }

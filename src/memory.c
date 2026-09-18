@@ -51,14 +51,6 @@ void arnm_reset(arnm *m) {
   }
 }
 
-<<<<<<< HEAD
-=======
-static inline void graded_block_pool_release(arnm_graded_block_pool_state *pool) {
-  graded_block_pool_reset(pool);
-  arnm_release(pool->source);
-}
-
->>>>>>> 5ad75b06fdbdc3eaaaa5de58caf47398f450239b
 void arnm_release(arnm *m) {
   if (!m) return;
   arnm_intern *memory = (arnm_intern *)m;
@@ -90,24 +82,11 @@ arnm_result arnm_destroy(arnm *m, arnm *allocator) {
   if (!m) { return ARNM_SUCCESS; }
   arnm_release(m);
   arnm_intern *memory = (arnm_intern *)m;
-<<<<<<< HEAD
   uint32_t allocation_size = sizeof(arnm);
   if (is_multi_arena(memory)) { allocation_size = sizeof(arnm) + sizeof(arnm_multi_arena); }
+  // whatever the arena it was carved from answers is the caller's to see: the descriptor is gone
+  // from their point of view either way, but its bytes may only come back on reset
   return arnm_free((uint8_t *)memory, allocation_size, allocator);
-=======
-  if (is_multi_arena(memory)) {
-    uint32_t allocation_size = sizeof(arnm) + sizeof(arnm_multi_arena);
-    return arnm_free((uint8_t *)memory, allocation_size, allocator);
-  } else if (is_graded_block_pool(memory)) {
-    arnm_destroy(memory->graded_block_pool->source, allocator);
-    uint32_t allocation_size = sizeof(arnm) + sizeof(arnm_graded_block_pool_state);
-    return arnm_free((uint8_t *)memory, allocation_size, allocator);
-  } else {
-    // whatever the arena it was carved from answers is the caller's to see: the descriptor is
-    // gone from their point of view either way, but its bytes may only come back on reset
-    return arnm_free((uint8_t *)memory, sizeof(arnm), allocator);
-  }
->>>>>>> 5ad75b06fdbdc3eaaaa5de58caf47398f450239b
 }
 // **************** arena functions *******************************************************
 
@@ -528,7 +507,7 @@ arnm_result arnm_realloc(uint8_t **buffer, uint32_t old_size, uint32_t new_size,
   }
 
   // deliberately below the release check: (0, 0) means free, not "same size, nothing to do"
-  if (old_size == new_size) { return ARNM_SUCCESS; }
+  if (*buffer && old_size == new_size) { return ARNM_SUCCESS; }
 
   arnm_intern *single_arena = memory;
   uint32_t owner_index = 0;
@@ -583,7 +562,8 @@ arnm_result arnm_realloc(uint8_t **buffer, uint32_t old_size, uint32_t new_size,
     return ARNM_SUCCESS;
   }
 
-  // realloc in non arena mode
+  // host: below the arena paths, which a NULL handle passes straight through. realloc(NULL, n)
+  // is malloc(n), so a fresh buffer works here too
   if (is_default_alloc(memory)) {
     uint8_t *resized = (uint8_t *)realloc(*buffer, new_size);
     if (!resized) { return ARNM_ERROR_OUT_OF_MEMORY; }
