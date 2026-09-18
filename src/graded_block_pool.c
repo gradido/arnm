@@ -89,7 +89,7 @@ arnm_result arnm_graded_block_pool_init(
     multi_arena_options.arena_capacity = (uint32_t)full_capacity;
   }
   multi_arena_options.full_remaining = arnm_pow2_u32(options->min_block_log2) - 1u;
-  arnm* multi_arena = arnm_create_multi_arena(&multi_arena_options, source);
+  arnm *multi_arena = arnm_create_multi_arena(&multi_arena_options, source);
   if (!multi_arena) { return ARNM_ERROR_OUT_OF_MEMORY; }
   memset(pool, 0, sizeof(arnm_graded_block_pool));
   pool->source = multi_arena;
@@ -141,6 +141,7 @@ arnm_result arnm_graded_block_pool_alloc(
 arnm_result arnm_graded_block_pool_realloc(
     arnm_graded_block_pool *pool, uint8_t **buffer, uint32_t old_size, uint32_t new_size
 ) {
+  if (!buffer) { return ARNM_ERROR_NULL_POINTER; }
   // another grade, or across the largest one: a new block, the contents, the old block back.
   // The old block is checked above, so its free below cannot be refused by the counters.
   uint8_t *moved = NULL;

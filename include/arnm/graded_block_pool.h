@@ -120,10 +120,10 @@ typedef struct arnm_graded_block_pool_options {
 typedef struct arnm_graded_block_pool {
   arnm *source; /**< Where blocks come from and return to; NULL for the host. Borrowed. */
   uint8_t *free_head[ARNM_GRADED_BLOCK_POOL_MAX_LOG2 + 1u]; /**< First free block per grade. */
-  uint64_t lent_bytes;      /**< Graded block bytes out with callers. */
-  uint64_t cached_bytes;    /**< Graded block bytes on the free lists. */
-  uint8_t min_log2;         /**< Smallest grade. */
-  uint8_t max_log2;         /**< Largest grade. */
+  uint64_t lent_bytes;   /**< Graded block bytes out with callers. */
+  uint64_t cached_bytes; /**< Graded block bytes on the free lists. */
+  uint8_t min_log2;      /**< Smallest grade. */
+  uint8_t max_log2;      /**< Largest grade. */
 } arnm_graded_block_pool;
 
 // ********** manage the allocator itself *******************
@@ -164,6 +164,31 @@ arnm_result arnm_graded_block_pool_alloc(
     arnm_graded_block_pool *pool, uint8_t **buffer, uint32_t aligned_size
 );
 
+/**
+ * @brief Move @p *buffer into a block for @p new_size, carrying its contents along.
+ *
+ * Always moves, even when @p old_size and @p new_size fall into the same grade and the block
+ * would already do. A pool serves containers that grow a grade at a time, so a resize within one
+ * grade is expected to be rare or absent; checking for it would cost every resize a second
+ * classification, and the hot path does not pay for a case it does not have. A caller that does
+ * resize within a grade pays a copy it could have avoided -- keep the capacity yourself and
+ * resize only when it is outgrown.
+ *
+ * The new block is taken first, then the smaller of both sizes is copied, then the old block
+ * goes onto its free list. A NULL @p *buffer or an @p old_size of 0 skips the copy and the free,
+ * which makes the call an allocation.
+ *
+ * @param[in,out] pool     Pool the block came from; not NULL.
+ * @param[in,out] buffer   Block to move, replaced by the new one; not NULL, @p *buffer may be.
+ * @param[in]     old_size Size the block was taken with.
+ * @param[in]     new_size Size wanted; 1 up to the largest grade.
+ * @retval ARNM_SUCCESS Moved, @p *buffer is the new block.
+ * @retval ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED Moved, but the pool refused the old block
+ *         (wrong size, or not one of its own) and did not take it back.
+ * @return Any refusal of @ref arnm_graded_block_pool_alloc() for @p new_size, with
+ *         @p *buffer untouched.
+ * @whisper The water is poured into the next basin, never swirled in the old one
+ */
 arnm_result arnm_graded_block_pool_realloc(
     arnm_graded_block_pool *pool, uint8_t **buffer, uint32_t old_size, uint32_t new_size
 );

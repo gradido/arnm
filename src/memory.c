@@ -1,8 +1,6 @@
 #include "arnm/memory.h"
 #include "arnm/arena.h"
-#include "arnm/bit.h"
 #include "arnm/bucket_vector.h"
-#include "arnm/bytes.h"
 #include "arnm/multi_arena.h"
 #include "arnm/result.h"
 #include "memory_intern.h"
