@@ -36,16 +36,14 @@ static arnm_result graded_pool_classify_request(
     graded_block_pool_request *state, const arnm_graded_block_pool *pool, uint32_t size
 ) {
   if (!state || !pool) { return ARNM_ERROR_NULL_POINTER; }
-  if (!size)  { return ARNM_ERROR_INVALID_PARAM; }
+  if (!size) { return ARNM_ERROR_INVALID_PARAM; }
 
   uint32_t aligned_bytes = arnm_align8_u32(size);
   if ((size && !aligned_bytes)) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
 
   uint8_t grade_exp = arnm_log2_power_of_two(aligned_bytes);
   // if requested memory size exceed biggest grade
-  if (grade_exp > pool->max_log2) {
-    return ARNM_ERROR_RESOURCE_SIZE_EXCEED;
-  }
+  if (grade_exp > pool->max_log2) { return ARNM_ERROR_RESOURCE_SIZE_EXCEED; }
   state->grade_index = grade_exp < pool->min_log2 ? 0 : grade_exp - pool->min_log2;
   state->grade_bytes = arnm_pow2_u32(grade_exp < pool->min_log2 ? pool->min_log2 : grade_exp);
   return ARNM_SUCCESS;
@@ -72,12 +70,14 @@ arnm_result arnm_graded_block_pool_options_validate(arnm_graded_block_pool_optio
   return ARNM_SUCCESS;
 }
 
-arnm_result arnm_init_graded_block_pool(
+arnm_result arnm_graded_block_pool_init(
     arnm_graded_block_pool *pool, arnm_graded_block_pool_options *options, arnm *source
 ) {
+  if (!pool) return ARNM_ERROR_NULL_POINTER;
+
   arnm_result result = arnm_graded_block_pool_options_validate(options);
   if (ARNM_SUCCESS != result) { return result; }
-  memset(pool, 0, sizeof(arnm_graded_block_pool));
+
   arnm_multi_arena_options multi_arena_options = {0};
   uint32_t max_grade_size = arnm_pow2_u32(options->max_block_log2);
   uint64_t full_capacity = (uint64_t)max_grade_size * (uint64_t)options->alloc_arena_capacity;
@@ -89,15 +89,17 @@ arnm_result arnm_init_graded_block_pool(
     multi_arena_options.arena_capacity = (uint32_t)full_capacity;
   }
   multi_arena_options.full_remaining = arnm_pow2_u32(options->min_block_log2) - 1u;
-  pool->source = arnm_create_multi_arena(&multi_arena_options, source);
-  if (!pool->source) { return ARNM_ERROR_OUT_OF_MEMORY; }
+  arnm* multi_arena = arnm_create_multi_arena(&multi_arena_options, source);
+  if (!multi_arena) { return ARNM_ERROR_OUT_OF_MEMORY; }
+  memset(pool, 0, sizeof(arnm_graded_block_pool));
+  pool->source = multi_arena;
   pool->min_log2 = options->min_block_log2;
   pool->max_log2 = options->max_block_log2;
 
   return ARNM_SUCCESS;
 }
 
-arnm_graded_block_pool *arnm_create_graded_block_pool(
+arnm_graded_block_pool *arnm_graded_block_pool_create(
     arnm_graded_block_pool_options *options, arnm *source
 ) {
   if (ARNM_SUCCESS != arnm_graded_block_pool_options_validate(options)) { return NULL; }
@@ -105,7 +107,7 @@ arnm_graded_block_pool *arnm_create_graded_block_pool(
   const size_t allocation_capacity = sizeof(arnm_graded_block_pool);
   if (ARNM_SUCCESS != arnm_alloc(&block, allocation_capacity, source)) { return NULL; }
   arnm_graded_block_pool *pool = (arnm_graded_block_pool *)(void *)block;
-  if (ARNM_SUCCESS != arnm_init_graded_block_pool(pool, options, source)) {
+  if (ARNM_SUCCESS != arnm_graded_block_pool_init(pool, options, source)) {
     arnm_free(block, allocation_capacity, source);
     return NULL;
   }
@@ -117,6 +119,8 @@ arnm_graded_block_pool *arnm_create_graded_block_pool(
 arnm_result arnm_graded_block_pool_alloc(
     arnm_graded_block_pool *pool, uint8_t **buffer, uint32_t size
 ) {
+  if (!pool || !buffer) { return ARNM_ERROR_NULL_POINTER; }
+  if (!pool->source) { return ARNM_ERROR_NOT_INITIALIZED; }
   graded_block_pool_request request;
   arnm_result result = graded_pool_classify_request(&request, pool, size);
   if (result != ARNM_SUCCESS) { return result; }
@@ -134,25 +138,24 @@ arnm_result arnm_graded_block_pool_alloc(
   return ARNM_SUCCESS;
 }
 
-
 arnm_result arnm_graded_block_pool_realloc(
     arnm_graded_block_pool *pool, uint8_t **buffer, uint32_t old_size, uint32_t new_size
 ) {
-  if (!pool) { return ARNM_ERROR_NULL_POINTER; }
-
   // another grade, or across the largest one: a new block, the contents, the old block back.
   // The old block is checked above, so its free below cannot be refused by the counters.
   uint8_t *moved = NULL;
   arnm_result result = arnm_graded_block_pool_alloc(pool, &moved, new_size);
-  *buffer = moved;
   if (ARNM_SUCCESS != result) { return result; }
+
   if (*buffer && old_size) {
     memcpy(moved, *buffer, old_size < new_size ? old_size : new_size);
     result = arnm_graded_block_pool_free(pool, *buffer, old_size);
     if (ARNM_SUCCESS != result) {
+      *buffer = moved;
       return ARNM_WARNING_ARENA_MEMORY_NOT_RECLAIMED;
     }
   }
+  *buffer = moved;
   return ARNM_SUCCESS;
 }
 
@@ -161,6 +164,9 @@ arnm_result arnm_graded_block_pool_free(
 ) {
   // nothing handed back is nothing to do, as free(NULL) is
   if (!buffer) { return ARNM_SUCCESS; }
+  if (!pool) { return ARNM_ERROR_NULL_POINTER; }
+  if (!pool->source) { return ARNM_ERROR_NOT_INITIALIZED; }
+
   graded_block_pool_request request;
   arnm_result result = graded_pool_classify_request(&request, pool, size);
   if (result != ARNM_SUCCESS) { return result; }
@@ -174,21 +180,23 @@ arnm_result arnm_graded_block_pool_free(
 }
 
 void arnm_graded_block_pool_reset(arnm_graded_block_pool *pool) {
+  if (!pool) { return; }
   arnm_reset(pool->source);
   memset(pool->free_head, 0, sizeof(pool->free_head));
   pool->lent_bytes = 0;
   pool->cached_bytes = 0;
-  pool->oversized_bytes = 0;
 }
 
 void arnm_graded_block_pool_release(arnm_graded_block_pool *pool, arnm *source) {
+  if (!pool) { return; }
   arnm_graded_block_pool_reset(pool);
   arnm_destroy(pool->source, source);
   pool->source = NULL;
 }
 
-arnm_result arnm_graded_block_pool_destroy(arnm_graded_block_pool *pool, arnm *allocator) {
-  arnm_result result = arnm_destroy(pool->source, allocator);
+arnm_result arnm_graded_block_pool_destroy(arnm_graded_block_pool *pool, arnm *source) {
+  if (!pool) { return ARNM_ERROR_NULL_POINTER; }
+  arnm_result result = arnm_destroy(pool->source, source);
   if (ARNM_SUCCESS != result) { return result; }
-  return arnm_free((uint8_t *)pool, sizeof(arnm_graded_block_pool), allocator);
+  return arnm_free((uint8_t *)pool, sizeof(arnm_graded_block_pool), source);
 }

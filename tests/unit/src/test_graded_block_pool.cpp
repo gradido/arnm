@@ -41,7 +41,7 @@ arnm *MakePool(arnm *source, uint8_t min_log2 = 0, uint8_t max_log2 = 0) {
   arnm_graded_block_pool_options options{};
   options.min_block_log2 = min_log2;
   options.max_block_log2 = max_log2;
-  return arnm_create_graded_block_pool(&options, source);
+  return arnm_graded_block_pool_create(&options, source);
 }
 
 arnm_graded_block_pool_stats Stats(const arnm *pool) {
@@ -78,12 +78,12 @@ TEST(GradedBlockPool, OptionsTakeDefaultsAndRefuseWhatCannotBe) {
     options.max_block_log2 = bad.second;
     EXPECT_EQ(arnm_graded_block_pool_options_validate(&options), ARNM_ERROR_INVALID_PARAM)
         << int(bad.first) << ".." << int(bad.second);
-    EXPECT_EQ(arnm_create_graded_block_pool(&options, nullptr), nullptr);
+    EXPECT_EQ(arnm_graded_block_pool_create(&options, nullptr), nullptr);
   }
   options.min_block_log2 = 3;
   options.max_block_log2 = 31;
   EXPECT_EQ(arnm_graded_block_pool_options_validate(&options), ARNM_SUCCESS);
-  EXPECT_EQ(arnm_create_graded_block_pool(nullptr, nullptr), nullptr);
+  EXPECT_EQ(arnm_graded_block_pool_create(nullptr, nullptr), nullptr);
 }
 
 TEST(GradedBlockPool, CreateTakesOnlyItsOwnBytesAndIsNoArena) {

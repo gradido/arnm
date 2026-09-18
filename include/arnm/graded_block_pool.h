@@ -122,7 +122,6 @@ typedef struct arnm_graded_block_pool {
   uint8_t *free_head[ARNM_GRADED_BLOCK_POOL_MAX_LOG2 + 1u]; /**< First free block per grade. */
   uint64_t lent_bytes;      /**< Graded block bytes out with callers. */
   uint64_t cached_bytes;    /**< Graded block bytes on the free lists. */
-  uint64_t oversized_bytes; /**< Bytes handed to the source past the largest grade. */
   uint8_t min_log2;         /**< Smallest grade. */
   uint8_t max_log2;         /**< Largest grade. */
 } arnm_graded_block_pool;
@@ -153,11 +152,11 @@ arnm_result arnm_graded_block_pool_options_validate(arnm_graded_block_pool_optio
  * @note Give it back with @ref arnm_destroy(), naming the same @p source.
  * @whisper Basins dug in a row, the smallest first, the stream not yet let in
  */
-arnm_graded_block_pool *arnm_create_graded_block_pool(
+arnm_graded_block_pool *arnm_graded_block_pool_create(
     arnm_graded_block_pool_options *options, arnm *source
 );
 
-arnm_result arnm_init_graded_block_pool(
+arnm_result arnm_graded_block_pool_init(
     arnm_graded_block_pool *pool, arnm_graded_block_pool_options *options, arnm *source
 );
 
@@ -177,7 +176,7 @@ void arnm_graded_block_pool_reset(arnm_graded_block_pool *pool);
 
 void arnm_graded_block_pool_release(arnm_graded_block_pool *pool, arnm *source);
 
-arnm_result arnm_graded_block_pool_destroy(arnm_graded_block_pool *pool, arnm *allocator);
+arnm_result arnm_graded_block_pool_destroy(arnm_graded_block_pool *pool, arnm *source);
 
 /** @} */
 

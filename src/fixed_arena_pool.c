@@ -53,7 +53,9 @@ static void forget_everything(arnm_fixed_arena_pool *pool) {
   pool->arena_count = 0;
   pool->acquired_count = 0;
 }
-static inline arnm_result calculate_total_reserved_memory_size(uint32_t* out_size, uint16_t arena_count, uint32_t aligned_arena_capacity) {
+static inline arnm_result calculate_total_reserved_memory_size(
+    uint32_t *out_size, uint16_t arena_count, uint32_t aligned_arena_capacity
+) {
   uint32_t arena_count_u32 = (uint32_t)arena_count;
   uint32_t descriptors_size = (uint32_t)sizeof(arnm) * arena_count_u32;
   if ((ARNM_MAX_ALLOC_SIZE - descriptors_size) / arena_count_u32 < aligned_arena_capacity) {
@@ -75,7 +77,8 @@ arnm_result arnm_fixed_arena_pool_init(
   if (!aligned_arena_capacity) { return ARNM_ERROR_ARITHMETIC_OVERFLOW; }
 
   uint32_t total_memory_size = 0;
-  arnm_result result = calculate_total_reserved_memory_size(&total_memory_size, arena_count, aligned_arena_capacity);
+  arnm_result result =
+      calculate_total_reserved_memory_size(&total_memory_size, arena_count, aligned_arena_capacity);
   if (ARNM_SUCCESS != result) { return result; }
 
   // one block for everything, so one call gets it and one call gives it back
@@ -143,7 +146,9 @@ arnm_result arnm_fixed_arena_pool_release(arnm_fixed_arena_pool *pool, arnm *sou
   // the size is recomputed from what the pool holds, the allocator comes from the caller -- the
   // same split every free in this library uses, and the same duty it puts on the caller
   uint32_t total_memory_size = 0;
-  arnm_result result = calculate_total_reserved_memory_size(&total_memory_size, pool->arena_count, pool->arena_capacity);
+  arnm_result result = calculate_total_reserved_memory_size(
+      &total_memory_size, pool->arena_count, pool->arena_capacity
+  );
   if (ARNM_SUCCESS != result) { return ARNM_ERROR_INVALID_STATE; }
   uint8_t *block = (uint8_t *)pool->arenas;
 
@@ -164,7 +169,8 @@ arnm_result arnm_fixed_arena_pool_destroy(
   // needs the pool to return them to
   if (ARNM_ERROR_RESOURCE_IN_USE == release_result) { return release_result; }
 
-  const arnm_result free_result = arnm_free((uint8_t *)pool, sizeof(arnm_fixed_arena_pool), allocator);
+  const arnm_result free_result =
+      arnm_free((uint8_t *)pool, sizeof(arnm_fixed_arena_pool), allocator);
   // a warning from either step is worth more to the caller than the success of the other
   return (ARNM_SUCCESS != release_result) ? release_result : free_result;
 }

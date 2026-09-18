@@ -81,7 +81,6 @@ static inline int arnm_clz(unsigned int bitmap) {
 #endif
 }
 
-
 /**
  * @brief The position of the lowest set bit of a 64 bit mask.
  *
