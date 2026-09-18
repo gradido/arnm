@@ -52,7 +52,7 @@ extern "C" {
  *
  * The allocator passed as `source` gives only the bookkeeping: the chain's descriptor (88 bytes
  * on a 64 bit target), the chain's list of arenas (one 32 byte handle per arena, in buckets),
- * and with @ref arnm_graded_block_pool_create() the pool struct itself (288 bytes). It grows
+ * and with @ref arnm_graded_block_pool_create() the pool struct itself (264 bytes). It grows
  * with the number of arenas, not with the number of blocks.
  *
  * A block handed back never leaves the pool: it waits on its free list for the next request of
@@ -89,6 +89,10 @@ extern "C" {
 
 /** @brief Largest grade a pool can have: 2^31, the last power of two a uint32_t size holds. */
 #define ARNM_GRADED_BLOCK_POOL_MAX_LOG2 31u
+
+/** @brief Most grades a pool can have: every power of two from 2^3 to 2^31. */
+#define ARNM_GRADED_BLOCK_POOL_MAX_GRADES                                                          \
+  (ARNM_GRADED_BLOCK_POOL_MAX_LOG2 - ARNM_GRADED_BLOCK_POOL_MIN_LOG2 + 1u)
 
 /** @brief Smallest grade when the caller names none: 2^4, 16 bytes. */
 #define ARNM_GRADED_BLOCK_POOL_DEFAULT_MIN_LOG2 4u
@@ -127,17 +131,22 @@ typedef struct arnm_graded_block_pool_options {
  * read -- @c lent_bytes and @c cached_bytes are the pool's measure -- and are written only by the
  * calls below.
  *
- * @c free_head is indexed by the grade's distance from the smallest, `exponent - min_log2`; the
- * entries past `max_log2 - min_log2` are never used.
+ * @c free_head is indexed by the grade's distance from the smallest, `exponent - min_log2`. It
+ * holds room for the most grades any pool can have, so it needs no allocation of its own and a
+ * lookup is one load off the pool; the entries past `max_log2 - min_log2` stay unused, 96 bytes
+ * with the default grades. It comes last: every field an allocation or a free reads or writes
+ * besides its one list head sits in the first 32 bytes. A pool that starts on a cache line --
+ * give it 64 byte aligned storage where that matters -- is touched on at most two lines per
+ * call, and on one for the four smallest grades.
  */
 typedef struct arnm_graded_block_pool {
   arnm *source; /**< The pool's own chain; every block lives in it. NULL before init and after
                      release. */
-  uint8_t *free_head[ARNM_GRADED_BLOCK_POOL_MAX_LOG2 + 1u]; /**< First free block per grade. */
   uint64_t lent_bytes;   /**< Block bytes out with callers, counted in whole grades. */
   uint64_t cached_bytes; /**< Block bytes waiting on the free lists. */
   uint8_t min_log2;      /**< Smallest grade. */
   uint8_t max_log2;      /**< Largest grade. */
+  uint8_t *free_head[ARNM_GRADED_BLOCK_POOL_MAX_GRADES]; /**< First free block per grade. */
 } arnm_graded_block_pool;
 
 // ********** manage the pool itself *******************
