@@ -1,8 +1,6 @@
 # Changelog
 
-Every release of arnm, newest first. A date is the day the version was set in `build.zig.zon`,
-which is not always the day a tag followed: 0.3.1, 0.4.0 and 0.8.2 carry no tag of their own.
-What 0.8.2 added went out with 0.8.3, so a consumer following tags goes from 0.8.1 to 0.8.3.
+Every release of arnm, newest first.
 
 The library was called hostmem until 0.5.0, which renamed every symbol. Entries below that
 version name the symbols as they were spelled at the time, so the record still matches the
