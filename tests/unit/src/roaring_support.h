@@ -203,8 +203,12 @@ Values Correlated(std::mt19937 &random, const Values &base, const Values &extra,
   for (uint32_t value : base) {
     if (random() % 2 == 0) { values.push_back(value); }
   }
-  while (values.size() > keep_max) {
-    values.erase(values.begin() + static_cast<long>(random() % values.size()));
+  if (values.size() > keep_max) {
+    // a uniform subset of that many in one pass: erasing one value at a time moves everything
+    // behind it, and @p base holds up to a hundred thousand here. The sort below puts the
+    // survivors back in order
+    std::shuffle(values.begin(), values.end(), random);
+    values.resize(keep_max);
   }
   values.insert(values.end(), extra.begin(), extra.end());
   std::sort(values.begin(), values.end());
