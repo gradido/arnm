@@ -311,6 +311,20 @@ TEST(RoaringQuery, EveryShapeMatchesTheReference) {
         }
         ASSERT_EQ(page, want) << "all " << all.size() << " any " << any.size() << " none "
                               << none.size() << " skip " << skip << " descending " << descending;
+
+        // the same answers asked in one walk
+        Values listed(size, 0xdeadbeefu);
+        uint32_t listed_written = 0;
+        uint64_t listed_cardinality = 0;
+        ASSERT_EQ(
+            arnm_roaring_query_listing(
+                &query, skip, size, descending, listed.data(), &listed_written, &listed_cardinality
+            ),
+            ARNM_SUCCESS
+        );
+        listed.resize(listed_written);
+        EXPECT_EQ(listed_cardinality, cardinality);
+        EXPECT_EQ(listed, page);
       }
     }
   }
@@ -382,9 +396,128 @@ TEST(RoaringQuery, ASmallSetAgainstDenseOnesMatchesTheReference) {
         }
         ASSERT_EQ(page, want) << "round " << round << " probe " << probe << " descending "
                               << descending;
+
+        Values listed(size, 0xdeadbeefu);
+        uint32_t listed_written = 0;
+        uint64_t listed_cardinality = 0;
+        ASSERT_EQ(
+            arnm_roaring_query_listing(
+                &query, skip, size, descending, listed.data(), &listed_written, &listed_cardinality
+            ),
+            ARNM_SUCCESS
+        );
+        listed.resize(listed_written);
+        EXPECT_EQ(listed_cardinality, cardinality);
+        EXPECT_EQ(listed, page);
       }
     }
   }
+}
+
+/**
+ * The union of an address's three sparse sets, counted and paged in one walk -- what a listing
+ * over an index asks for most. The count reads the spans down, so the page needs its own.
+ */
+TEST(RoaringQuery, AListingOverSparseSetsCountsAndPages) {
+  Pool pool;
+  std::mt19937 random(2029);
+  for (int round = 0; round < 10; ++round) {
+    std::vector<Values> references;
+    std::vector<std::unique_ptr<Set>> sets;
+    std::vector<const arnm_roaring_bitmap *> pointers;
+    for (int i = 0; i < 3; ++i) {
+      // sparse, and sharing values with the first: an address is in all three lists at once
+      Values values = RandomSparseValues(random, 0, 1u + random() % 3u);
+      if (i && random() % 2) { values = Correlated(random, references.front(), values, SIZE_MAX); }
+      while (values.size() > ARNM_ROARING_SPARSE_MAX) { values.pop_back(); }
+      references.push_back(values);
+      sets.push_back(std::make_unique<Set>(&pool.pool));
+      Build(&sets.back()->set, values, &pool.pool);
+      ASSERT_EQ(sets.back()->set.count, 0u) << "the test needs sparse sets";
+      pointers.push_back(&sets.back()->set);
+    }
+    const Values all_values = Matching({}, references, {}, 0, UINT32_MAX);
+    if (all_values.empty()) { continue; }
+
+    for (int probe = 0; probe < 8; ++probe) {
+      uint32_t min = 0, max = UINT32_MAX;
+      if (probe % 2) {
+        min = all_values[random() % all_values.size()];
+        max = all_values[random() % all_values.size()];
+        if (min > max) { std::swap(min, max); }
+      }
+      const arnm_roaring_query query = AnyQuery(pointers.data(), 3, min, max);
+      const Values expected = Matching({}, references, {}, min, max);
+
+      const uint32_t skip = static_cast<uint32_t>(random() % (expected.size() + 2u));
+      const uint32_t size = 1u + static_cast<uint32_t>(random() % 25u);
+      for (bool descending : {false, true}) {
+        Values listed(size, 0xdeadbeefu);
+        uint32_t written = 0;
+        uint64_t cardinality = 0;
+        ASSERT_EQ(
+            arnm_roaring_query_listing(
+                &query, skip, size, descending, listed.data(), &written, &cardinality
+            ),
+            ARNM_SUCCESS
+        );
+        listed.resize(written);
+        EXPECT_EQ(cardinality, expected.size()) << "round " << round << " probe " << probe;
+        Values want;
+        for (size_t i = skip; i < expected.size() && want.size() < size; ++i) {
+          want.push_back(descending ? expected[expected.size() - 1u - i] : expected[i]);
+        }
+        EXPECT_EQ(listed, want) << "round " << round << " probe " << probe << " descending "
+                                << descending;
+      }
+    }
+  }
+}
+
+/** A listing without room for a page is a count, and what it refuses it refuses whole. */
+TEST(RoaringQuery, AListingWithoutAPageIsACount) {
+  Pool pool;
+  Set a(&pool.pool), b(&pool.pool);
+  Build(&a.set, {1, 2, 3, 70000, 70001}, &pool.pool);
+  Build(&b.set, {2, 3, 4, 70001}, &pool.pool);
+  const arnm_roaring_bitmap *both[2] = {&a.set, &b.set};
+  arnm_roaring_query query{};
+  query.all = both;
+  query.all_count = 2;
+  query.max = UINT32_MAX;
+
+  uint32_t written = 7;
+  uint64_t cardinality = 7;
+  ASSERT_EQ(
+      arnm_roaring_query_listing(&query, 0, 0, false, nullptr, &written, &cardinality), ARNM_SUCCESS
+  );
+  EXPECT_EQ(written, 0u);
+  EXPECT_EQ(cardinality, 3u); // 2, 3, 70001
+
+  // a page that starts past everything still answers the count
+  uint32_t page[4] = {};
+  ASSERT_EQ(
+      arnm_roaring_query_listing(&query, 99, 4, true, page, &written, &cardinality), ARNM_SUCCESS
+  );
+  EXPECT_EQ(written, 0u);
+  EXPECT_EQ(cardinality, 3u);
+
+  written = 7;
+  cardinality = 7;
+  EXPECT_EQ(
+      arnm_roaring_query_listing(&query, 0, 4, false, page, &written, nullptr),
+      ARNM_ERROR_NULL_POINTER
+  );
+  EXPECT_EQ(
+      arnm_roaring_query_listing(&query, 0, 4, false, nullptr, &written, &cardinality),
+      ARNM_ERROR_NULL_POINTER
+  );
+  EXPECT_EQ(
+      arnm_roaring_query_listing(nullptr, 0, 4, false, page, &written, &cardinality),
+      ARNM_ERROR_NULL_POINTER
+  );
+  EXPECT_EQ(written, 7u);
+  EXPECT_EQ(cardinality, 7u);
 }
 
 TEST(RoaringQuery, AQueryWithNothingToMatchAnswersNothing) {

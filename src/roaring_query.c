@@ -17,12 +17,12 @@
 
 /** The containers of one key the union has, and the part of the range that key covers. */
 typedef struct key_union {
-  const arnm_roaring_container *parts[ARNM_ROARING_QUERY_MAX];
-  uint32_t count;
-  uint16_t key;
-  uint16_t low;
-  uint16_t high;
-  bool any_bitmap;
+  const arnm_roaring_container *parts[ARNM_ROARING_QUERY_MAX]; /**< The sets that hold this key. */
+  uint32_t count;                                              /**< Parts in use. */
+  uint16_t key;    /**< The upper 16 bits the values share. */
+  uint16_t low;    /**< Lowest low part the range leaves of this key. */
+  uint16_t high;   /**< Highest low part the range leaves of this key. */
+  bool any_bitmap; /**< At least one part is a bitmap, so bits are the cheaper merge. */
 } key_union;
 
 /**
@@ -60,10 +60,10 @@ static inline void part_reach(
 
 /** The part of each sparse set inside [min, max]; empty sets and empty parts left out. */
 typedef struct sparse_spans {
-  const uint32_t *values[ARNM_ROARING_QUERY_MAX];
-  uint32_t begin[ARNM_ROARING_QUERY_MAX];
-  uint32_t end[ARNM_ROARING_QUERY_MAX];
-  uint32_t count;
+  const uint32_t *values[ARNM_ROARING_QUERY_MAX]; /**< Each set's sorted values. */
+  uint32_t begin[ARNM_ROARING_QUERY_MAX];         /**< First index inside the range. */
+  uint32_t end[ARNM_ROARING_QUERY_MAX];           /**< One past the last index inside it. */
+  uint32_t count;                                 /**< Spans in use. */
 } sparse_spans;
 
 /** Whether every set is sparse or missing, and so the union can be read off the arrays. */
@@ -85,6 +85,8 @@ static void sparse_spans_of(
   for (uint32_t s = 0; s < count; ++s) {
     const arnm_roaring_bitmap *set = sets[s];
     if (!set || !set->cardinality) { continue; }
+    // no shortcut for an unbounded end: the searches already turn back on the first compare
+    // when the bound lies outside the array, and a branch here only costs the bounded case
     const uint32_t begin = arnm_roaring_lower_bound32(set->values, set->cardinality, min);
     const uint32_t end = arnm_roaring_upper_bound32(set->values, set->cardinality, max);
     if (begin == end) { continue; }
@@ -211,14 +213,17 @@ static uint32_t sparse_union_page(
     }
     return take;
   }
+  // the value each span stands on, kept beside the spans: a page of twenty asks for it twice
+  // per span and value, and reading it again means a pointer and an index every time
+  uint32_t head[ARNM_ROARING_QUERY_MAX];
+  // ascending reads each span from its front, descending from its back
+  for (uint32_t p = 0; p < spans->count; ++p) {
+    head[p] = descending ? spans->values[p][spans->end[p] - 1u] : spans->values[p][spans->begin[p]];
+  }
   while (written < size && spans->count) {
-    // ascending reads each span from its front, descending from its back
-    uint32_t pick =
-        descending ? spans->values[0][spans->end[0] - 1u] : spans->values[0][spans->begin[0]];
+    uint32_t pick = head[0];
     for (uint32_t p = 1; p < spans->count; ++p) {
-      const uint32_t value =
-          descending ? spans->values[p][spans->end[p] - 1u] : spans->values[p][spans->begin[p]];
-      if (descending ? value > pick : value < pick) { pick = value; }
+      if (descending ? head[p] > pick : head[p] < pick) { pick = head[p]; }
     }
     if (skip) {
       --skip;
@@ -226,22 +231,23 @@ static uint32_t sparse_union_page(
       out[written++] = pick;
     }
     for (uint32_t p = 0; p < spans->count;) {
-      const uint32_t value =
-          descending ? spans->values[p][spans->end[p] - 1u] : spans->values[p][spans->begin[p]];
-      if (value == pick) {
-        if (descending) {
-          spans->end[p]--;
-        } else {
-          spans->begin[p]++;
-        }
-        if (spans->begin[p] == spans->end[p]) {
-          --spans->count;
-          spans->values[p] = spans->values[spans->count];
-          spans->begin[p] = spans->begin[spans->count];
-          spans->end[p] = spans->end[spans->count];
-          continue;
-        }
+      if (head[p] != pick) {
+        ++p;
+        continue;
       }
+      // every span standing on the value moves on; one that runs out is dropped
+      const bool empty =
+          descending ? --spans->end[p] == spans->begin[p] : ++spans->begin[p] == spans->end[p];
+      if (empty) {
+        --spans->count;
+        spans->values[p] = spans->values[spans->count];
+        spans->begin[p] = spans->begin[spans->count];
+        spans->end[p] = spans->end[spans->count];
+        head[p] = head[spans->count];
+        continue;
+      }
+      head[p] =
+          descending ? spans->values[p][spans->end[p] - 1u] : spans->values[p][spans->begin[p]];
       ++p;
     }
   }
@@ -278,16 +284,16 @@ static uint32_t key_union_words(const key_union *u, uint64_t *words) {
   return arnm_roaring_clip_and_count(words, u->low, u->high);
 }
 
-/*
+/**
  * Index spans of a key's arrays inside [low, high], for merging them. The merges only run below
  * ROARING_UNION_BITS_FROM array values in the range, so a wide part's slice is copied into
  * @c lows as low parts -- a few dozen values -- and merged like any array.
  */
 typedef struct array_spans {
-  const uint16_t *array[ARNM_ROARING_QUERY_MAX];
-  uint32_t begin[ARNM_ROARING_QUERY_MAX];
-  uint32_t end[ARNM_ROARING_QUERY_MAX];
-  uint16_t lows[ROARING_UNION_BITS_FROM];
+  const uint16_t *array[ARNM_ROARING_QUERY_MAX]; /**< Each part's low parts, sorted. */
+  uint32_t begin[ARNM_ROARING_QUERY_MAX];        /**< First index inside the range. */
+  uint32_t end[ARNM_ROARING_QUERY_MAX];          /**< One past the last index inside it. */
+  uint16_t lows[ROARING_UNION_BITS_FROM];        /**< Room for a wide view's values as low parts. */
 } array_spans;
 
 static void key_union_spans(const key_union *u, array_spans *spans) {
@@ -488,10 +494,10 @@ typedef struct cursor {
   const uint64_t *words; /**< the bitmap's words, NULL for an array */
   uint32_t index;        /**< array: next index ascending, one past it descending */
   uint32_t stop;         /**< array: the index the walk ends at */
-  uint32_t word_index;
-  uint64_t word;  /**< bitmap: bits of word_index not yet read, range edges masked */
-  uint32_t value; /**< the low part it stands on */
-  bool live;
+  uint32_t word_index;   /**< bitmap: the word @c word was loaded from */
+  uint64_t word;         /**< bitmap: bits of word_index not yet read, range edges masked */
+  uint32_t value;        /**< the low part it stands on */
+  bool live;             /**< false once the range is read out; @c value is stale then */
 } cursor;
 
 /** Loads the next bitmap word that has a bit left inside the range, or ends the cursor. */
@@ -708,31 +714,31 @@ static uint32_t key_union_emit(
 
 /** The parts of one key, sorted into the query's three lists, and the range that key covers. */
 typedef struct query_key {
-  const arnm_roaring_container *all[ARNM_ROARING_QUERY_MAX];
-  const arnm_roaring_container *any[ARNM_ROARING_QUERY_MAX];
-  const arnm_roaring_container *none[ARNM_ROARING_QUERY_MAX];
-  uint32_t all_count;
-  uint32_t any_count;
-  uint32_t none_count;
-  uint16_t key;
-  uint16_t low;
-  uint16_t high;
+  const arnm_roaring_container *all[ARNM_ROARING_QUERY_MAX];  /**< A value must be in each. */
+  const arnm_roaring_container *any[ARNM_ROARING_QUERY_MAX];  /**< A value must be in one. */
+  const arnm_roaring_container *none[ARNM_ROARING_QUERY_MAX]; /**< A value must be in none. */
+  uint32_t all_count;                                         /**< Containers in @c all. */
+  uint32_t any_count;                                         /**< Containers in @c any. */
+  uint32_t none_count;                                        /**< Containers in @c none. */
+  uint16_t key;  /**< The upper 16 bits the values share. */
+  uint16_t low;  /**< Lowest low part the range leaves of this key. */
+  uint16_t high; /**< Highest low part the range leaves of this key. */
 } query_key;
 
 /** Where each set of the query stands while its keys are walked, in one direction. */
 typedef struct query_walk {
-  arnm_roaring_source all[ARNM_ROARING_QUERY_MAX];
-  arnm_roaring_source any[ARNM_ROARING_QUERY_MAX];
-  arnm_roaring_source none[ARNM_ROARING_QUERY_MAX];
-  uint32_t all_count;
-  uint32_t any_count;
-  uint32_t none_count;
-  uint32_t min;
-  uint32_t max;
-  bool descending;
-  bool narrow; /**< a page narrows each key to what its parts reach; a count keeps the bounds */
-  bool have_key;
-  uint16_t key; /**< the key last returned, whose sources move on next */
+  arnm_roaring_source all[ARNM_ROARING_QUERY_MAX];  /**< The sets a value must be in. */
+  arnm_roaring_source any[ARNM_ROARING_QUERY_MAX];  /**< The sets a value may be in. */
+  arnm_roaring_source none[ARNM_ROARING_QUERY_MAX]; /**< The sets a value must stay out of. */
+  uint32_t all_count;                               /**< Sources in @c all. */
+  uint32_t any_count;                               /**< Sources in @c any. */
+  uint32_t none_count;                              /**< Sources in @c none. */
+  uint32_t min;                                     /**< First value of the range. */
+  uint32_t max;                                     /**< Last value of the range. */
+  bool descending;                                  /**< Walking from the largest key down. */
+  bool narrow;   /**< a page narrows each key to what its parts reach; a count keeps the bounds */
+  bool have_key; /**< a key was returned before, so @c key says where the walk stands */
+  uint16_t key;  /**< the key last returned, whose sources move on next */
 } query_walk;
 
 static void query_walk_begin(
@@ -891,8 +897,8 @@ typedef struct part_probe {
   const uint64_t *words; /**< a bitmap's words, NULL otherwise */
   const uint16_t *array; /**< an array's values, NULL otherwise */
   const uint32_t *wide;  /**< a wide view's values, NULL otherwise */
-  uint32_t count;
-  uint16_t key;
+  uint32_t count;        /**< values in the array or the wide view */
+  uint16_t key;          /**< the key, to build a wide view's 32 bit values back */
 } part_probe;
 
 static inline part_probe probe_of(const arnm_roaring_container *container) {
@@ -921,12 +927,12 @@ static inline bool probe_has(const part_probe *probe, uint16_t low) {
 
 /** The parts a value has to be checked against once the driver has it. */
 typedef struct key_probes {
-  part_probe all[ARNM_ROARING_QUERY_MAX];
-  part_probe any[ARNM_ROARING_QUERY_MAX];
-  part_probe none[ARNM_ROARING_QUERY_MAX];
-  uint32_t all_count;
-  uint32_t any_count;
-  uint32_t none_count;
+  part_probe all[ARNM_ROARING_QUERY_MAX];  /**< The parts of @c all but the driver. */
+  part_probe any[ARNM_ROARING_QUERY_MAX];  /**< The parts of @c any. */
+  part_probe none[ARNM_ROARING_QUERY_MAX]; /**< The parts of @c none. */
+  uint32_t all_count;                      /**< Probes in @c all. */
+  uint32_t any_count;                      /**< Probes in @c any. */
+  uint32_t none_count;                     /**< Probes in @c none. */
 } key_probes;
 
 static void key_probes_of(const query_key *key, uint32_t driver, key_probes *probes) {
@@ -1285,6 +1291,56 @@ arnm_result arnm_roaring_query_cardinality(const arnm_roaring_query *query, uint
     }
   }
   *out = total;
+  return ARNM_SUCCESS;
+}
+
+arnm_result arnm_roaring_query_listing(
+    const arnm_roaring_query *query,
+    uint32_t skip,
+    uint32_t size,
+    bool descending,
+    uint32_t *out,
+    uint32_t *written,
+    uint64_t *cardinality
+) {
+  const arnm_result result = check_query(query);
+  if (ARNM_SUCCESS != result) { return result; }
+  if (!written || !cardinality || (size && !out)) { return ARNM_ERROR_NULL_POINTER; }
+  uint64_t total = 0;
+  uint32_t taken = 0;
+  if (query->min <= query->max) {
+    if (query_is_sparse_union(query)) {
+      sparse_spans spans;
+      sparse_spans_of(query->any, query->any_count, query->min, query->max, &spans);
+      if (spans.count) {
+        // both readers walk the spans down, so the page gets its own copy of them
+        sparse_spans page_spans = spans;
+        total = sparse_union_cardinality(&spans);
+        if (size) { taken = sparse_union_page(&page_spans, skip, size, descending, out); }
+      }
+    } else {
+      uint64_t words[ARNM_ROARING_BITMAP_WORDS];
+      uint64_t scratch[ARNM_ROARING_BITMAP_WORDS];
+      query_walk walk;
+      query_walk_begin(&walk, query, descending, true);
+      query_key key;
+      while (query_walk_next(&walk, &key)) {
+        // counted once; only the key the page starts in is read a second time, value by value
+        const uint64_t in_key = query_key_cardinality(&key, words, scratch);
+        total += in_key;
+        if (taken < size) {
+          if (skip >= in_key) {
+            skip -= (uint32_t)in_key;
+          } else {
+            taken +=
+                query_key_page(&key, &skip, size - taken, descending, out + taken, words, scratch);
+          }
+        }
+      }
+    }
+  }
+  *written = taken;
+  *cardinality = total;
   return ARNM_SUCCESS;
 }
 

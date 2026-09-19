@@ -43,7 +43,7 @@ extern "C" {
  * @ref arnm_graded_block_pool_free() and @ref arnm_graded_block_pool_realloc() work the grade
  * out again from the size they are told, the way every allocator in arnm does. A container that
  * already knows its block as a power of two says so instead, with
- * @ref arnm_graded_block_pool_alloc_log2() and @ref arnm_graded_block_pool_free_log2(): inline,
+ * @c arnm_graded_block_pool_alloc_log2() and @c arnm_graded_block_pool_free_log2(): inline,
  * no rounding, no checks beyond the grade bounds and the lent counter. Nothing is
  * stored next to a block, and a free block keeps the link to the next one in its own first 8
  * bytes, which is why no grade is smaller than 8 bytes.
@@ -340,7 +340,7 @@ arnm_result arnm_graded_block_pool_free(
 // ********** blocks by exponent, the hot path *******************
 
 /**
- * @brief The part of @ref arnm_graded_block_pool_alloc_log2() behind an empty free list: a block
+ * @brief The part of @c arnm_graded_block_pool_alloc_log2() behind an empty free list: a block
  *        cut from the current arena, or from a fresh one.
  *
  * Called by the inline path; call that instead. @p log2 is already inside the pool's grades.

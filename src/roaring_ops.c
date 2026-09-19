@@ -17,11 +17,11 @@
 
 /** A container restricted to [low, high]; for an array also the index span inside it. */
 typedef struct clip {
-  const arnm_roaring_container *container;
-  uint16_t low;
-  uint16_t high;
-  uint32_t begin; /**< arrays: first index inside the range */
-  uint32_t end;   /**< arrays: one past the last index inside the range */
+  const arnm_roaring_container *container; /**< The container itself. */
+  uint16_t low;                            /**< Lowest low part inside the range. */
+  uint16_t high;                           /**< Highest low part inside the range. */
+  uint32_t begin;                          /**< arrays: first index inside the range */
+  uint32_t end;                            /**< arrays: one past the last index inside the range */
 } clip;
 
 static clip make_clip(const arnm_roaring_container *container, uint16_t low, uint16_t high) {

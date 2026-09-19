@@ -20,10 +20,10 @@ next build.
 Entries before 0.4.0 were reconstructed from the git history after the fact, so they summarise
 what the commits show rather than what was noted at the time.
 
-## Unreleased
+## 0.8.3 -- 2026-09-19
 
-New headers and functions only. Nothing that existed changes what it does: code built against 0.8.2 builds and
-behaves the same, so by the rule above this is a patch.
+New headers and functions only. Nothing that existed changes what it does: code built against
+0.8.2 builds and behaves the same, so by the rule above this is a patch.
 
 ### Added
 
@@ -70,7 +70,9 @@ behaves the same, so by the rule above this is a patch.
     again when a block is refused.
   - **`arnm/roaring_query.h`** -- what answers without building: an `arnm_roaring_query` names
     the sets a value has to be in (`all`), one of (`any`) and none of (`none`), plus a range,
-    and `arnm_roaring_query_cardinality()` and `_page()` answer it. Keys where the sets do not
+    and `arnm_roaring_query_cardinality()`, `_page()` and `_listing()` answer it --
+    `_listing()` being the count and one page from a single walk, which is what a listing over an
+    index asks for. Keys where the sets do not
     meet are passed over, a key is read from its smallest set while there are few values and
     combined in bits once there are many, a page narrows each key to what its parts reach, and
     the newest match is a page of one. Nothing is allocated, so no pool is named.

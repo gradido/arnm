@@ -309,11 +309,12 @@ arnm_result arnm_roaring_values_result(
 
 // ********** a set read key by key *******************
 
+/** One set being walked key by key inside a range, whatever form it is in. */
 typedef struct arnm_roaring_source {
-  const arnm_roaring_bitmap *set;
-  uint16_t min_key;
-  uint16_t max_key;
-  bool descending;
+  const arnm_roaring_bitmap *set; /**< The set read; never NULL while the source lives. */
+  uint16_t min_key;               /**< First key of the range. */
+  uint16_t max_key;               /**< Last key of the range. */
+  bool descending;                /**< Walking from the largest key down. */
   /** containers: the current one ascending, one past it descending; sparse: the first value of
    *  the current key ascending, one past its last descending */
   uint32_t position;
@@ -322,7 +323,7 @@ typedef struct arnm_roaring_source {
    *  reads the values in place instead, as a wide view */
   uint16_t *buffer;
   const arnm_roaring_container *current; /**< NULL once the range is done */
-  arnm_roaring_container view;
+  arnm_roaring_container view;           /**< What @c current points at for a sparse set. */
 } arnm_roaring_source;
 
 /** Positions @p source at the first key of [min, max] in walking order and loads its container. */

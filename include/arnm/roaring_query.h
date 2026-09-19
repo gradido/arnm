@@ -102,6 +102,42 @@ arnm_result arnm_roaring_query_page(
     uint32_t *written
 );
 
+/**
+ * @brief One listing: how many values @p query matches, and one page of them, in a single walk.
+ *
+ * What a listing over an index asks for -- "how many, and show me these twenty" -- answered
+ * without reading the sets twice. Asking @ref arnm_roaring_query_cardinality() and
+ * @ref arnm_roaring_query_page() one after the other walks everything the query touches twice;
+ * here every key is counted once, and only the key the page starts in, and the ones it runs
+ * through, are read value by value on top of that.
+ *
+ * A @p size of 0 asks for the count alone, and @p out may then be NULL.
+ *
+ * @param[in]  query       The query; not NULL.
+ * @param[in]  skip        Values to pass over first, from the end the page starts at.
+ * @param[in]  size        Most values to write.
+ * @param[in]  descending  Start from the largest matching value and go down.
+ * @param[out] out         Room for @p size values; not NULL unless @p size is 0.
+ * @param[out] written     Receives how many were written; not NULL. Untouched on failure.
+ * @param[out] cardinality Receives the matches in the whole range, however small the page is;
+ *                         not NULL. Untouched on failure.
+ * @retval ARNM_SUCCESS             @p *written values are in @p out and @p *cardinality is the
+ *                                  count.
+ * @retval ARNM_ERROR_NULL_POINTER  @p query, @p written, @p cardinality, or @p out with a
+ *                                  @p size, is NULL.
+ * @retval ARNM_ERROR_INVALID_PARAM A list is longer than @ref ARNM_ROARING_QUERY_MAX.
+ * @whisper How many drops there are, and the twenty newest, counted in one pass of the hand
+ */
+arnm_result arnm_roaring_query_listing(
+    const arnm_roaring_query *query,
+    uint32_t skip,
+    uint32_t size,
+    bool descending,
+    uint32_t *out,
+    uint32_t *written,
+    uint64_t *cardinality
+);
+
 /** @} */
 
 #ifdef __cplusplus
