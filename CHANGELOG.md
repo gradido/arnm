@@ -54,26 +54,29 @@ behaves the same, so by the rule above this is a patch.
   of 1 to 4096 bytes replaced 4 million times stayed within 12 MiB of pool, where an arena alone
   had used 498 MiB after a sixteenth of the steps; a replacement cost 10 ns instead of the 79 ns
   of malloc and free.
-- **`arnm/roaring_bitmap.h`: a compressed set of `uint32_t` values that only grows upwards.**
+- **Three headers for a compressed set of `uint32_t` values that only grows upwards.**
   The roaring layout -- 16 bit keys, each with an array of up to 4096 low parts or an 8 KiB
   bitmap -- restricted to what sets of sequence numbers need: values are added in ascending
-  order only, and there are no run containers. Every block comes from an
+  order only, and there are no run containers. A set of up to `ARNM_ROARING_SPARSE_MAX` (1024)
+  values has no containers at all: it is one sorted array of the values, 4 bytes each, which is
+  what the sets of an ordinary address on a long chain look like. Every block comes from an
   `arnm_graded_block_pool` passed to each call that allocates, so a set is 24 bytes with no
-  pointer to its pool. `arnm_roaring_add()`, `_contains()`, `_minimum()`, `_maximum()`,
-  `_cardinality()`, `_range_cardinality()`, `_select()` and `_page()` (ascending or descending,
-  with a skip), and `_and()`, `_or()`, `_andnot()` and `_copy_range()` into an empty result set.
+  pointer to its pool. The three headers split by what a call costs:
+  - **`arnm/roaring_bitmap.h`** -- the set: `arnm_roaring_add()` and one set read, namely
+    `_contains()`, `_minimum()`, `_maximum()`, `_cardinality()`, `_range_cardinality()`,
+    `_select()` and `_page()` (ascending or descending, with a skip).
+  - **`arnm/roaring_ops.h`** -- what builds a new set: `arnm_roaring_and()`, `_or()`,
+    `_andnot()` and `_copy_range()`, each into an empty set the caller provides, left empty
+    again when a block is refused.
+  - **`arnm/roaring_query.h`** -- what answers without building: an `arnm_roaring_query` names
+    the sets a value has to be in (`all`), one of (`any`) and none of (`none`), plus a range,
+    and `arnm_roaring_query_cardinality()` and `_page()` answer it. Keys where the sets do not
+    meet are passed over, a key is read from its smallest set while there are few values and
+    combined in bits once there are many, a page narrows each key to what its parts reach, and
+    the newest match is a page of one. Nothing is allocated, so no pool is named.
+
   Every range is closed, `[min, max]`, and is applied while the inputs are read: containers
-  outside it are never touched, no range set is built, and only the two edge words of a bitmap
-  container are masked. A failed operation leaves its result empty and its inputs untouched.
-  `_union_cardinality()` and `_union_page()` read the union of up to eight sets inside a range
-  without building it: key by key, a key only one set has read from its container, a shared one
-  merged or, past 128 array values or with a bitmap among them, counted in bits on the stack; a
-  page passes over whole keys by their count and stops once full. "The newest 20 transactions an
-  address is involved in" reads one key instead of building the union of three sets.
-  A set of up to `ARNM_ROARING_SPARSE_MAX` (1024) values has no containers: it is one sorted
-  array of the values, 4 bytes each, and turns into containers once it passes the limit. The sets
-  of an ordinary address on a long chain are spread one or two values per key, where containers
-  cost some 30 bytes a value and a block to fetch each.
+  outside it are never touched and no range set is ever built.
 - **`arnm_popcountll()` and `arnm_clzll()`** in `arnm/bitmap.h`, the 64 bit count and scan the
   bitmap containers need.
 - **`arnm/bit.h`**: `arnm_pow2_u32()`, `arnm_pow2_u16()`, `arnm_mul_pow2_u32()`,

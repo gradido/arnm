@@ -71,12 +71,12 @@ extern "C" {
  * Pass `0` and `UINT32_MAX` for no restriction. A range is applied while a set is read, so the
  * containers outside it are never touched and no range set is ever built.
  *
- * ### Set operations
+ * ### Three headers
  *
- * @ref arnm_roaring_and(), @ref arnm_roaring_or(), @ref arnm_roaring_andnot() and
- * @ref arnm_roaring_copy_range() build their result into an empty set the caller provides. A
- * result container picks its kind by its size, whatever its inputs were. On failure the result
- * set is left empty, its blocks back in the pool, and the inputs are untouched.
+ * This one holds the set: building it, and reading one of them. @ref arnm_roaring_ops builds a
+ * new set out of others -- and, or, andnot, a range copied out. @ref arnm_roaring_query answers
+ * a question over several sets -- how many, which page, the first or the last -- without
+ * building anything at all, which is what a filter over an index asks for.
  *
  * @note A zeroed @ref arnm_roaring_bitmap is an empty set; @ref arnm_roaring_init() is the same
  *       thing spelled out.
@@ -241,146 +241,6 @@ bool arnm_roaring_select(const arnm_roaring_bitmap *set, uint32_t rank, uint32_t
  */
 uint32_t arnm_roaring_page(
     const arnm_roaring_bitmap *set, uint32_t skip, uint32_t size, bool descending, uint32_t *out
-);
-
-// ********** reading a union without building it *******************
-
-/** @brief Most sets @ref arnm_roaring_union_cardinality() and @ref arnm_roaring_union_page()
- *         read at once. */
-#define ARNM_ROARING_UNION_MAX 8u
-
-/**
- * @brief Values in the union of @p sets inside `[min, max]`, counted without building the union.
- *
- * The sets are walked key by key inside the range. A key only one set has is counted from that
- * container, a key several sets share from their arrays merged or, where a bitmap is among them,
- * from one bitmap on the stack. Nothing is allocated. "Every transaction an address is involved
- * in" is such a union -- balance, signer and other -- and this is its count.
- *
- * @param[in]  sets  The sets; not NULL. An entry may be NULL and counts as empty.
- * @param[in]  count Sets in @p sets, 0 to @ref ARNM_ROARING_UNION_MAX.
- * @param[in]  min   Smallest value counted.
- * @param[in]  max   Largest value counted.
- * @param[out] out   Receives the count; not NULL. Untouched on failure.
- * @retval ARNM_SUCCESS             Counted; 0 for an empty range or no sets.
- * @retval ARNM_ERROR_NULL_POINTER  @p sets or @p out is NULL.
- * @retval ARNM_ERROR_INVALID_PARAM @p count is past @ref ARNM_ROARING_UNION_MAX.
- * @whisper Heads counted where the streams meet, without pouring them into one basin
- */
-arnm_result arnm_roaring_union_cardinality(
-    const arnm_roaring_bitmap *const *sets,
-    uint32_t count,
-    uint32_t min,
-    uint32_t max,
-    uint64_t *out
-);
-
-/**
- * @brief A page of the union of @p sets inside `[min, max]`, without building the union.
- *
- * As @ref arnm_roaring_page() over the union restricted to the range: up to @p size values
- * after skipping @p skip, ascending from the smallest value in the range or descending from the
- * largest. Keys are passed over whole by their count while @p skip lasts; only the key the page
- * starts in and the ones it runs through are read value by value. "The newest 20 transactions
- * of an address" is this call with @p descending and a @p skip of 0: it reads the top key and
- * stops.
- *
- * @param[in]  sets       The sets; not NULL. An entry may be NULL and counts as empty.
- * @param[in]  count      Sets in @p sets, 0 to @ref ARNM_ROARING_UNION_MAX.
- * @param[in]  min        Smallest value the page may hold.
- * @param[in]  max        Largest value the page may hold.
- * @param[in]  skip       Values of the range to pass over first, from the end the page starts at.
- * @param[in]  size       Most values to write.
- * @param[in]  descending Start from the largest value in the range and go down.
- * @param[out] out        Room for @p size values; not NULL unless @p size is 0.
- * @param[out] written    Receives how many were written; not NULL. Untouched on failure.
- * @retval ARNM_SUCCESS             @p *written values are in @p out, fewer than @p size when the
- *                                  range runs out.
- * @retval ARNM_ERROR_NULL_POINTER  @p sets, @p written, or @p out with a @p size, is NULL.
- * @retval ARNM_ERROR_INVALID_PARAM @p count is past @ref ARNM_ROARING_UNION_MAX.
- * @whisper The newest drops are taken from where the streams meet, the rest left to flow
- */
-arnm_result arnm_roaring_union_page(
-    const arnm_roaring_bitmap *const *sets,
-    uint32_t count,
-    uint32_t min,
-    uint32_t max,
-    uint32_t skip,
-    uint32_t size,
-    bool descending,
-    uint32_t *out,
-    uint32_t *written
-);
-
-// ********** set operations *******************
-
-/**
- * @brief @p out = @p a AND @p b, restricted to `[min, max]`.
- *
- * Only keys present in both inputs are looked at, and only those inside the range.
- *
- * @param[in,out] out  Result; not NULL, empty, neither @p a nor @p b. Empty again on failure.
- * @param[in]     a    First input; not NULL.
- * @param[in]     b    Second input; not NULL.
- * @param[in]     min  Smallest value the result may hold.
- * @param[in]     max  Largest value the result may hold.
- * @param[in,out] pool Pool for the result's blocks; not NULL.
- * @retval ARNM_SUCCESS              @p out holds the result, possibly empty.
- * @retval ARNM_ERROR_NULL_POINTER   A pointer is NULL.
- * @retval ARNM_ERROR_INVALID_PARAM  @p out is not empty, or is one of the inputs.
- * @return Any refusal of @ref arnm_graded_block_pool_alloc(); @p out is then empty.
- * @whisper Only what stands in both fields, and only inside the fence
- */
-arnm_result arnm_roaring_and(
-    arnm_roaring_bitmap *out,
-    const arnm_roaring_bitmap *a,
-    const arnm_roaring_bitmap *b,
-    uint32_t min,
-    uint32_t max,
-    arnm_graded_block_pool *pool
-);
-
-/**
- * @brief @p out = @p a OR @p b, restricted to `[min, max]`.
- *
- * Parameters and results as @ref arnm_roaring_and(). Can additionally answer
- * @ref ARNM_ERROR_RESOURCE_EXHAUSTED when the union would hold more than UINT32_MAX values.
- */
-arnm_result arnm_roaring_or(
-    arnm_roaring_bitmap *out,
-    const arnm_roaring_bitmap *a,
-    const arnm_roaring_bitmap *b,
-    uint32_t min,
-    uint32_t max,
-    arnm_graded_block_pool *pool
-);
-
-/**
- * @brief @p out = @p a AND NOT @p b, restricted to `[min, max]`.
- *
- * Parameters and results as @ref arnm_roaring_and(). Only the keys of @p a inside the range
- * are looked at.
- */
-arnm_result arnm_roaring_andnot(
-    arnm_roaring_bitmap *out,
-    const arnm_roaring_bitmap *a,
-    const arnm_roaring_bitmap *b,
-    uint32_t min,
-    uint32_t max,
-    arnm_graded_block_pool *pool
-);
-
-/**
- * @brief @p out = the values of @p a inside `[min, max]`.
- *
- * Parameters and results as @ref arnm_roaring_and(), with @p a as the only input.
- */
-arnm_result arnm_roaring_copy_range(
-    arnm_roaring_bitmap *out,
-    const arnm_roaring_bitmap *a,
-    uint32_t min,
-    uint32_t max,
-    arnm_graded_block_pool *pool
 );
 
 /** @} */
