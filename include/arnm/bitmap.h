@@ -45,7 +45,7 @@ extern "C" {
  */
 #if defined(_MSC_VER) && !defined(_WIN64)
 #error                                                                                             \
-    "arnm_ctzll needs a 64 bit scan; _BitScanForward64 is x64/ARM64 only. Build for x64/ARM64, or add a 32 bit fallback here (two _BitScanForward passes, low word then high)."
+    "arnm_ctzll and arnm_clzll need a 64 bit scan; _BitScanForward64 and _BitScanReverse64 are x64/ARM64 only. Build for x64/ARM64, or add a 32 bit fallback here (two _BitScanForward passes, low word then high)."
 #endif
 
 /**
@@ -110,6 +110,25 @@ static inline int arnm_ctzll(unsigned long long bitmap) {
 }
 
 /**
+ * @brief The number of zeros above the highest set bit of a 64 bit mask.
+ *
+ * As @ref arnm_clz(), one word wider: 63 minus the answer is the index of the highest set bit.
+ *
+ * @param[in] bitmap Mask to scan; must have at least one bit set.
+ * @return 0 to 63. Undefined where @p bitmap is 0.
+ * @whisper The last light in a longer row
+ */
+static inline int arnm_clzll(unsigned long long bitmap) {
+#if defined(_MSC_VER)
+  unsigned long index;
+  _BitScanReverse64(&index, (unsigned __int64)bitmap);
+  return 63 - (int)index;
+#else
+  return __builtin_clzll(bitmap);
+#endif
+}
+
+/**
  * @brief How many bits of a 32 bit mask are set.
  *
  * Counted over the bits below a position, this is what turns a sparse mask into a dense index:
@@ -141,6 +160,27 @@ static inline int arnm_popcount(unsigned int bitmap) {
   return (int)((bitmap * 0x01010101u) >> 24);
 #else
   return __builtin_popcount(bitmap);
+#endif
+}
+
+/**
+ * @brief How many bits of a 64 bit mask are set.
+ *
+ * As @ref arnm_popcount(), one word wider: the count a bitmap of 64 bit words is summed with.
+ * On MSVC the same software fold, for the same reason, over 64 bits.
+ *
+ * @param[in] bitmap Mask to count; 0 answers 0.
+ * @return The number of set bits, 0 to 64.
+ * @whisper How many windows are lit along the whole street
+ */
+static inline int arnm_popcountll(unsigned long long bitmap) {
+#if defined(_MSC_VER)
+  bitmap = bitmap - ((bitmap >> 1) & 0x5555555555555555ull);
+  bitmap = (bitmap & 0x3333333333333333ull) + ((bitmap >> 2) & 0x3333333333333333ull);
+  bitmap = (bitmap + (bitmap >> 4)) & 0x0f0f0f0f0f0f0f0full;
+  return (int)((bitmap * 0x0101010101010101ull) >> 56);
+#else
+  return __builtin_popcountll(bitmap);
 #endif
 }
 

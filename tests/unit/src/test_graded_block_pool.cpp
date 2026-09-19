@@ -67,6 +67,10 @@ struct Pool {
     EXPECT_EQ(arnm_multi_arena_measure(pool.source, &stats), ARNM_SUCCESS);
     return stats;
   }
+  /** Bytes cut into blocks: the chain hands out whole arenas, the current one only in part. */
+  uint64_t Carved() const {
+    return Chain().used - arnm_arena_remaining(&pool.current);
+  }
   arnm_graded_block_pool pool{};
   arnm *source;
 };
@@ -179,7 +183,7 @@ TEST(GradedBlockPool, RequestsRoundUpToTheirGrade) {
     // the whole grade is the caller's to write
     std::memset(block, 0x5a, c.block);
   }
-  EXPECT_EQ(pool.Chain().used, lent);
+  EXPECT_EQ(pool.Carved(), lent);
 }
 
 TEST(GradedBlockPool, AFreedBlockServesTheNextRequestOfItsGrade) {
@@ -194,9 +198,9 @@ TEST(GradedBlockPool, AFreedBlockServesTheNextRequestOfItsGrade) {
   // another grade does not take it
   EXPECT_NE(pool.Alloc(128), a);
   // any size of the grade does, and the chain gives nothing new
-  const uint64_t used = pool.Chain().used;
+  const uint64_t used = pool.Carved();
   EXPECT_EQ(pool.Alloc(33), a);
-  EXPECT_EQ(pool.Chain().used, used);
+  EXPECT_EQ(pool.Carved(), used);
   EXPECT_EQ(pool.pool.cached_bytes, 0u);
 
   // last in, first out
@@ -204,7 +208,7 @@ TEST(GradedBlockPool, AFreedBlockServesTheNextRequestOfItsGrade) {
   pool.Free(b, 64);
   EXPECT_EQ(pool.Alloc(64), b);
   EXPECT_EQ(pool.Alloc(64), a);
-  EXPECT_EQ(pool.Chain().used, used);
+  EXPECT_EQ(pool.Carved(), used);
 }
 
 TEST(GradedBlockPool, ChurnOfMixedSizesStopsTakingFromTheChain) {
@@ -232,14 +236,70 @@ TEST(GradedBlockPool, ChurnOfMixedSizesStopsTakingFromTheChain) {
   };
   // warm up until every grade has come near its peak, then the chain has to stand nearly still
   churn(20000);
-  const uint64_t used = pool.Chain().used;
+  const uint64_t used = pool.Carved();
   churn(20000);
-  EXPECT_LE(pool.Chain().used, used + 64u * 1024u);
+  EXPECT_LE(pool.Carved(), used + 64u * 1024u);
 
   // the counters add up to what the chain handed out, and nothing is handed out twice
-  EXPECT_EQ(pool.pool.lent_bytes + pool.pool.cached_bytes, pool.Chain().used);
+  EXPECT_EQ(pool.pool.lent_bytes + pool.pool.cached_bytes, pool.Carved());
   std::set<uint8_t *> distinct;
   for (const auto &h : held) { EXPECT_TRUE(distinct.insert(h.block).second); }
+}
+
+TEST(GradedBlockPool, WhatAnArenaCannotHoldAnyMoreGoesOntoTheLists) {
+  Pool pool(4, 12, 1); // arenas of one 4 KiB block
+  uint8_t *small = pool.Alloc(16);
+  // 4080 bytes left, too few for 4096: cut into 2048 + 1024 + ... + 16, then a fresh arena
+  pool.Alloc(4096);
+  EXPECT_EQ(pool.Chain().arena_count, 2u);
+  EXPECT_EQ(pool.pool.cached_bytes, 4080u);
+  for (uint8_t log2 = 4; log2 <= 11; ++log2) {
+    EXPECT_NE(pool.pool.free_head[log2 - 4], nullptr) << int(log2);
+  }
+  EXPECT_EQ(pool.pool.free_head[12 - 4], nullptr);
+  // they serve the next requests of their grades, all in the first arena, right after @p small
+  EXPECT_EQ(pool.Alloc(2048), small + 16);
+  EXPECT_EQ(pool.Alloc(16), small + 4080);
+  EXPECT_EQ(pool.Chain().arena_count, 2u);
+  EXPECT_EQ(pool.pool.lent_bytes + pool.pool.cached_bytes, pool.Carved());
+}
+
+TEST(GradedBlockPool, ByExponentIsTheSameListAsBySize) {
+  Pool pool(5, 12); // smallest grade 32 bytes
+  uint8_t *block = nullptr;
+  ASSERT_EQ(arnm_graded_block_pool_alloc_log2(&pool.pool, &block, 6), ARNM_SUCCESS);
+  EXPECT_EQ(pool.pool.lent_bytes, 64u);
+  // given back by exponent, taken again by size: one list
+  EXPECT_EQ(arnm_graded_block_pool_free_log2(&pool.pool, block, 6), ARNM_SUCCESS);
+  EXPECT_EQ(pool.Alloc(50), block);
+  pool.Free(block, 64);
+  // below the smallest grade: a block of the smallest, on the smallest list
+  uint8_t *tiny = nullptr;
+  ASSERT_EQ(arnm_graded_block_pool_alloc_log2(&pool.pool, &tiny, 3), ARNM_SUCCESS);
+  EXPECT_EQ(pool.pool.lent_bytes, 32u);
+  EXPECT_EQ(arnm_graded_block_pool_free_log2(&pool.pool, tiny, 3), ARNM_SUCCESS);
+  EXPECT_EQ(pool.Alloc(32), tiny);
+  pool.Free(tiny, 32);
+
+  uint8_t *const sentinel = reinterpret_cast<uint8_t *>(uintptr_t{0x1000});
+  block = sentinel;
+  EXPECT_EQ(
+      arnm_graded_block_pool_alloc_log2(&pool.pool, &block, 13), ARNM_ERROR_RESOURCE_SIZE_EXCEED
+  );
+  EXPECT_EQ(block, sentinel);
+  EXPECT_EQ(
+      arnm_graded_block_pool_free_log2(&pool.pool, tiny, 13), ARNM_ERROR_RESOURCE_SIZE_EXCEED
+  );
+  EXPECT_EQ(arnm_graded_block_pool_free_log2(&pool.pool, tiny, 5), ARNM_ERROR_INVALID_STATE);
+  EXPECT_EQ(arnm_graded_block_pool_free_log2(&pool.pool, nullptr, 5), ARNM_SUCCESS);
+
+  // a released pool keeps its grades but nothing on the lists, so the fresh path answers
+  arnm_graded_block_pool released{};
+  arnm_graded_block_pool_options options{};
+  ASSERT_EQ(arnm_graded_block_pool_init(&released, &options, nullptr), ARNM_SUCCESS);
+  arnm_graded_block_pool_release(&released, nullptr);
+  EXPECT_EQ(arnm_graded_block_pool_alloc_log2(&released, &block, 4), ARNM_ERROR_NOT_INITIALIZED);
+  EXPECT_EQ(block, sentinel);
 }
 
 // ---------------------------------------------------------------------------

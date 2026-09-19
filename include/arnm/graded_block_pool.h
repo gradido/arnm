@@ -2,7 +2,9 @@
 #define ARNM_GRADED_BLOCK_POOL_H
 
 #include <stdint.h>
+#include <string.h>
 
+#include "arnm/bytes.h"
 #include "arnm/memory.h"
 #include "arnm/result.h"
 
@@ -39,7 +41,10 @@ extern "C" {
  * into being on request.
  *
  * @ref arnm_graded_block_pool_free() and @ref arnm_graded_block_pool_realloc() work the grade
- * out again from the size they are told, the way every allocator in arnm does. Nothing is
+ * out again from the size they are told, the way every allocator in arnm does. A container that
+ * already knows its block as a power of two says so instead, with
+ * @c arnm_graded_block_pool_alloc_log2() and @c arnm_graded_block_pool_free_log2(): inline,
+ * no rounding, no checks beyond the grade bounds and the lent counter. Nothing is
  * stored next to a block, and a free block keeps the link to the next one in its own first 8
  * bytes, which is why no grade is smaller than 8 bytes.
  *
@@ -48,11 +53,16 @@ extern "C" {
  * In a chain of arenas the pool opens for itself (see @ref arnm_multi_arena) and owns. Each of
  * its arenas holds @ref arnm_graded_block_pool_options::alloc_arena_capacity blocks of the
  * largest grade, 4 MiB with the defaults, and comes from the host when the chain needs another.
- * An arena counts as full once less than the smallest grade is left in it.
+ *
+ * The pool takes its arenas from the chain whole, one at a time, and cuts blocks off the
+ * current one at its cursor. A request the current arena can no longer hold cuts what is left
+ * of it into blocks of the grades that fit -- largest first, so at most one per grade -- puts
+ * them on their free lists and moves on to a fresh arena. Nothing is left behind in an arena,
+ * and the chain is asked once per arena, not once per block.
  *
  * The allocator passed as `source` gives only the bookkeeping: the chain's descriptor (88 bytes
  * on a 64 bit target), the chain's list of arenas (one 32 byte handle per arena, in buckets),
- * and with @ref arnm_graded_block_pool_create() the pool struct itself (264 bytes). It grows
+ * and with @ref arnm_graded_block_pool_create() the pool struct itself (296 bytes). It grows
  * with the number of arenas, not with the number of blocks.
  *
  * A block handed back never leaves the pool: it waits on its free list for the next request of
@@ -134,19 +144,25 @@ typedef struct arnm_graded_block_pool_options {
  * @c free_head is indexed by the grade's distance from the smallest, `exponent - min_log2`. It
  * holds room for the most grades any pool can have, so it needs no allocation of its own and a
  * lookup is one load off the pool; the entries past `max_log2 - min_log2` stay unused, 96 bytes
- * with the default grades. It comes last: every field an allocation or a free reads or writes
- * besides its one list head sits in the first 32 bytes. A pool that starts on a cache line --
- * give it 64 byte aligned storage where that matters -- is touched on at most two lines per
- * call, and on one for the four smallest grades.
+ * with the default grades. It comes after every field an allocation or a free reads or writes
+ * besides its one list head, which all sit in the first 32 bytes. A pool that starts on a cache
+ * line -- give it 64 byte aligned storage where that matters -- is touched on at most two lines
+ * per call from a free list, and on one for the four smallest grades.
+ *
+ * @c current is the arena blocks are cut from when a list is empty, the path that is left once
+ * per arena anyway; it comes last.
  */
 typedef struct arnm_graded_block_pool {
   arnm *source; /**< The pool's own chain; every block lives in it. NULL before init and after
                      release. */
-  uint64_t lent_bytes;   /**< Block bytes out with callers, counted in whole grades. */
-  uint64_t cached_bytes; /**< Block bytes waiting on the free lists. */
-  uint8_t min_log2;      /**< Smallest grade. */
-  uint8_t max_log2;      /**< Largest grade. */
+  uint64_t lent_bytes;     /**< Block bytes out with callers, counted in whole grades. */
+  uint64_t cached_bytes;   /**< Block bytes waiting on the free lists. */
+  uint8_t min_log2;        /**< Smallest grade. */
+  uint8_t max_log2;        /**< Largest grade. */
+  uint32_t arena_capacity; /**< Bytes of one arena, taken from the chain whole. */
   uint8_t *free_head[ARNM_GRADED_BLOCK_POOL_MAX_GRADES]; /**< First free block per grade. */
+  arnm current; /**< Arena blocks are cut from, borrowed from the chain; its cursor says how far.
+                     Zeroed while there is none. */
 } arnm_graded_block_pool;
 
 // ********** manage the pool itself *******************
@@ -320,6 +336,84 @@ arnm_result arnm_graded_block_pool_realloc(
 arnm_result arnm_graded_block_pool_free(
     arnm_graded_block_pool *pool, uint8_t *buffer, uint32_t size
 );
+
+// ********** blocks by exponent, the hot path *******************
+
+/**
+ * @brief The part of @c arnm_graded_block_pool_alloc_log2() behind an empty free list: a block
+ *        cut from the current arena, or from a fresh one.
+ *
+ * Called by the inline path; call that instead. @p log2 is already inside the pool's grades.
+ *
+ * @retval ARNM_SUCCESS               @p *buffer is the block.
+ * @retval ARNM_ERROR_NOT_INITIALIZED @p pool is zeroed or released.
+ * @retval ARNM_ERROR_OUT_OF_MEMORY   The host had no new arena, or the source no room to list it.
+ */
+arnm_result arnm_graded_block_pool_alloc_fresh(
+    arnm_graded_block_pool *pool, uint8_t **buffer, uint8_t log2
+);
+
+/**
+ * @brief Hand out a block of 2^@p log2 bytes: @ref arnm_graded_block_pool_alloc() for a caller
+ *        that already holds its sizes as powers of two.
+ *
+ * Inline, and the free list path is a handful of instructions: no rounding, no size to classify,
+ * no NULL checks. An exponent below the smallest grade takes a block of the smallest; free it
+ * with the same exponent and it finds the same list.
+ *
+ * @param[in,out] pool   Pool to take from; not NULL.
+ * @param[out]    buffer Receives the block; not NULL. Untouched on failure.
+ * @param[in]     log2   Size of the block as a power of two.
+ * @retval ARNM_SUCCESS                    @p *buffer is the block.
+ * @retval ARNM_ERROR_RESOURCE_SIZE_EXCEED @p log2 is past the largest grade.
+ * @return Any refusal of @ref arnm_graded_block_pool_alloc_fresh() when the list was empty.
+ * @whisper The cup is filled from the basin whose number it already knows
+ */
+static inline arnm_result arnm_graded_block_pool_alloc_log2(
+    arnm_graded_block_pool *pool, uint8_t **buffer, uint8_t log2
+) {
+  if (log2 > pool->max_log2) { return ARNM_ERROR_RESOURCE_SIZE_EXCEED; }
+  if (log2 < pool->min_log2) { log2 = pool->min_log2; }
+  uint8_t **head = &pool->free_head[log2 - pool->min_log2];
+  uint8_t *block = *head;
+  if (!block) { return arnm_graded_block_pool_alloc_fresh(pool, buffer, log2); }
+  *head = arnm_load_ptr(block);
+  const uint64_t bytes = (uint64_t)1u << log2;
+  pool->cached_bytes -= bytes;
+  pool->lent_bytes += bytes;
+  *buffer = block;
+  return ARNM_SUCCESS;
+}
+
+/**
+ * @brief Put a block of 2^@p log2 bytes back on its list: @ref arnm_graded_block_pool_free() by
+ *        exponent.
+ *
+ * @param[in,out] pool   Pool the block came from; not NULL.
+ * @param[in]     buffer Block to give back; NULL is a no-op.
+ * @param[in]     log2   The exponent the block was taken with.
+ * @retval ARNM_SUCCESS                    On the list, or @p buffer was NULL.
+ * @retval ARNM_ERROR_RESOURCE_SIZE_EXCEED @p log2 is past the largest grade.
+ * @retval ARNM_ERROR_INVALID_STATE        Fewer bytes are lent out than the grade has -- also the
+ *                                         answer of a released pool, which has none out.
+ * @whisper The cup goes back to the basin whose number it carries
+ */
+static inline arnm_result arnm_graded_block_pool_free_log2(
+    arnm_graded_block_pool *pool, uint8_t *buffer, uint8_t log2
+) {
+  if (!buffer) { return ARNM_SUCCESS; }
+  if (log2 > pool->max_log2) { return ARNM_ERROR_RESOURCE_SIZE_EXCEED; }
+  if (log2 < pool->min_log2) { log2 = pool->min_log2; }
+  const uint64_t bytes = (uint64_t)1u << log2;
+  // the plainest double free: more coming back than is out
+  if (pool->lent_bytes < bytes) { return ARNM_ERROR_INVALID_STATE; }
+  uint8_t **head = &pool->free_head[log2 - pool->min_log2];
+  memcpy(buffer, head, sizeof(uint8_t *));
+  *head = buffer;
+  pool->lent_bytes -= bytes;
+  pool->cached_bytes += bytes;
+  return ARNM_SUCCESS;
+}
 
 /** @} */
 

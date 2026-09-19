@@ -1,7 +1,6 @@
 # Changelog
 
-Every release of arnm, newest first. A date is the day the version was set in `build.zig.zon`,
-which is not always the day a tag followed: 0.3.1 and 0.4.0 carry no tag yet.
+Every release of arnm, newest first.
 
 The library was called hostmem until 0.5.0, which renamed every symbol. Entries below that
 version name the symbols as they were spelled at the time, so the record still matches the
@@ -20,10 +19,11 @@ next build.
 Entries before 0.4.0 were reconstructed from the git history after the fact, so they summarise
 what the commits show rather than what was noted at the time.
 
-## Unreleased
+## 0.8.3 -- 2026-09-19
 
-New headers only. Nothing that existed changes what it does: code built against 0.8.2 builds and
-behaves the same, so by the rule above this is a patch.
+New headers and functions only. Nothing that existed changes what it does: code built against
+0.8.2 builds and behaves the same, so by the rule above this is a patch. 0.8.2 never got a tag,
+so this release carries its key map and hashes as well.
 
 ### Added
 
@@ -32,7 +32,12 @@ behaves the same, so by the rule above this is a patch.
   `_release()` or `_create()` / `_destroy()`, then `_alloc()`, `_realloc()` and `_free()` -- and
   not an `arnm` handle, so no other allocator pays a branch for it. A request is rounded up to 8
   and then to the next grade, 16 bytes to 1 MiB unless the options say otherwise, and the block
-  comes from that grade's free list, or new from a chain of arenas the pool owns. `_free()` puts
+  comes from that grade's free list, or is cut from the current arena of a chain the pool owns.
+  The pool takes that chain's arenas whole, one at a time; a request the current one can no
+  longer hold cuts its rest into blocks of the grades that fit, onto their lists, before the next
+  arena is taken -- so the chain is asked once per arena and no arena keeps an unusable tail.
+  `_alloc_log2()` and `_free_log2()` are the same by exponent, inline, for a container that
+  already holds its sizes as powers of two. `_free()` puts
   it back on the list; the link lives in the free block's first 8 bytes, so nothing is stored
   per block. A request past the largest grade is refused with `ARNM_ERROR_RESOURCE_SIZE_EXCEED`.
   `_realloc()` always moves, also within a grade: the pool serves containers that grow a grade at
@@ -49,6 +54,41 @@ behaves the same, so by the rule above this is a patch.
   of 1 to 4096 bytes replaced 4 million times stayed within 12 MiB of pool, where an arena alone
   had used 498 MiB after a sixteenth of the steps; a replacement cost 10 ns instead of the 79 ns
   of malloc and free.
+- **Three headers for a compressed set of `uint32_t` values that only grows upwards.**
+  The roaring layout -- 16 bit keys, each with an array of up to 4096 low parts or an 8 KiB
+  bitmap -- restricted to what sets of sequence numbers need: values are added in ascending
+  order only, and there are no run containers. A set of up to `ARNM_ROARING_SPARSE_MAX` (1024)
+  values has no containers at all: it is one sorted array of the values, 4 bytes each, which is
+  what the sets of an ordinary address on a long chain look like. Every block comes from an
+  `arnm_graded_block_pool` passed to each call that allocates, so a set is 24 bytes with no
+  pointer to its pool. The three headers split by what a call costs:
+  - **`arnm/roaring_bitmap.h`** -- the set: `arnm_roaring_add()` and one set read, namely
+    `_contains()`, `_minimum()`, `_maximum()`, `_cardinality()`, `_range_cardinality()`,
+    `_select()` and `_page()` (ascending or descending, with a skip).
+  - **`arnm/roaring_ops.h`** -- what builds a new set: `arnm_roaring_and()`, `_or()`,
+    `_andnot()` and `_copy_range()`, each into an empty set the caller provides, left empty
+    again when a block is refused.
+  - **`arnm/roaring_query.h`** -- what answers without building: an `arnm_roaring_query` names
+    the sets a value has to be in (`all`), one of (`any`) and none of (`none`), plus a range,
+    and `arnm_roaring_query_cardinality()`, `_page()` and `_listing()` answer it --
+    `_listing()` being the count and one page from a single walk, which is what a listing over an
+    index asks for: asking the two separately walks everything twice, and on the chains measured
+    "one address's balance changes among all transfers, count and page 2" went from 0.96 to
+    0.60 us, and from 1.46 to 1.34 us on a synthetic chain of two million -- where building the
+    intersection instead, blocks and all, costs 1.31. Keys where the sets do not
+    meet are passed over, a key is read from its smallest set while there are few values and
+    combined in bits once there are many, a page narrows each key to what its parts reach, and
+    the newest match is a page of one. Nothing is allocated, so no pool is named.
+
+  Every range is closed, `[min, max]`, and is applied while the inputs are read: containers
+  outside it are never touched and no range set is ever built.
+
+  These sets count and scan bits, so a build for a CPU with POPCNT is worth asking for where
+  there is one: `-Dcpu=x86_64_v2` against the `x86_64` baseline gave 1.4x on a wide count, 2.6x
+  on a large set read through a range, and cost about a tenth on the narrow filters that walk a
+  small set value by value.
+- **`arnm_popcountll()` and `arnm_clzll()`** in `arnm/bitmap.h`, the 64 bit count and scan the
+  bitmap containers need.
 - **`arnm/bit.h`**: `arnm_pow2_u32()`, `arnm_pow2_u16()`, `arnm_mul_pow2_u32()`,
   `arnm_ceil_power_of_two()`, `arnm_log2_power_of_two()` and `arnm_is_power_of_two()`, the power of
   two arithmetic that bucket vector, graded arena pool and graded block pool used to spell out
@@ -79,7 +119,13 @@ By the rule above that is a patch.
   purpose: the id is the value, and the payload belongs in an `arnm_bvec` at that index. Written
   for the gradido transaction index, which maps 32 byte public keys to the slot its per address
   sets live in, and measured there against stb_ds, a key-in-slot table and a sorted array before
-  this layout was chosen.
+  this layout was chosen: on that chain 14 ns per `get_or_insert()`, and for a million keys
+  63 MiB behind an arena -- every table a grow left behind counted -- against 144 MiB with the key
+  inside the slot and 84 MiB at peak for stb_ds, which was also 2-3x slower and shifts into the
+  sign bit in its own hash. The sorted array reached 12 us per insert at 100k keys. Three quarters
+  full was the best of three: half bought faster misses for twice the table, seven eighths saved a
+  quarter of it and made hits and misses slower. A hash over the first 8 bytes instead of all of
+  them cost 10-25 us per operation once 20k keys shared that prefix.
 
   The table is 8 byte slots of a 32 bit hash and an id, with the keys stored once beside it in an
   `arnm_bvec`; linear probing, at most three quarters full, no delete and so no tombstones. Both

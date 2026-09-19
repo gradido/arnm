@@ -71,6 +71,43 @@ TEST(Bitmap, CountsTheBitsThatAreSet) {
   EXPECT_EQ(arnm_popcount(0b1001000100u), 3);
 }
 
+// promise: the 64 bit count agrees with the 32 bit one on each half and reaches the top word
+TEST(Bitmap, CountsTheBitsOfA64BitMask) {
+  EXPECT_EQ(arnm_popcountll(0ull), 0);
+  EXPECT_EQ(arnm_popcountll(UINT64_MAX), 64);
+  for (unsigned position = 0; position < 64u; ++position) {
+    EXPECT_EQ(arnm_popcountll(1ull << position), 1) << "at " << position;
+    EXPECT_EQ(arnm_popcountll((1ull << position) - 1ull), static_cast<int>(position))
+        << "at " << position;
+  }
+  const uint64_t mask = 0xf0f0f0f00ff00001ull;
+  EXPECT_EQ(
+      arnm_popcountll(mask),
+      arnm_popcount(static_cast<uint32_t>(mask)) + arnm_popcount(static_cast<uint32_t>(mask >> 32))
+  );
+}
+
+// promise: 31 minus the leading zeros is the index of the highest set bit, whatever lies below
+TEST(Bitmap, FindsTheHighestSetBit) {
+  for (unsigned position = 0; position < 32u; ++position) {
+    EXPECT_EQ(31 - arnm_clz(1u << position), static_cast<int>(position)) << "at " << position;
+    // the bits below do not move the answer
+    EXPECT_EQ(31 - arnm_clz((1u << position) | 1u), static_cast<int>(position))
+        << "at " << position;
+  }
+  EXPECT_EQ(arnm_clz(UINT32_MAX), 0);
+}
+
+// promise: the 64 bit scan reaches the top word and agrees with the 32 bit one below it
+TEST(Bitmap, FindsTheHighestSetBitOfA64BitMask) {
+  for (unsigned position = 0; position < 64u; ++position) {
+    EXPECT_EQ(63 - arnm_clzll(1ull << position), static_cast<int>(position)) << "at " << position;
+    EXPECT_EQ(63 - arnm_clzll((1ull << position) | 1ull), static_cast<int>(position))
+        << "at " << position;
+  }
+  EXPECT_EQ(arnm_clzll(UINT64_MAX), 0);
+}
+
 // promise: counting the bits below each set bit of a mask numbers them 0, 1, 2 ... in order --
 // the dense index arnm_graded_arena_pool builds its grade lookup on
 TEST(Bitmap, CountingBelowASetBitNumbersTheBitsDensely) {
