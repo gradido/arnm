@@ -405,7 +405,7 @@ signed to string          snprintf   58.2 ns      arnm  13.8 ns
 ## Using it from another zig project
 
 ```bash
-zig fetch --save git+https://github.com/gradido/arnm#v0.8.2
+zig fetch --save git+https://github.com/gradido/arnm#v0.8.3
 ```
 
 ```zig

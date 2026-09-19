@@ -232,6 +232,12 @@ bool arnm_roaring_select(const arnm_roaring_bitmap *set, uint32_t rank, uint32_t
  * One page of a listing without building anything. The next page is the same call with
  * @p skip grown by @p size.
  *
+ * Containers before the page are passed over by their stored count, two loads each; what a deep
+ * @p skip pays sits inside the container it lands in, where reaching a rank in a bitmap counts
+ * its words -- a page at rank 4400 of one bitmap container measured 880 ns against 19 at its
+ * front, bounded by the 1024 words a container holds. A page from the end, descending without a
+ * skip, starts at the last word and pays none of it.
+ *
  * @param[in]  set        Set to read; NULL answers 0.
  * @param[in]  skip       Values to pass over first, from the end the listing starts at.
  * @param[in]  size       Most values to write.

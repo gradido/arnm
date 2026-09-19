@@ -1,7 +1,8 @@
 # Changelog
 
 Every release of arnm, newest first. A date is the day the version was set in `build.zig.zon`,
-which is not always the day a tag followed: 0.3.1 and 0.4.0 carry no tag yet.
+which is not always the day a tag followed: 0.3.1, 0.4.0 and 0.8.2 carry no tag of their own.
+What 0.8.2 added went out with 0.8.3, so a consumer following tags goes from 0.8.1 to 0.8.3.
 
 The library was called hostmem until 0.5.0, which renamed every symbol. Entries below that
 version name the symbols as they were spelled at the time, so the record still matches the
@@ -23,7 +24,8 @@ what the commits show rather than what was noted at the time.
 ## 0.8.3 -- 2026-09-19
 
 New headers and functions only. Nothing that existed changes what it does: code built against
-0.8.2 builds and behaves the same, so by the rule above this is a patch.
+0.8.2 builds and behaves the same, so by the rule above this is a patch. 0.8.2 never got a tag,
+so this release carries its key map and hashes as well.
 
 ### Added
 
@@ -72,13 +74,21 @@ New headers and functions only. Nothing that existed changes what it does: code 
     the sets a value has to be in (`all`), one of (`any`) and none of (`none`), plus a range,
     and `arnm_roaring_query_cardinality()`, `_page()` and `_listing()` answer it --
     `_listing()` being the count and one page from a single walk, which is what a listing over an
-    index asks for. Keys where the sets do not
+    index asks for: asking the two separately walks everything twice, and on the chains measured
+    "one address's balance changes among all transfers, count and page 2" went from 0.96 to
+    0.60 us, and from 1.46 to 1.34 us on a synthetic chain of two million -- where building the
+    intersection instead, blocks and all, costs 1.31. Keys where the sets do not
     meet are passed over, a key is read from its smallest set while there are few values and
     combined in bits once there are many, a page narrows each key to what its parts reach, and
     the newest match is a page of one. Nothing is allocated, so no pool is named.
 
   Every range is closed, `[min, max]`, and is applied while the inputs are read: containers
   outside it are never touched and no range set is ever built.
+
+  These sets count and scan bits, so a build for a CPU with POPCNT is worth asking for where
+  there is one: `-Dcpu=x86_64_v2` against the `x86_64` baseline gave 1.4x on a wide count, 2.6x
+  on a large set read through a range, and cost about a tenth on the narrow filters that walk a
+  small set value by value.
 - **`arnm_popcountll()` and `arnm_clzll()`** in `arnm/bitmap.h`, the 64 bit count and scan the
   bitmap containers need.
 - **`arnm/bit.h`**: `arnm_pow2_u32()`, `arnm_pow2_u16()`, `arnm_mul_pow2_u32()`,
@@ -111,7 +121,13 @@ By the rule above that is a patch.
   purpose: the id is the value, and the payload belongs in an `arnm_bvec` at that index. Written
   for the gradido transaction index, which maps 32 byte public keys to the slot its per address
   sets live in, and measured there against stb_ds, a key-in-slot table and a sorted array before
-  this layout was chosen.
+  this layout was chosen: on that chain 14 ns per `get_or_insert()`, and for a million keys
+  63 MiB behind an arena -- every table a grow left behind counted -- against 144 MiB with the key
+  inside the slot and 84 MiB at peak for stb_ds, which was also 2-3x slower and shifts into the
+  sign bit in its own hash. The sorted array reached 12 us per insert at 100k keys. Three quarters
+  full was the best of three: half bought faster misses for twice the table, seven eighths saved a
+  quarter of it and made hits and misses slower. A hash over the first 8 bytes instead of all of
+  them cost 10-25 us per operation once 20k keys shared that prefix.
 
   The table is 8 byte slots of a 32 bit hash and an id, with the keys stored once beside it in an
   `arnm_bvec`; linear probing, at most three quarters full, no delete and so no tombstones. Both
