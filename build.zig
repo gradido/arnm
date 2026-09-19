@@ -260,6 +260,7 @@ pub fn build(b: *std.Build) void {
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_json_reader", .srcs = &.{"test_json_reader.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_json_writer", .srcs = &.{"test_json_writer.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_key_map", .srcs = &.{"test_key_map.cpp"} }, path);
+        processBuildTarget(&context, .{ .link_googletest = true, .name = "test_roaring_bitmap", .srcs = &.{"test_roaring_bitmap.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_multi_arena", .srcs = &.{"test_multi_arena.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_result", .srcs = &.{"test_result.cpp"} }, path);
         processBuildTarget(&context, .{ .link_googletest = true, .name = "test_utf8", .srcs = &.{"test_utf8.cpp"} }, path);

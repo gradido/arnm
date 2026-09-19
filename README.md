@@ -56,6 +56,7 @@ allocator is on no path this library takes.
 | `arnm/bucket_vector.h` | growing sequence with stable element addresses; no copy on growth |
 | `arnm/hash.h` | a fast hash and SipHash-1-3, both over every byte and inline, so a length known at compile time unrolls the loops |
 | `arnm/key_map.h` | fixed size keys to dense ids 0, 1, 2, ...; linear probing over a hash of every key byte -- a fast one, or SipHash under your key -- the keys stored once beside the table; `ARNM_KEY_MAP_DEFINE` inlines the lookup for one key size |
+| `arnm/roaring_bitmap.h` | compressed set of `uint32_t` values added in ascending order; roaring arrays and bitmaps from a graded block pool, ranged and/or/andnot, counts and pages without building a range set |
 | `arnm/fixed_ring.h` | bounded queue, first in first out; the room taken once, a full ring refuses rather than grows |
 | `arnm/json_reader.h` | JSON parsed into your arena; one line per struct field, the first error kept with its field name, an in-situ path that copies nothing |
 | `arnm/json_writer.h` | the way back: one line per struct field, strings and keys borrowed rather than copied, and the text rendered straight into the allocator you name |
